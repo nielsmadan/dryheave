@@ -3,7 +3,9 @@
 Dryheave builds reusable interactive coding-agent benchmarks from frozen inputs
 and retained evidence. Import Codex/Claude logs, curate cases and personas, and
 freeze exact historical repositories with their reachable Git ancestry. The core
-also provides immutable storage, aliases and durable run journals.
+also provides immutable storage, aliases and durable run journals. Capture selected
+agent profiles, derive immutable variants, and prepare exact native launch plans
+with explicit discovery and authentication limitations.
 
 Requires Python 3.13 or newer. For development, install uv, just and Lefthook,
 then run `just setup`, `just check`, and `just coverage`.
@@ -31,5 +33,16 @@ Store artifacts can contain sensitive task evidence and should be kept private.
 
 See [authoring](docs/tech/authoring.md) for collection commands, editable drafts,
 historical snapshots and replay APIs. See [storage contracts](docs/tech/storage.md)
-for immutable artifacts and recovery rules. Build an sdist and wheel with
+for immutable artifacts and recovery rules. See [profiles](docs/tech/profiles.md)
+for capture/derive specifications, project overlays and native preflight. Build an sdist and wheel with
 `just build`.
+
+```sh
+uv run dryheave --store .dryheave profile capture everyday --spec .cache/capture.json --json
+uv run dryheave --store .dryheave profile inspect everyday --json
+uv run dryheave --store .dryheave profile preflight everyday --destination .cache/trial/profile --workspace .cache/trial/repo --json
+```
+
+Profile preparation preserves native HOME by default and creates a fresh agent
+config root. Captured mode reports unresolved ambient sources; `--strict` refuses
+them. Preparation does not start an agent or bind authentication.

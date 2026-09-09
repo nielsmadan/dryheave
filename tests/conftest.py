@@ -61,3 +61,50 @@ def historical_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
         .strip()
     )
     return repo, baseline, future, unreachable
+
+
+import sys
+
+from dryheave.models import AgentKind
+from dryheave.profile_models import AssetSelection, CaptureLimits, CaptureSpec, NativeRecipe
+from dryheave.profiles import capture_profile
+
+
+def profile_recipe(**changes) -> NativeRecipe:
+    return NativeRecipe(
+        agent=AgentKind.CODEX, executable=sys.executable, version="0.153.4", **changes
+    )
+
+
+def profile_selection(
+    path: str,
+    *,
+    target: str | None = None,
+    kind="instruction",
+    layer="global",
+    overlay="preserve",
+    target_root=None,
+) -> AssetSelection:
+    return AssetSelection(
+        root="selected",
+        path=path,
+        kind=kind,
+        layer=layer,
+        target_root=target_root or ("project" if layer == "project" else "config"),
+        target=target or path,
+        overlay=overlay,
+    )
+
+
+def capture_profile_fixture(
+    store, source: Path, *assets: AssetSelection, native=None, limits=None
+) -> str:
+    return capture_profile(
+        store,
+        CaptureSpec(
+            recipe=native or profile_recipe(),
+            include_roots={"selected": str(source)},
+            assets=assets,
+            limits=limits or CaptureLimits(),
+        ),
+    )
