@@ -86,4 +86,4 @@ addopts = "--basetemp=.cache/pytest"
 packages = ["src/dryheave"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/dryheave", "tests", "docs/tech", "docs/decisions", "README.md", "LICENSE", "AGENTS.md", "CLAUDE.md", "Justfile", "lefthook.yml", "uv.lock"]
+include = ["src/dryheave", "tests", "docs/user", "docs/tech", "docs/decisions", "docs/tests", "README.md", "LICENSE", "AGENTS.md", "CLAUDE.md", "Justfile", "lefthook.yml", "uv.lock"]

@@ -105,12 +105,12 @@ def test_domain_commands_register_without_importing_cli_in_services(
         return {"title": args.title, "store": str(store.root)}
 
     def register(registry: CommandRegistry) -> None:
-        command = registry.add("example", help_text="Registered by a domain CLI module.")
+        command = registry.add("extension", help_text="Registered by a domain CLI module.")
         command.add_argument("title")
         registry.handler(command, handle)
 
     assert (
-        main(["example", "Task", "--store", str(tmp_path), "--json"], registrars=(register,)) == 0
+        main(["extension", "Task", "--store", str(tmp_path), "--json"], registrars=(register,)) == 0
     )
     assert json.loads(capsys.readouterr().out)["data"] == {"title": "Task", "store": str(tmp_path)}
 

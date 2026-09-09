@@ -132,6 +132,7 @@ class FrozenProfile(StrictModel):
     limits: CaptureLimits
     issues: tuple[ProfileIssue, ...] = ()
     parent_id: ObjectId | None = None
+    superseded_skill_paths: tuple[Text, ...] = Field(default=(), max_length=2048)
 
     @model_validator(mode="after")
     def distinct_assets(self) -> Self:

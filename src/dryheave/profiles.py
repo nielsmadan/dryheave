@@ -8,6 +8,7 @@ from dryheave.profile_capture import SelectedReader, validate_target
 from dryheave.profile_models import (
     CaptureSpec,
     DeriveSpec,
+    FrozenAsset,
     FrozenProfile,
     NativeRecipe,
     ProfileIssue,
@@ -166,6 +167,21 @@ def load_profile(store: ObjectStore, reference: str) -> FrozenProfile:
     return profile
 
 
+def _superseded_skills(parent: FrozenProfile, assets: dict[str, FrozenAsset]) -> tuple[str, ...]:
+    paths = set(parent.superseded_skill_paths)
+    for asset in parent.assets:
+        if asset.selection.kind != "skill" or PurePosixPath(asset.target).name != "SKILL.md":
+            continue
+        replacement = assets.get(asset.blob)
+        if (
+            replacement is None
+            or replacement.selection.kind != "skill"
+            or replacement.resolved_source != asset.resolved_source
+        ):
+            paths.add(asset.resolved_source)
+    return tuple(sorted(paths))
+
+
 def derive_profile(
     store: ObjectStore, reference: str, spec: DeriveSpec, *, base: Path | None = None
 ) -> str:
@@ -202,6 +218,7 @@ def derive_profile(
         assets=tuple(sorted(assets.values(), key=lambda item: item.blob)),
         limits=parent.limits,
         parent_id=parent_id,
+        superseded_skill_paths=_superseded_skills(parent, assets),
     )
     if (
         len(files) > parent.limits.max_files
@@ -227,6 +244,10 @@ def diff_profiles(store: ObjectStore, before: str, after: str) -> dict[str, obje
         "after": store.resolve(after),
         "recipe_changes": {
             key: {"before": a[key], "after": b[key]} for key in a if a[key] != b[key]
+        },
+        "superseded_skill_paths": {
+            "before": list(left.superseded_skill_paths),
+            "after": list(right.superseded_skill_paths),
         },
         "added": sorted(new.keys() - old.keys()),
         "removed": sorted(old.keys() - new.keys()),

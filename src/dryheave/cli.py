@@ -11,6 +11,7 @@ from dryheave.authoring_cli import register_authoring
 from dryheave.commands import ArgumentParser, CommandHandler, CommandRegistrar, CommandRegistry
 from dryheave.constants import VERSION
 from dryheave.errors import DryheaveError, InputError
+from dryheave.operator_cli import register_operators
 from dryheave.profile_cli import register_profiles
 from dryheave.result_cli import register_results
 from dryheave.runner_cli import register_runner
@@ -86,6 +87,7 @@ def build_parser(registrars: Sequence[CommandRegistrar] = ()) -> ArgumentParser:
     register_profiles(registry)
     register_runner(registry)
     register_results(registry)
+    register_operators(registry)
     for registrar in registrars:
         registrar(registry)
     return parser

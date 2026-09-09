@@ -1,5 +1,6 @@
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -179,7 +180,7 @@ def test_explicit_launcher_argv_and_missing_reference(store, tmp_path: Path) -> 
         launcher=(sys.executable, "wrapper.py", "--native"),
         arguments=("--sandbox", "workspace-write"),
         environment=(EnvironmentReference(name="AUTH_REFERENCE"),),
-        disabled_skill_paths=("/synthetic/skill/SKILL.md",),
+        disabled_skill_paths=('/synthetic/skill "quoted" ü 🚀/SKILL.md',),
     )
     identifier = capture_profile(store, CaptureSpec(recipe=native))
     plan = preflight_profile(store, identifier, tmp_path / "runtime", workspace)
@@ -190,7 +191,13 @@ def test_explicit_launcher_argv_and_missing_reference(store, tmp_path: Path) -> 
         "--sandbox",
         "workspace-write",
     )
-    assert 'path="/synthetic/skill/SKILL.md",enabled=false' in plan.argv[-1]
+    rules = tomllib.loads(plan.argv[-1])["skills"]["config"]
+    assert rules == [
+        {"name": "dryheave-collect", "enabled": False},
+        {"name": "dryheave-case", "enabled": False},
+        {"name": "dryheave-results", "enabled": False},
+        {"path": '/synthetic/skill "quoted" ü 🚀/SKILL.md', "enabled": False},
+    ]
     assert "launcher-effects" in {issue.code for issue in plan.issues}
     with pytest.raises(InputError, match="AUTH_REFERENCE"):
         launch_environment(plan, {})
@@ -371,7 +378,7 @@ def test_captured_skill_disables_original_source_path_not_derived_copy(
     from dryheave.profiles import derive_profile
 
     home = tmp_path / "native-home"
-    source = home / ".agents/skills/original"
+    source = home / '.agents/skills/original "quoted" ü 🚀'
     source.mkdir(parents=True)
     (source / "SKILL.md").write_text("Original skill")
     monkeypatch.setenv("HOME", str(home))
@@ -383,8 +390,13 @@ def test_captured_skill_disables_original_source_path_not_derived_copy(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     plan = materialize_profile(store, changed, tmp_path / "runtime", workspace)
-    rule = "path=" + json.dumps(str(source / "SKILL.md")) + ",enabled=false"
-    assert rule in plan.argv[-1]
+    rules = tomllib.loads(plan.argv[-1])["skills"]["config"]
+    assert rules == [
+        {"name": "dryheave-collect", "enabled": False},
+        {"name": "dryheave-case", "enabled": False},
+        {"name": "dryheave-results", "enabled": False},
+        {"path": str(source / "SKILL.md"), "enabled": False},
+    ]
     frozen = tmp_path / "runtime/config/skills/original/SKILL.md"
     assert frozen.read_text() == "Original skill"
     disabled = [root.path for root in plan.discovery_roots if root.status == "disabled"]
@@ -398,12 +410,63 @@ def test_explicit_owned_workspace_trust_is_separate_from_native_permissions(stor
     from dryheave.profile_models import CaptureSpec
     from dryheave.profiles import capture_profile
 
-    root = tmp_path / 'workspace "quoted"'
+    root = tmp_path / 'workspace.with dots "quoted" ü 🚀'
     root.mkdir()
     identifier = capture_profile(store, CaptureSpec(recipe=profile_recipe(workspace_trust=trust)))
     plan = materialize_profile(store, identifier, tmp_path / "runtime", root)
-    import json
-
     assert plan.workspace_trust == trust
-    assert "projects." + json.dumps(str(root)) + ".trust_level=" + json.dumps(trust) in plan.argv
+    override = next(value for value in plan.argv if value.startswith("projects="))
+    key, value = override.split("=", 1)
+    assert key.split(".") == ["projects"]
+    assert tomllib.loads("value=" + value)["value"] == {str(root): {"trust_level": trust}}
     assert plan.fidelity == "captured"
+
+
+@pytest.mark.parametrize("operation", ["replace", "remove"])
+def test_derived_skill_keeps_original_source_disabled_across_lineage(store, tmp_path, operation):
+    from dryheave.profile_models import DeriveSpec
+    from dryheave.profiles import derive_profile, diff_profiles, load_profile
+
+    source = tmp_path / "installed"
+    source.mkdir()
+    original = source / "SKILL.md"
+    original.write_text("Original installed skill")
+    selected = selection("SKILL.md", target="skills/review/SKILL.md", kind="skill")
+    parent = capture(store, source, selected)
+    frozen_parent = load_profile(store, parent)
+    blob = "global/config/skills/review/SKILL.md"
+    if operation == "replace":
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        (scratch / "SKILL.md").write_text("Changed skill behavior")
+        spec = DeriveSpec(
+            additions=CaptureSpec(
+                recipe=frozen_parent.recipe,
+                include_roots={"selected": str(scratch)},
+                assets=(selected,),
+            ),
+            replace=(blob,),
+        )
+    else:
+        spec = DeriveSpec(remove=(blob,))
+    changed = derive_profile(store, parent, spec)
+    later = derive_profile(store, changed, DeriveSpec(recipe_changes={"model": "later-model"}))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    plan = materialize_profile(store, later, tmp_path / "runtime", workspace)
+    rules = tomllib.loads(next(value for value in plan.argv if value.startswith("skills.config=")))
+    disabled = {rule["path"] for rule in rules["skills"]["config"] if "path" in rule}
+    assert str(original) in disabled
+    assert load_profile(store, later).superseded_skill_paths == (str(original),)
+    assert load_profile(store, parent) == frozen_parent
+    assert diff_profiles(store, parent, changed)["superseded_skill_paths"] == {
+        "before": [],
+        "after": [str(original)],
+    }
+    if operation == "replace":
+        frozen = tmp_path / "runtime/config/skills/review/SKILL.md"
+        assert frozen.read_text() == "Changed skill behavior"
+        assert str(scratch / "SKILL.md") in disabled
+        assert str(frozen) not in disabled
+    else:
+        assert load_profile(store, later).assets == ()

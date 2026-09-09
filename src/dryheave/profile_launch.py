@@ -65,7 +65,7 @@ def _environment(
 
 
 def _disabled_paths(profile: FrozenProfile, roots: dict[str, str]) -> tuple[str, ...]:
-    paths = set(profile.recipe.disabled_skill_paths)
+    paths = set(profile.recipe.disabled_skill_paths) | set(profile.superseded_skill_paths)
     for asset in profile.assets:
         destination = Path(roots[asset.selection.target_root]) / asset.target
         if (
@@ -84,23 +84,27 @@ def _codex_args(profile: FrozenProfile, roots: dict[str, str]) -> list[str]:
         arguments.extend(
             (
                 "--config",
-                "projects."
-                + json.dumps(roots["project"])
-                + ".trust_level="
-                + json.dumps(recipe.workspace_trust),
+                "projects={"
+                + json.dumps(roots["project"], ensure_ascii=False)
+                + "={trust_level="
+                + json.dumps(recipe.workspace_trust, ensure_ascii=False)
+                + "}}",
             )
         )
     if recipe.model:
         arguments.extend(("--model", recipe.model))
     if recipe.effort:
-        arguments.extend(("--config", "model_reasoning_effort=" + json.dumps(recipe.effort)))
+        arguments.extend(
+            ("--config", "model_reasoning_effort=" + json.dumps(recipe.effort, ensure_ascii=False))
+        )
     rules = [
-        "{name=" + json.dumps(name) + ",enabled=false}" for name in recipe.disabled_skill_names
+        "{name=" + json.dumps(name, ensure_ascii=False) + ",enabled=false}"
+        for name in recipe.disabled_skill_names
     ]
     for path in _disabled_paths(profile, roots):
         if not Path(path).is_absolute():
             raise InputError("Disabled skill paths must name absolute SKILL.md paths.")
-        rules.append("{path=" + json.dumps(path) + ",enabled=false}")
+        rules.append("{path=" + json.dumps(path, ensure_ascii=False) + ",enabled=false}")
     if rules:
         arguments.extend(("--config", "skills.config=[" + ",".join(rules) + "]"))
     return arguments

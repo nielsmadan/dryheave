@@ -260,7 +260,22 @@ operation changes subscription authentication into API billing. See
 
 A Codex recipe may explicitly set `workspace_trust` to `trusted` or `untrusted`.
 The default `prompt` preserves native onboarding. Materialization adds the exact
-owned workspace's `projects."PATH".trust_level` argv override and records the
+owned workspace as a `projects={"PATH"={trust_level="trusted"}}` argv override and records the
 choice in `LaunchPlan`. It preserves captured config bytes and existing native
 permission/sandbox settings. Non-prompt trust choices currently reject Claude;
 no global trust store is copied or modified. See runner.md for native execution.
+
+The whole `projects` value keeps workspace paths as literal TOML keys. Codex
+0.153.4's [CLI override parser](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/config/src/overrides.rs)
+splits dotted override keys without interpreting quotes. A quoted path in the
+override key therefore does not establish the intended trust setting. The final
+native smoke exposed this and stopped at trust onboarding; the corrected value
+encoding has offline regression coverage. A complete live task after this
+correction remains unverified; see [the native QA record](../tests/qa-cli/runs/2026-09-09-native.md).
+
+Derived profiles retain `superseded_skill_paths` when a selected `SKILL.md` is
+removed or replaced from another source. Codex launch rules disable those original
+paths as well as the current selected source, so a scratch replacement does not
+reactivate the older installed skill. The provenance survives later derivations
+and is shown by profile diff. Frozen copies remain enabled. Claude's ambient
+skill discovery retains the separate native-fidelity limitations described above.
