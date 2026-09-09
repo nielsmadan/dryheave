@@ -128,12 +128,9 @@ def role_metrics(
 
 def saved_judge_calls(execution: ExecutionJournal, state: AttemptState) -> tuple[RoleCall, ...]:
     calls: dict[str, RoleCall] = {}
-    for event in execution.journal.events:
-        if event.attempt_id == state.attempt_id and event.event in {"judge-intent", "judge-result"}:
-            call = parse_model(canonical_json(event.data), RoleCall)
-            calls[call.call_id] = (
-                call.model_copy(update={"status": "interrupted"})
-                if call.status == "intent"
-                else call
-            )
+    for event in execution.events_for(state.attempt_id, "judge-intent", "judge-result"):
+        call = parse_model(canonical_json(event.data), RoleCall)
+        calls[call.call_id] = (
+            call.model_copy(update={"status": "interrupted"}) if call.status == "intent" else call
+        )
     return tuple(calls.values())

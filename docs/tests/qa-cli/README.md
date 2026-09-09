@@ -89,11 +89,13 @@ in this build. Their local raw stores are investigative artifacts. The durable
 fixtures for repeating those behaviors are in:
 
 - [assessment recovery tests](../../../tests/test_assessment_recovery.py): observed detached child cleanup after an assessor exits, recovery before any new subject launch, and PID reuse protection.
+- [native recovery tests](../../../tests/test_native_recovery.py): cleanup before corrupted input validation, cross-run ownership reconciliation and setup descendant persistence.
 - [grading tests](../../../tests/test_grading.py): success/failure execution evidence, missing markers and signal exits.
 - [integrity tests](../../../tests/test_integrity.py): suspected access review and immutable corruption boundaries.
 - [assessment tests](../../../tests/test_assessments.py): retained calibration, future-object contamination and interrupted grading suites.
 - [bundle tests](../../../tests/test_bundles.py): malformed input, explicit evidence selection, atomic publication and alias collisions.
 - [report tests](../../../tests/test_reports.py): latest-attempt selection, unassessed retries, unknown spending and attrition.
+- [role accounting tests](../../../tests/test_role_accounting.py): independently retained settings and native usage when simulator or judge responses fail validation.
 
 Run these through `uv run pytest PATH -q` as needed; use `just check` for the
 required complete check. Do not run suites concurrently: they share the configured

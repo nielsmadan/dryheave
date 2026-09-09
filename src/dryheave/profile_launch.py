@@ -497,6 +497,7 @@ def materialize_profile(
         store, reference, destination, workspace, strict=strict, probe_version=probe_version
     )
     profile = load_profile(store, plan.profile_id)
+    files = store.read_blobs(plan.profile_id)
     root = Path(plan.config_roots["runtime"])
     ensure_directory(root.parent)
     os.mkdir(root, mode=0o700)
@@ -516,7 +517,7 @@ def materialize_profile(
             raise InputError("Project file changed after preflight; replacement refused.")
         atomic_write(
             target,
-            store.read_blob(plan.profile_id, overlay.blob),
+            files[overlay.blob],
             replace=overlay.action == "replace",
         )
         asset = next(item for item in profile.assets if item.blob == overlay.blob)

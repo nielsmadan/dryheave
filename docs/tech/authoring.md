@@ -197,13 +197,18 @@ excluded. The adapter reads both Codex legacy response/event messages and 0.153.
 paginated capitalized item completions; duplicate message representations collapse
 while distinct turns remain distinct. Claude text/tool blocks remain ordered.
 
+Codex dialogue deduplication indexes ordered candidates by native ID, text and
+turn. It consumes the earliest compatible event representation, including
+missing-turn fallbacks, without rescanning all previous candidates per message.
+
 Usage keeps raw category records and provenance. Codex response IDs take precedence
 over legacy cumulative token counts; the latter remain marked `superseded` when
 response records exist. Without response records, cumulative records remain
 cumulative and must never be summed as separate calls. Claude snapshots deduplicate
 by message ID. Input categories are non-overlapping: Codex uncached input subtracts
-known cached and cache-write categories; Claude input is already uncached. Unknown
-categories remain null. Claude `cost_state` metadata is preserved separately from
+cached and cache-write input only when both categories are observed; otherwise it
+remains unknown. Claude input is already uncached. Unknown categories remain null.
+Claude `cost_state` metadata is preserved separately from
 per-message usage. Mixed or incomplete recorded coverage does not establish a
 complete session cost.
 

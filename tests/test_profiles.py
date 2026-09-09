@@ -8,6 +8,7 @@ from conftest import profile_recipe as recipe
 from conftest import profile_selection as selection
 from dryheave.errors import InputError, IntegrityError, LimitError, PathError
 from dryheave.models import AgentKind, EnvironmentReference, ObjectKind
+from dryheave.profile_launch import materialize_profile
 from dryheave.profile_models import (
     CaptureLimits,
     CaptureSpec,
@@ -17,6 +18,53 @@ from dryheave.profile_models import (
 )
 from dryheave.profiles import capture_profile, derive_profile, diff_profiles, load_profile
 from dryheave.serialization import canonical_json, parse_model
+
+
+@pytest.mark.parametrize("operation", ["load", "derive", "materialize"])
+def test_profile_verification_growth_is_bounded_and_each_operation_detects_tampering(
+    store, tmp_path, monkeypatch, operation
+):
+    calls = []
+    verification_counts = []
+    verify = store.verify
+
+    def recorded_verify(identifier):
+        calls.append(identifier)
+        return verify(identifier)
+
+    def apply(identifier, destination):
+        if operation == "load":
+            return load_profile(store, identifier)
+        if operation == "derive":
+            return derive_profile(
+                store, identifier, DeriveSpec(recipe_changes={"model": "changed"})
+            )
+        workspace = destination.with_name(destination.name + "-workspace")
+        workspace.mkdir()
+        return materialize_profile(store, identifier, destination, workspace)
+
+    for count in (1, 30):
+        source = tmp_path / f"source-{count}"
+        assets = source / "tree"
+        assets.mkdir(parents=True)
+        for index in range(count):
+            (assets / f"asset-{index}.txt").write_text(f"resource {index}\n")
+        identifier = capture(
+            store, source, selection("tree", kind="resource", target="resources/tree")
+        )
+        calls.clear()
+        with monkeypatch.context() as scoped:
+            scoped.setattr(store, "verify", recorded_verify)
+            apply(identifier, tmp_path / f"materialized-{count}")
+        verification_counts.append(len(calls))
+    assert verification_counts[0] > 0
+    assert verification_counts[1] == verification_counts[0]
+    manifest = store.get(identifier)
+    (store.object_path(identifier) / "blobs" / next(iter(manifest.files.values()))).write_text(
+        "tampered"
+    )
+    with pytest.raises(IntegrityError, match="hash mismatch"):
+        apply(identifier, tmp_path / "materialized-after-tampering")
 
 
 def test_capture_freezes_actual_layered_bytes_and_exec_mode(store, tmp_path: Path) -> None:

@@ -152,7 +152,7 @@ def load_profile(store: ObjectStore, reference: str) -> FrozenProfile:
         raise IntegrityError("Profile parent references do not match its manifest.")
     if manifest.files != {item.blob: item.sha256 for item in profile.assets}:
         raise IntegrityError("Profile asset hashes do not match its manifest.")
-    files = {name: store.read_blob(reference, name) for name in manifest.files}
+    files = store.read_blobs(reference)
     if (
         sum(map(len, files.values())) > profile.limits.max_total_bytes
         or len(files) > profile.limits.max_files
@@ -194,7 +194,7 @@ def derive_profile(
     recipe_data = parent.recipe.model_dump(mode="json") | changes
     recipe = parse_model(json.dumps(recipe_data).encode(), NativeRecipe)
     assets = {item.blob: item for item in parent.assets}
-    files = {name: store.read_blob(parent_id, name) for name in assets}
+    files = store.read_blobs(parent_id)
     if len(set(spec.remove)) != len(spec.remove) or set(spec.remove) & set(spec.replace):
         raise InputError("Removal and replacement selections must be distinct.")
     for name in spec.remove:

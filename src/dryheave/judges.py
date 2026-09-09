@@ -4,13 +4,18 @@ from typing import Literal
 from pydantic import Field
 
 from dryheave.cases import FrozenCase, RubricCriterion
-from dryheave.controller_models import ControllerRecipe, RoleCall
+from dryheave.controller_models import ControllerRecipe, RoleCall, RoleObservation
 from dryheave.controller_schema import controller_schema
-from dryheave.controllers import CallContext, controller_command, failure_usage, run_role_command
+from dryheave.controllers import (
+    CallContext,
+    controller_command,
+    failure_observation,
+    run_role_command,
+)
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.errors import DryheaveError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
-from dryheave.models import Name, StrictModel, TokenUsage
+from dryheave.models import Name, StrictModel
 from dryheave.result_models import CriterionResult
 from dryheave.runner_models import CapturedAttempt
 from dryheave.serialization import canonical_json, digest, parse_model
@@ -23,11 +28,8 @@ class Judgment(StrictModel):
     rationale: str = Field(min_length=1, max_length=8000)
 
 
-class JudgeResponse(StrictModel):
+class JudgeResponse(RoleObservation):
     judgments: tuple[Judgment, ...]
-    usage: TokenUsage | None = None
-    observed_model: str | None = None
-    observed_effort: str | None = None
 
 
 class JudgeInput(StrictModel):
@@ -65,7 +67,7 @@ def invoke_judge(
     recipe: ControllerRecipe, request: JudgeInput, artifacts: ArtifactWriter, context: CallContext
 ) -> tuple[RoleCall, tuple[CriterionResult, ...]]:
     started = time.monotonic()
-    usage = None
+    observation = RoleObservation()
     response = None
     error_name = None
     try:
@@ -82,7 +84,7 @@ def invoke_judge(
         command = controller_command(recipe, artifacts.root)
         artifacts.record("command", command)
         result = run_role_command(recipe, content, artifacts, context, command)
-        usage = failure_usage(recipe, artifacts)
+        observation = failure_observation(recipe, artifacts)
         if result.returncode or result.outcome != "exited":
             raise InputError("Judge command did not complete successfully.")
         raw = (
@@ -91,7 +93,13 @@ def invoke_judge(
             else result.stdout
         )
         response = parse_model(raw, JudgeResponse)
-        usage = usage if recipe.kind == "codex" else response.usage
+        if recipe.kind == "codex":
+            observation = observation.model_copy(
+                update={
+                    "observed_model": response.observed_model,
+                    "observed_effort": response.observed_effort,
+                }
+            )
         ids = [item.criterion_id for item in response.judgments]
         if len(ids) != len(set(ids)) or not set(ids) <= {
             item.criterion_id for item in request.criteria
@@ -100,7 +108,8 @@ def invoke_judge(
         artifacts.record("response", response)
     except (DryheaveError, OSError) as error:
         error_name = type(error).__name__
-        usage = usage or failure_usage(recipe, artifacts)
+        if response is None:
+            observation = failure_observation(recipe, artifacts)
         response = None
         artifacts.record("error", {"type": error_name, "message": str(error)})
     call = RoleCall(
@@ -108,9 +117,9 @@ def invoke_judge(
         role="judge",
         status="failed" if error_name else "completed",
         elapsed_seconds=time.monotonic() - started,
-        usage=usage,
-        observed_model=response.observed_model if response else None,
-        observed_effort=response.observed_effort if response else None,
+        usage=observation.usage,
+        observed_model=observation.observed_model,
+        observed_effort=observation.observed_effort,
         error=error_name,
         cleanup=context.cleanup,
         usage_reason="Judge usage is retained independently of partial or failed judgments.",

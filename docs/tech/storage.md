@@ -119,6 +119,10 @@ newline. Those bytes are preserved as `torn-<id>.bin`, exposed as
 before another append. A complete malformed line is never silently discarded.
 Event snapshots returned to callers are copied so mutation cannot alter the
 in-memory sequence used for later hash chaining.
+`sequence` exposes the durable event count without copying events.
+`events_since(sequence)` returns defensive copies of the subsequent events and
+rejects cursors outside the current prefix. Assessment indexes use that suffix
+to observe appends while preserving the read-only report's original prefix.
 
 These checks detect corruption and serialize cooperating processes. They are not
 a security sandbox: a native process with filesystem access can still alter data,

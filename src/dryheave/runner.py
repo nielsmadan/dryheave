@@ -6,14 +6,14 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
-from dryheave.assessment_recovery import reconcile_grading
 from dryheave.cases import load_frozen_case
 from dryheave.drivers.tui_test import MAX_RUNTIME_PATH_BYTES
-from dryheave.errors import InputError
+from dryheave.errors import DryheaveError, InputError
 from dryheave.experiment_models import FrozenExperiment
 from dryheave.experiments import inspect_experiment, load_experiment
 from dryheave.journals import RunStore
 from dryheave.models import ObjectKind, TrialStage
+from dryheave.native_recovery import reconcile_store_ownership
 from dryheave.runner_attempt import TrialExecution
 from dryheave.runner_models import CapturedAttempt, RunOptions, RunSummary
 from dryheave.runner_recovery import recover_attempt
@@ -153,12 +153,29 @@ def run_experiment(
     cancelled = cancelled or threading.Event()
     with RunStore(store.root).open(resume, experiment_id=identifier) as journal:
         execution = ExecutionJournal(journal)
-        experiment = load_experiment(store, journal.metadata.experiment_id)
         if execution.options is None:
             execution.configure(_options(options or RunOptions()))
         elif options is not None and execution.options != _options(options):
             raise InputError("Resume cannot change frozen run execution options.")
         with store.native_lock(), cancellation_signals(cancelled):
+            reconcile_store_ownership(store, execution)
+            try:
+                experiment = load_experiment(store, journal.metadata.experiment_id)
+            except DryheaveError as error:
+                journal.append(
+                    "input-integrity-failed", {"code": error.code, "message": str(error)}
+                )
+                for state in tuple(execution.attempts.values()):
+                    if state.stage == TrialStage.STOPPING and state.capture_id is None:
+                        execution.save(
+                            state.model_copy(
+                                update={
+                                    "stop_reason": "invalid_inputs",
+                                    "capture_error": str(error),
+                                }
+                            )
+                        )
+                raise
             _run_trials(store, execution, experiment, retry, cancelled, os.environ)
         result = _summary(execution, experiment)
         journal.write_result(result.model_dump(mode="json"))
@@ -177,11 +194,11 @@ def _run_trials(
     attempted = {state.trial_id for state in execution.attempts.values()}
     if len(set(retry)) != len(retry) or any(identifier not in attempted for identifier in retry):
         raise InputError("Retry must name distinct previously attempted trials in this run.")
+    if any(state.capture_error for state in execution.attempts.values()):
+        raise InputError("Frozen input integrity failed; further subject launches are blocked.")
     for state in tuple(execution.attempts.values()):
         if state.trial_id not in trials:
             raise InputError("Journal names a trial outside its experiment.")
-        if state.stage in {TrialStage.GRADING, TrialStage.FINISHED}:
-            reconcile_grading(execution, state)
         if state.stage in {
             TrialStage.RESERVED,
             TrialStage.PREPARING,
@@ -196,15 +213,6 @@ def _run_trials(
             )
     if any(state.capture_error for state in execution.attempts.values()):
         raise InputError("Frozen input integrity failed; further subject launches are blocked.")
-    cleanups = (
-        load_capture(store, state.capture_id).cleanup
-        for state in execution.attempts.values()
-        if state.capture_id is not None
-    )
-    if any(not report.terminal_closed or not report.known_writers_stopped for report in cleanups):
-        raise InputError(
-            f"Run {execution.journal.metadata.run_id} has unresolved terminal or writer cleanup; retained attempts require reconciliation before another subject launch."
-        )
     for trial in experiment.trials:
         if cancelled.is_set():
             break

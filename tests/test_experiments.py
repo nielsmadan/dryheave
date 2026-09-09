@@ -1,9 +1,13 @@
+import sys
+
 import pytest
 
+from dryheave.cases import RubricCriterion, load_frozen_case
+from dryheave.controller_models import ControllerRecipe, RoleBudget
 from dryheave.errors import InputError
-from dryheave.experiment_models import VariantSpec
-from dryheave.experiments import create_experiment, load_experiment, validate_experiment
-from dryheave.models import ObjectKind
+from dryheave.experiment_models import ScoringConfig, VariantSpec
+from dryheave.experiments import create_experiment, load_experiment, references, validate_experiment
+from dryheave.models import CommandSpec, ObjectKind
 from dryheave.profile_models import DeriveSpec
 from dryheave.profiles import derive_profile, load_profile
 
@@ -68,3 +72,67 @@ def test_controller_literal_credentials_are_rejected_without_echo(store, benchma
     with pytest.raises(InputError, match="runtime reference") as error:
         validate_experiment(store, benchmark.model_copy(update={"simulator": recipe}))
     assert "synthetic-credential" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "rubric, judge_kind, valid",
+    [
+        ("required", "absent", False),
+        ("required", "scripted", False),
+        ("required", "disabled", False),
+        ("required", "enabled", True),
+        ("optional", "absent", True),
+        ("optional", "scripted", False),
+        ("none", "scripted", False),
+    ],
+)
+def test_judge_usability_is_checked_in_drafts_and_frozen_loads(
+    store, benchmark, rubric, judge_kind, valid
+):
+    case = load_frozen_case(store, benchmark.cases[0])
+    if rubric != "none":
+        case = case.model_copy(
+            update={
+                "criteria": (
+                    *case.criteria,
+                    RubricCriterion(
+                        criterion_id="quality",
+                        required=rubric == "required",
+                        rubric="The implementation preserves the existing public interface.",
+                    ),
+                )
+            }
+        )
+    case_id = store.put(
+        ObjectKind.CASE,
+        case,
+        files=store.read_blobs(benchmark.cases[0]),
+        references=(case.persona_id, case.repository_id),
+    )
+    usable = ControllerRecipe(
+        kind="json-command",
+        isolation="trusted-native",
+        command=CommandSpec(argv=(sys.executable, "judge.py")),
+    )
+    judge = {
+        "absent": None,
+        "scripted": ControllerRecipe(),
+        "disabled": usable.model_copy(update={"budget": RoleBudget(max_calls=0)}),
+        "enabled": usable,
+    }[judge_kind]
+    draft = benchmark.model_copy(
+        update={"cases": (case_id,), "scoring": ScoringConfig(judge=judge)}
+    )
+    if valid:
+        validate_experiment(store, draft)
+        assert load_experiment(store, create_experiment(store, draft)).case_ids == (case_id,)
+        return
+    for operation in (validate_experiment, create_experiment):
+        with pytest.raises(InputError, match="judge"):
+            operation(store, draft)
+    usable_draft = draft.model_copy(update={"scoring": ScoringConfig(judge=usable)})
+    frozen = load_experiment(store, create_experiment(store, usable_draft))
+    frozen = frozen.model_copy(update={"scoring_id": store.put(ObjectKind.SCORING, draft.scoring)})
+    invalid = store.put(ObjectKind.EXPERIMENT, frozen, references=references(frozen))
+    with pytest.raises(InputError, match="judge"):
+        load_experiment(store, invalid)

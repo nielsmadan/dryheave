@@ -1,8 +1,6 @@
 from pathlib import Path
 from uuid import uuid4
 
-import psutil
-
 from dryheave.controller_models import DialogueMessage
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.fake import FakeTerminal
@@ -12,7 +10,7 @@ from dryheave.drivers.session import DriverSession
 from dryheave.errors import DryheaveError
 from dryheave.logs.base import mapping
 from dryheave.models import TrialStage
-from dryheave.process_ownership import ProcessOwner
+from dryheave.native_recovery import reconcile_attempt
 from dryheave.runner_attempt import TrialExecution
 from dryheave.serialization import canonical_json, parse_model
 
@@ -29,34 +27,7 @@ def recover_attempt(execution: TrialExecution) -> None:
         ),
     )
     _dialogue(execution)
-    owner = ProcessOwner()
-    errors = []
-    try:
-        for identity in execution.state.owned:
-            try:
-                process = psutil.Process(identity.pid)
-                if process.create_time() == identity.created:
-                    owner.add(process)
-            except psutil.NoSuchProcess:
-                continue
-            except psutil.AccessDenied:
-                errors.append("recovery_process_visibility_denied")
-    finally:
-        report = owner.stop(timeout=3, terminal_closed=False)
-    identity_known = (
-        not execution.state.launch_attempted
-        or (execution.state.launch is not None and execution.state.launch.daemon is not None)
-        or execution.options.mode == "offline-fixture"
-    )
-    if not identity_known:
-        errors.append("launch_ownership_unobserved")
-    execution.cleanup = report.model_copy(
-        update={
-            "terminal_closed": identity_known and report.known_writers_stopped,
-            "known_writers_stopped": identity_known and report.known_writers_stopped and not errors,
-            "errors": (*report.errors, *errors),
-        }
-    )
+    execution.cleanup = reconcile_attempt(execution.journal, execution.state)
     _drain(execution)
     execution.journal.evidence(execution.state, "recovery-cleanup", execution.cleanup)
     execution.capture()

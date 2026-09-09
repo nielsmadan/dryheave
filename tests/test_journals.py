@@ -16,6 +16,22 @@ from dryheave.journals import RunStore
 from dryheave.serialization import canonical_json, digest
 
 
+def test_event_suffix_is_defensive_and_checks_its_durable_cursor(tmp_path):
+    runs = RunStore(tmp_path)
+    with runs.open(runs.create("a" * 64)) as journal:
+        journal.append("first", {"value": "original"})
+        assert journal.sequence == 1
+        suffix = journal.events_since(0)
+        suffix[0].data["value"] = "changed"
+        assert journal.events[0].data == {"value": "original"}
+        journal.append("second")
+        assert [event.event for event in journal.events_since(1)] == ["second"]
+        assert journal.events_since(2) == ()
+        for cursor in (-1, 3):
+            with pytest.raises(InputError, match="durable event prefix"):
+                journal.events_since(cursor)
+
+
 def test_durable_events_checkpoints_and_results_survive_reopen(tmp_path: Path) -> None:
     runs = RunStore(tmp_path)
     identifier = runs.create("a" * 64)

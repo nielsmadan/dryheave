@@ -10,14 +10,24 @@ from uuid import uuid4
 from pydantic import Field
 
 from dryheave.bundle_validation import validate_bundle_object
+from dryheave.cases import load_frozen_case
 from dryheave.constants import MAX_BLOB_BYTES
-from dryheave.errors import ConflictError, DryheaveError, InputError, IntegrityError, LimitError
+from dryheave.errors import (
+    ConflictError,
+    DryheaveError,
+    InputError,
+    IntegrityError,
+    LimitError,
+    NotFoundError,
+)
 from dryheave.filesystem import atomic_write, ensure_directory, regular_fd
 from dryheave.models import Manifest, Name, ObjectId, ObjectKind, StrictModel
+from dryheave.personas import load_frozen_persona
 from dryheave.report_models import RunReport
 from dryheave.reports import report_run
 from dryheave.serialization import canonical_json, parse_model
 from dryheave.storage import ObjectStore, validated_alias
+from dryheave.tar_bounds import preflight_tar
 
 MAX_BUNDLE_BYTES = 1024 * 1024 * 1024
 MAX_BUNDLE_FILES = 200000
@@ -117,11 +127,13 @@ def _roots(
         roots.append(identifier)
         complete = {required} if required else set()
     if "source-sessions" in sensitive:
-        count = len(roots)
-        _source_sessions(store, roots)
-        if len(roots) > count:
+        available, missing = _source_sessions(store, roots)
+        complete.discard("source-sessions")
+        if available and not missing:
             complete.add("source-sessions")
-        elif "source-sessions" not in complete:
+        if missing:
+            omitted.extend(f"source-sessions unavailable: {identifier}" for identifier in missing)
+        elif not available:
             omitted.append("source-sessions unavailable in selected input closure")
     omitted = [item for item in omitted if RAW_CLASSES.get(item) not in complete]
     if report is not None:
@@ -131,9 +143,10 @@ def _roots(
     return list(dict.fromkeys(roots)), tuple(omitted)
 
 
-def _source_sessions(store: ObjectStore, roots: list[str]) -> None:
+def _source_sessions(store: ObjectStore, roots: list[str]) -> tuple[int, tuple[str, ...]]:
     pending = list(roots)
     seen = set()
+    sessions = set()
     while pending:
         identifier = pending.pop()
         if identifier in seen:
@@ -141,10 +154,29 @@ def _source_sessions(store: ObjectStore, roots: list[str]) -> None:
         seen.add(identifier)
         manifest = store.get(identifier)
         pending.extend(manifest.references)
-        session_id = manifest.payload.get("source_session_id")
-        if manifest.kind == ObjectKind.CASE and isinstance(session_id, str):
+        if manifest.kind == ObjectKind.SESSION:
+            sessions.add(identifier)
+        elif manifest.kind == ObjectKind.CASE:
+            case = load_frozen_case(store, identifier)
+            sessions.add(case.source_session_id)
+            sessions.update(item.session_id for item in case.evidence)
+            sessions.update(
+                item.session_id for fact in case.allowed_facts for item in fact.evidence
+            )
+        elif manifest.kind == ObjectKind.PERSONA:
+            persona = load_frozen_persona(store, identifier)
+            sessions.update(item.session_id for item in persona.examples)
+    missing = []
+    for session_id in sorted(sessions):
+        try:
             store.get(session_id, kind=ObjectKind.SESSION)
+        except NotFoundError:
+            if store.object_path(session_id).exists():
+                raise
+            missing.append(session_id)
+        else:
             roots.append(session_id)
+    return len(sessions) - len(missing), tuple(missing)
 
 
 def _objects(store: ObjectStore, roots: list[str]) -> dict[str, tuple[Manifest, dict[str, bytes]]]:
@@ -232,44 +264,45 @@ def export_bundle(
 
 
 def _unpack(source: Path, staging: Path) -> BundleManifest:
-    seen = set()
-    total = 0
-    manifest = None
     try:
         with (
             regular_fd(source, os.O_RDONLY) as descriptor,
             os.fdopen(os.dup(descriptor), "rb") as stream,
-            tarfile.open(fileobj=stream, mode="r:") as archive,
         ):
-            for member in archive:
-                if not member.isfile() or member.name in seen or member.size < 0:
-                    raise IntegrityError("Bundle contains a duplicate or non-regular entry.")
-                seen.add(member.name)
-                total += member.size
-                if (
-                    total > MAX_BUNDLE_BYTES
-                    or len(seen) > MAX_BUNDLE_FILES
-                    or member.size > MAX_BLOB_BYTES
-                ):
-                    raise LimitError("Bundle exceeds its extraction bounds.")
-                reader = archive.extractfile(member)
-                if reader is None:
-                    raise IntegrityError("Bundle entry has no content.")
-                content = reader.read(member.size + 1)
-                if len(content) != member.size:
-                    raise IntegrityError("Bundle entry is truncated.")
-                if member.name == "bundle.json":
-                    manifest = parse_model(content, BundleManifest)
-                    if canonical_json(manifest) != content:
-                        raise IntegrityError("Bundle manifest must be canonical.")
-                else:
-                    if not re.fullmatch(
-                        r"objects/[0-9a-f]{64}/(?:manifest\.json|blobs/[0-9a-f]{64})", member.name
-                    ):
-                        raise IntegrityError("Bundle contains an unexpected or unsafe path.")
-                    atomic_write(staging / member.name, content, replace=False)
+            preflight_tar(stream, max_bytes=MAX_BUNDLE_BYTES, max_files=MAX_BUNDLE_FILES)
+            with tarfile.open(fileobj=stream, mode="r:") as archive:
+                return _unpack_members(archive, staging)
     except tarfile.TarError as error:
         raise IntegrityError("Bundle archive is invalid or truncated.") from error
+
+
+def _unpack_members(archive: tarfile.TarFile, staging: Path) -> BundleManifest:
+    seen = set()
+    total = 0
+    manifest = None
+    for member in archive:
+        if not member.isfile() or member.name in seen or member.size < 0:
+            raise IntegrityError("Bundle contains a duplicate or non-regular entry.")
+        seen.add(member.name)
+        total += member.size
+        if total > MAX_BUNDLE_BYTES or len(seen) > MAX_BUNDLE_FILES or member.size > MAX_BLOB_BYTES:
+            raise LimitError("Bundle exceeds its extraction bounds.")
+        reader = archive.extractfile(member)
+        if reader is None:
+            raise IntegrityError("Bundle entry has no content.")
+        content = reader.read(member.size + 1)
+        if len(content) != member.size:
+            raise IntegrityError("Bundle entry is truncated.")
+        if member.name == "bundle.json":
+            manifest = parse_model(content, BundleManifest)
+            if canonical_json(manifest) != content:
+                raise IntegrityError("Bundle manifest must be canonical.")
+        else:
+            if not re.fullmatch(
+                r"objects/[0-9a-f]{64}/(?:manifest\.json|blobs/[0-9a-f]{64})", member.name
+            ):
+                raise IntegrityError("Bundle contains an unexpected or unsafe path.")
+            atomic_write(staging / member.name, content, replace=False)
     if manifest is None:
         raise IntegrityError("Bundle manifest is missing.")
     _verify_inventory(staging, manifest, seen)

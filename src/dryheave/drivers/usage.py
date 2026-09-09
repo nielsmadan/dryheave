@@ -3,6 +3,7 @@ from pydantic import JsonValue, ValidationError
 from dryheave.drivers.models import NativeEvent, NativeUsage
 from dryheave.logs.base import mapping, string
 from dryheave.models import AgentKind, TokenUsage
+from dryheave.token_usage import codex_usage
 
 
 def usage_record(agent: AgentKind, event: NativeEvent) -> NativeUsage:
@@ -20,32 +21,20 @@ def usage_record(agent: AgentKind, event: NativeEvent) -> NativeUsage:
         value = raw.get(key)
         return value if type(value) is int and value >= 0 else None
 
-    if agent == AgentKind.CODEX:
-        total, read, written = (
-            number("input_tokens"),
-            number("cached_input_tokens"),
-            number("cache_write_input_tokens"),
-        )
-        uncached = total - read - (written or 0) if total is not None and read is not None else None
-        reasoning = number("reasoning_output_tokens")
-    else:
-        uncached, read, written = (
-            number("input_tokens"),
-            number("cache_read_input_tokens"),
-            number("cache_creation_input_tokens"),
-        )
-        thinking: JsonValue | None = mapping(raw.get("output_tokens_details")).get(
-            "thinking_tokens"
-        )
-        reasoning = thinking if type(thinking) is int else None
+    provenance = f"{agent}.native-log:{event.source}:{event.line}"
+    thinking: JsonValue | None = mapping(raw.get("output_tokens_details")).get("thinking_tokens")
     try:
-        usage = TokenUsage(
-            uncached_input=uncached,
-            cache_read=read,
-            cache_write=written,
-            output=number("output_tokens"),
-            reasoning=reasoning,
-            provenance=f"{agent}.native-log:{event.source}:{event.line}",
+        usage = (
+            codex_usage(raw, protocol="native-log", provenance=provenance)
+            if agent == AgentKind.CODEX
+            else TokenUsage(
+                uncached_input=number("input_tokens"),
+                cache_read=number("cache_read_input_tokens"),
+                cache_write=number("cache_creation_input_tokens"),
+                output=number("output_tokens"),
+                reasoning=thinking if type(thinking) is int else None,
+                provenance=provenance,
+            )
         )
     except ValidationError:
         usage = None

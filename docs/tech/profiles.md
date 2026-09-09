@@ -135,6 +135,10 @@ logical blob paths. Unknown removals, implicit replacements and no-op derivation
 are errors. Derivation reads old blobs from the immutable parent, never from its
 source paths. Its new ID references the previous profile ID; moving an alias cannot
 change earlier experiments.
+Loading, deriving and materializing profiles each read asset bytes in a scoped
+batch, verifying the closure once per batch and hashing every returned asset.
+Verification is repeated at each operation boundary; no persistent cache can hide
+later changes to frozen bytes.
 
 ## LaunchPlan and runtime integration
 

@@ -166,7 +166,7 @@ def test_resume_refuses_subject_launch_when_grading_cleanup_is_unresolved(
     def unresolved(*_args):
         raise InputError("Assessment recovery could not reconcile all recorded writers.")
 
-    monkeypatch.setattr("dryheave.runner.reconcile_grading", unresolved)
+    monkeypatch.setattr("dryheave.native_recovery.reconcile_attempt", unresolved)
     monkeypatch.setattr(
         "dryheave.runner.TrialExecution.execute",
         lambda *_args: pytest.fail("Unresolved grader ownership must block another subject."),

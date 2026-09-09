@@ -182,7 +182,8 @@ def _check_copy(
 ) -> CheckExecution:
     root = (
         context.root
-        / ("suite-" + criterion.suite_id if criterion.suite_id else criterion.criterion_id)
+        / ("suites" if criterion.suite_id else "criteria")
+        / (criterion.suite_id or criterion.criterion_id)
         / kind
     )
     ensure_directory(root)

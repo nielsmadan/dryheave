@@ -14,6 +14,61 @@ from dryheave.runner import run_experiment
 from dryheave.runner_models import RunOptions
 
 
+def test_deterministic_criterion_named_judge_has_separate_artifacts(
+    store, graded_benchmark, tmp_path
+):
+    case_id = graded_benchmark.cases[0]
+    case = load_frozen_case(store, case_id)
+    case = case.model_copy(
+        update={
+            "criteria": (
+                case.criteria[0].model_copy(update={"criterion_id": "judge"}),
+                RubricCriterion(
+                    criterion_id="quality",
+                    rubric="The implementation preserves the existing public interface.",
+                ),
+            )
+        }
+    )
+    changed = store.put(
+        ObjectKind.CASE,
+        case,
+        files=store.read_blobs(case_id),
+        references=(case.persona_id, case.repository_id),
+    )
+    response = {
+        "judgments": [
+            {"criterion_id": "quality", "outcome": "pass", "rationale": "Interface preserved."}
+        ]
+    }
+    script = tmp_path / "judge.py"
+    script.write_text("print(" + repr(json.dumps(response)) + ")\n")
+    scoring = ScoringConfig(
+        judge=ControllerRecipe(
+            kind="json-command",
+            isolation="trusted-native",
+            command=CommandSpec(argv=(sys.executable, str(script))),
+        )
+    )
+    summary = run_experiment(
+        store,
+        create_experiment(
+            store, graded_benchmark.model_copy(update={"cases": (changed,), "scoring": scoring})
+        ),
+        options=RunOptions(mode="offline-fixture"),
+    )
+    result = load_assessment(store, assess_run(store, summary.run_id)[0])
+    assert [(item.criterion_id, item.outcome) for item in result.criteria] == [
+        ("judge", "pass"),
+        ("quality", "pass"),
+    ]
+    assert result.completion == "pass"
+    assert result.eligible
+    evidence = store.read_blobs(result.evidence_id)
+    assert any("/criteria/judge/final/" in name for name in evidence)
+    assert any("/judge/j-" in name for name in evidence)
+
+
 def test_partial_judge_response_retains_valid_judgment_and_spend(store, graded_benchmark, tmp_path):
     case_id = graded_benchmark.cases[0]
     case = load_frozen_case(store, case_id)

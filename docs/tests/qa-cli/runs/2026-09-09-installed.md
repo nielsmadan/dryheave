@@ -111,3 +111,69 @@ The 19-command installed skill/error/doctor check also passed in
 `complete-lifecycle`. Exact installed-file hashes and the wheel are retained in
 `complete-identity.json` and `complete-wheel.whl` under `.cache/qa-installed/`.
 This repeat launched no model and does not change the separate native result.
+
+## Whole-project review corrections
+
+After the recovery, comparison, profile, journal, accounting and archive fixes,
+root built and installed wheel
+`ae413d7eb495a7189cad15a247e4a1e040b20f77cdb8b1d2e2594c2dd34b7e1c`.
+All 81 packaged files matched source, sdist and the non-editable installation;
+the five bundled resources were present. The installed example completed all
+33 commands in `offline final ü`: run `fcf30db5db4848ee97b10c2c5c91a2a4`,
+four eligible passing fixture attempts, two pairs and preserved source state.
+Portable report: `4ee857fc5ffc21f105962291cac6c4719927dff621091c7abcd386f5e80eca79`.
+
+Additional installed CLI checks passed:
+
+- The 19-command skills/error/doctor lifecycle check, with edited and foreign
+  files preserved and symlink targets refused.
+- A three-command regression selecting only `base` metrics before and `changed`
+  metrics after, then rejecting an experiment with a required but absent judge.
+- Two archive imports containing 1,200 empty PAX headers or a 1,536-byte file
+  declaring 2 GiB of metadata. Both returned bounded structured errors and
+  published zero objects.
+
+Local evidence is in `.cache/qa-installed/` under `offline final ü`,
+`wheel-final-lifecycle`, `wheel-final-regressions` and `wheel-final-tar`.
+The exact wheel and package identity are retained as `pre-observation-wheel.whl`
+and `pre-observation-package.json`. These checks precede a final focused Codex
+judge response-metadata correction; its verification is recorded separately below.
+No model was launched and the two-attempt native allocation remains exhausted.
+
+## Final package verification
+
+The focused Codex judge correction passed independent re-review. Its final wheel
+SHA-256 is `4fb9abbb2f44d664022209f1a23d470c6e20b6f6d524ad2bf496f1f35ac66627`.
+Root refreshed the same clean installation and verified all 81 package files
+against source, wheel and sdist. `final-package.json` and `final-wheel.whl` retain
+that identity under `.cache/qa-installed/`.
+
+The installed example was copied to `example-release` and run with fresh output
+`offline release ü`. All 33 commands passed: run
+`3956b16bd71d4978938b981eedb7c1fc`, experiment
+`3cb4d78681a5c4c41b1a02ed7098f0d6502d90e41f3ecd658c37645bccfa220f`,
+four eligible passing fixture attempts, two pairs and unchanged synthetic source.
+The imported portable report was
+`08f0cf87ba701548168a756a493c757330d73d6eb2f4384af2d670afab452433`.
+
+The 19-command lifecycle check, three-command comparison/required-judge check
+and two malformed-archive CLI checks passed again in `release-lifecycle`,
+`release-regressions` and `release-tar`. The archive checks published zero objects.
+The exact helper commands used were:
+
+```sh
+.cache/qa-installed/venv/bin/python .cache/qa-installed/example-release/offline_demo.py \
+  --dryheave "$PWD/.cache/qa-installed/venv/bin/dryheave" \
+  --output "$PWD/.cache/qa-installed/offline release ü"
+.cache/qa-installed/venv/bin/python .cache/qa-installed/lifecycle-smoke.py \
+  "$PWD/.cache/qa-installed/venv/bin/dryheave" .cache/qa-installed/release-lifecycle
+.cache/qa-installed/venv/bin/python .cache/qa-installed/final-regressions.py \
+  "$PWD/.cache/qa-installed/venv/bin/dryheave" .cache/qa-installed/release-regressions \
+  '.cache/qa-installed/offline release ü/summary.json'
+.cache/qa-installed/venv/bin/python .cache/qa-installed/tar-boundary-cli.py \
+  "$PWD/.cache/qa-installed/venv/bin/dryheave" .cache/qa-installed/release-tar
+```
+
+The helpers are retained local QA artifacts; the reusable public procedure and
+shipped regression modules are linked above. No real model or agent executable
+was launched by these checks. Full native completion remains unverified.

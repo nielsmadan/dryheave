@@ -2,6 +2,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -14,6 +15,7 @@ from dryheave.controller_models import (
     ControllerResponse,
     DialogueMessage,
     RoleCall,
+    RoleObservation,
     SimulatorDecision,
     SimulatorInput,
 )
@@ -29,6 +31,7 @@ from dryheave.personas import Persona, subject_persona
 from dryheave.process_ownership import ProcessOwner
 from dryheave.processes import CommandControl, CommandResult, run_command
 from dryheave.serialization import canonical_json, parse_json, parse_model
+from dryheave.token_usage import codex_usage
 
 
 def simulator_projection(
@@ -126,36 +129,9 @@ def _codex_usage(content: bytes) -> TokenUsage | None:
             latest = mapping(event.get("usage"))
     if not latest:
         return None
-    names = (
-        "input_tokens",
-        "cached_input_tokens",
-        "cache_write_input_tokens",
-        "output_tokens",
-        "reasoning_output_tokens",
-    )
-    values = [latest.get(name) for name in names]
-    if any(value is not None and (type(value) is not int or value < 0) for value in values):
-        return None
-    if not any(values):
-        return None
-    total, cached, written, output, reasoning = (
-        value if type(value) is int else None for value in values
-    )
-    uncached = (
-        total - cached - written
-        if total is not None and cached is not None and written is not None
-        else None
-    )
-    if (uncached is not None and uncached < 0) or (
-        reasoning is not None and output is not None and reasoning > output
-    ):
-        return None
-    return TokenUsage(
-        uncached_input=uncached,
-        cache_read=cached,
-        cache_write=written,
-        output=output,
-        reasoning=reasoning,
+    return codex_usage(
+        latest,
+        protocol="exec-0.153.4",
         provenance="codex-exec-0.153.4-thread-cumulative; all-zero fallback is unknown",
     )
 
@@ -211,26 +187,44 @@ def invoke_controller(
         )
     except (DryheaveError, OSError) as error:
         artifacts.record("error", {"code": type(error).__name__, "message": str(error)})
+        observation = failure_observation(recipe, artifacts)
         return RoleCall(
             call_id=context.call_id,
             status="failed",
             elapsed_seconds=time.monotonic() - started,
             error=type(error).__name__,
-            usage=failure_usage(recipe, artifacts),
+            usage=observation.usage,
+            observed_model=observation.observed_model,
+            observed_effort=observation.observed_effort,
             usage_reason="Failed call; any observed usage is retained independently of response validity.",
             cleanup=context.cleanup,
         )
 
 
-def failure_usage(recipe: ControllerRecipe, artifacts: ArtifactWriter) -> TokenUsage | None:
+def failure_observation(recipe: ControllerRecipe, artifacts: ArtifactWriter) -> RoleObservation:
+    usage = None
+    source = "stdout.bin"
+    if recipe.kind == "codex":
+        source = "response.json"
+        with suppress(OSError, DryheaveError):
+            usage = _codex_usage(
+                read_bytes(artifacts.root / "stdout.bin", limit=recipe.budget.max_output_bytes)
+            )
     try:
-        content = read_bytes(artifacts.root / "stdout.bin", limit=recipe.budget.max_output_bytes)
-        if recipe.kind == "codex":
-            return _codex_usage(content)
-        usage = parse_json(content).get("usage")
-        return parse_model(canonical_json(usage), TokenUsage) if isinstance(usage, dict) else None
+        raw = parse_json(read_bytes(artifacts.root / source, limit=recipe.budget.max_output_bytes))
     except (OSError, DryheaveError):
-        return None
+        return RoleObservation(usage=usage)
+    if recipe.kind == "codex":
+        raw["usage"] = usage.model_dump(mode="json") if usage is not None else None
+    valid = {}
+    for name in RoleObservation.model_fields:
+        if name in raw:
+            try:
+                parse_model(canonical_json({name: raw[name]}), RoleObservation)
+            except DryheaveError:
+                continue
+            valid[name] = raw[name]
+    return parse_model(canonical_json(valid), RoleObservation)
 
 
 def _native(

@@ -1,17 +1,190 @@
 import io
 import tarfile
+from pathlib import Path
 
 import pytest
 
 from dryheave.assessments import assess_run
 from dryheave.bundles import export_bundle, import_bundle
+from dryheave.cases import load_frozen_case
 from dryheave.errors import ConflictError, IntegrityError
 from dryheave.experiments import create_experiment
+from dryheave.logs.base import Session
+from dryheave.logs.service import import_session
 from dryheave.models import ObjectKind
+from dryheave.personas import freeze_persona, load_frozen_persona
 from dryheave.reports import report_run
 from dryheave.runner import run_experiment
 from dryheave.runner_models import RunOptions
 from dryheave.storage import ObjectStore
+
+
+def physical_header(kind, size=0):
+    header = tarfile.TarInfo("extension")
+    header.type = kind
+    header.size = size
+    return header.tobuf(format=tarfile.GNU_FORMAT)
+
+
+def pax_record(key, value):
+    body = f" {key}={value}\n".encode()
+    size = len(body) + 1
+    while len(str(size)) + len(body) != size:
+        size = len(str(size)) + len(body)
+    return str(size).encode() + body
+
+
+@pytest.mark.parametrize(
+    "kind", [tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK]
+)
+@pytest.mark.parametrize("attack", ["chain", "huge-size"])
+def test_tar_extension_limits_precede_parser_and_return_structured_errors(
+    tmp_path, monkeypatch, kind, attack, capsys
+):
+    import json
+
+    from dryheave.cli import main
+
+    content = physical_header(kind) * 1200 if attack == "chain" else physical_header(kind, 2**50)
+    source = tmp_path / "malicious.tar"
+    source.write_bytes(content + bytes(1024))
+    target = tmp_path / "target"
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Unsafe extensions reached the recursive tar parser.")
+
+    monkeypatch.setattr("dryheave.bundles.tarfile.open", forbidden)
+    assert main(["--store", str(target), "import", str(source), "--json"]) == 2
+    response = capsys.readouterr()
+    assert response.out == ""
+    assert json.loads(response.err)["error"] == {
+        "code": "limit_exceeded",
+        "message": "Bundle exceeds its tar extension metadata bounds.",
+    }
+    assert not (target / "objects").exists()
+
+
+@pytest.mark.parametrize(
+    "key", ["size", "GNU.sparse.size", "GNU.sparse.map", "GNU.sparse.major", "SCHILY.realsize"]
+)
+def test_tar_structural_overrides_cannot_change_preflight_boundaries(tmp_path, monkeypatch, key):
+    record = pax_record(key, "0")
+    source = tmp_path / "structural.tar"
+    source.write_bytes(
+        physical_header(tarfile.XHDTYPE, len(record))
+        + record
+        + bytes((-len(record)) % 512)
+        + physical_header(tarfile.REGTYPE, 1024)
+        + physical_header(tarfile.XHDTYPE) * 2
+        + bytes(1024)
+    )
+    target = ObjectStore(tmp_path / "target")
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Structural overrides reached the recursive tar parser.")
+
+    monkeypatch.setattr("dryheave.bundles.tarfile.open", forbidden)
+    with pytest.raises(IntegrityError, match="structural or sparse overrides"):
+        import_bundle(target, source)
+    assert not (target.root / "objects").exists()
+
+
+def test_bounded_pax_long_paths_round_trip_exact_exported_bytes(store, benchmark, tmp_path):
+    identifier = create_experiment(store, benchmark)
+    path = tmp_path / "long-paths.tar"
+    manifest = export_bundle(store, identifier, path)
+    with tarfile.open(path) as archive:
+        paths = [member.pax_headers["path"] for member in archive if "path" in member.pax_headers]
+    assert paths
+    assert all(len(name) > 100 for name in paths)
+    target = ObjectStore(tmp_path / "imported")
+    assert import_bundle(target, path) == manifest
+    for object_id in manifest.objects:
+        assert target.read_blobs(object_id) == store.read_blobs(object_id)
+
+
+@pytest.fixture
+def multi_source_case(store, benchmark, tmp_path):
+    case = load_frozen_case(store, benchmark.cases[0])
+    primary = store.load(case.source_session_id, Session)
+    sessions = [case.source_session_id]
+    for index in range(3):
+        source = tmp_path / f"secondary-{index}.jsonl"
+        source.write_bytes(Path("tests/fixtures/codex-recorded.jsonl").read_bytes())
+        sessions.append(import_session(store, source, primary.agent))
+    excerpts = [
+        case.evidence[0].model_copy(update={"session_id": identifier, "visibility": "subject"})
+        for identifier in sessions[1:]
+    ]
+    persona = load_frozen_persona(store, case.persona_id)
+    persona_id = freeze_persona(store, persona.model_copy(update={"examples": (excerpts[2],)}))
+    case = case.model_copy(
+        update={
+            "persona_id": persona_id,
+            "evidence": (*case.evidence, excerpts[0]),
+            "allowed_facts": (
+                case.allowed_facts[0].model_copy(update={"evidence": (excerpts[1], excerpts[2])}),
+            ),
+        }
+    )
+    identifier = store.put(
+        ObjectKind.CASE,
+        case,
+        files=store.read_blobs(benchmark.cases[0]),
+        references=(persona_id, case.repository_id),
+    )
+    return identifier, persona_id, tuple(sessions)
+
+
+@pytest.mark.parametrize("kind", ["case", "persona"])
+def test_explicit_source_sessions_include_embedded_evidence_only_when_selected(
+    store, multi_source_case, tmp_path, kind
+):
+    case_id, persona_id, sessions = multi_source_case
+    root = case_id if kind == "case" else persona_id
+    expected = set(sessions if kind == "case" else sessions[-1:])
+    curated = export_bundle(store, root, tmp_path / "curated.tar")
+    assert set(sessions).isdisjoint(curated.objects)
+    assert "full source transcripts" in curated.omitted
+    path = tmp_path / "sources.tar"
+    selected = export_bundle(store, root, path, include_sensitive=("source-sessions",))
+    target = ObjectStore(tmp_path / "imported")
+    restored = import_bundle(target, path)
+    assert {
+        identifier
+        for identifier in restored.objects
+        if target.get(identifier).kind == ObjectKind.SESSION
+    } == expected
+    assert len(selected.roots) == len(set(selected.roots))
+    assert "full source transcripts" not in selected.omitted
+
+
+def test_missing_secondary_sessions_remain_disclosed_on_reexport(
+    store, multi_source_case, tmp_path
+):
+    case_id, _, sessions = multi_source_case
+    path = tmp_path / "curated.tar"
+    export_bundle(store, case_id, path)
+    target = ObjectStore(tmp_path / "imported")
+    import_bundle(target, path)
+    for identifier in sessions[:-1]:
+        assert target.put(ObjectKind.SESSION, store.load(identifier, Session)) == identifier
+    selected = export_bundle(
+        target, case_id, tmp_path / "partial.tar", include_sensitive=("source-sessions",)
+    )
+    assert set(sessions) & set(selected.objects) == set(sessions[:-1])
+    assert "source-sessions" in selected.included
+    assert "full source transcripts" in selected.omitted
+    assert f"source-sessions unavailable: {sessions[-1]}" in selected.omitted
+
+
+def test_corrupt_available_secondary_session_is_an_export_error(store, multi_source_case, tmp_path):
+    case_id, _, sessions = multi_source_case
+    (store.object_path(sessions[-1]) / "manifest.json").write_bytes(b"{}")
+    with pytest.raises(IntegrityError):
+        export_bundle(
+            store, case_id, tmp_path / "corrupt.tar", include_sensitive=("source-sessions",)
+        )
 
 
 @pytest.mark.parametrize(

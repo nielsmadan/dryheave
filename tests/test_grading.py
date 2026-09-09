@@ -11,6 +11,41 @@ from dryheave.grading import execute_check
 from dryheave.models import CommandSpec
 
 
+def test_subject_owned_executable_is_rejected_before_execution(tmp_path):
+    import json
+
+    workspace, hidden = tmp_path / "workspace", tmp_path / "hidden"
+    workspace.mkdir()
+    hidden.mkdir()
+    (hidden / "check.py").write_text('print("CHECKS_PASSED")\n')
+    canary = workspace / "executed"
+    executable = workspace / "wrapper"
+    executable.write_text(
+        f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(canary)!r}).write_text('ran')\nprint('CHECKS_PASSED')\n"
+    )
+    executable.chmod(0o700)
+    criterion = DeterministicCriterion(
+        criterion_id="check",
+        description="Reject a subject-owned executable before it can forge a result.",
+        command=CommandSpec(argv=(str(executable), "{verifier}/check.py")),
+        entrypoint="check.py",
+        expected_stdout="CHECKS_PASSED",
+    )
+    context = SimpleNamespace(
+        cancelled=threading.Event(),
+        original_workspace=tmp_path / "original",
+        on_identity=lambda _identity: None,
+    )
+    evidence = ArtifactWriter(tmp_path / "evidence", 1000000)
+    execution = execute_check(criterion, workspace, hidden, evidence, context)
+    assert execution.outcome == "error"
+    assert json.loads(next(evidence.root.glob("*-error.json")).read_text()) == {
+        "type": "InputError",
+        "message": "Verifier executable resolves into subject-owned content.",
+    }
+    assert not canary.exists()
+
+
 @pytest.mark.parametrize(
     "program, failure_marker, outcome, observed",
     [

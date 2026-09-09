@@ -73,6 +73,10 @@ and `workflow` fields derive a new profile from its pinned parent. No-op overrid
 are errors. Cases, variant names and repetitions define at most 10,000 trials.
 SHA-256 ordering of the frozen seed and trial identity is deterministic; paired
 variants share a case/repetition seed. Moving an alias cannot change saved trials.
+Validation, creation and frozen experiment loading reject any scripted judge recipe.
+Cases with required judge rubrics need a JSON-command or Codex judge with
+`budget.max_calls` greater than zero before execution can begin. Optional rubrics
+can remain without a judge.
 
 ## Native execution
 
@@ -170,6 +174,14 @@ captured. It always replays durable events, including events ahead of a checkpoi
 A stable run lock is acquired before the store native lock. Both remain held
 through execution, cleanup and capture.
 
+Before execution, the native-lock holder reconciles recorded ownership in every
+run in the store. Other run locks are acquired nonblocking; contention refuses
+the operation instead of waiting with the native lock held. Status remains a
+read-only journal view. Recovery uses only durable run/process identities before
+loading benchmark dependencies, so corrupt frozen inputs cannot prevent recorded
+writers from being stopped. Dependency failures remain journaled and block new
+subject calls; stopped invalid attempts can be assessed as ineligible.
+
 A launch intent saves the attempt, workspace/runtime/session and exact LaunchPlan
 before subject launch. Each submission saves its driver ID, prompt hash and
 pre-submit cursor before typing. Call intents precede external controller calls.
@@ -186,6 +198,14 @@ is refused. Explicit `--retry TRIAL_ID` creates another retained attempt and nev
 erases the prior attempt's possible spending. Unstarted trials can continue after
 reconciliation. Resume pins execution options and rejects a conflicting experiment.
 
+Fresh `ownership-reconciled` events determine whether later execution is safe.
+They preserve historical capture cleanup failures and assessment exclusions; they
+do not rewrite an earlier capture into eligible evidence. A newly recorded setup,
+subject or controller/grader process invalidates earlier cleanup success. Setup
+commands publish discovered descendants during polling and cleanup, so observed
+children remain recoverable after their direct parent exits. Unknown launch
+ownership and newly unresolved writers still block continuation.
+
 The `capture` object kind holds `CapturedAttempt` and exact blob maps:
 
 - `workspace/` files, symlink targets and executable state; directories are explicit.
@@ -196,7 +216,9 @@ The `capture` object kind holds `CapturedAttempt` and exact blob maps:
 Capture rejects special files before opening, never follows symlinks, bounds
 files/bytes/depth and records omissions. Frozen exclusions and unselected ignored
 files are intentional omissions. Escapes, unsupported content, byte limits and
-capture failures make completeness false. Empty directories are retained.
+capture failures make completeness false. Empty directories are retained. Relative
+symlinks that resolve to the workspace root, such as `.` or `sub/..`, retain their
+exact target bytes and count as complete; escaping or cyclic links remain omissions.
 Independent patch generation uses a disposable repository without subject Git
 configuration, hooks or filters. External alternates are retained as evidence
 but never followed. A successful final turn, stopped writers, complete files and

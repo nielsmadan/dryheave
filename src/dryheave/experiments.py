@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from dryheave.cases import load_frozen_case
+from dryheave.cases import FrozenCase, RubricCriterion, load_frozen_case
 from dryheave.controller_models import ControllerRecipe
 from dryheave.errors import DryheaveError, InputError
 from dryheave.experiment_models import (
@@ -42,11 +42,13 @@ def validate_experiment(store: ObjectStore, draft: ExperimentDraft) -> Experimen
     validate_role_recipe(draft.simulator)
     if draft.scoring.judge is not None:
         validate_role_recipe(draft.scoring.judge)
+    validate_judge(draft.scoring)
     case_ids = tuple(store.resolve(reference) for reference in draft.cases)
     if len(set(case_ids)) != len(case_ids):
         raise InputError("Different aliases resolve to the same case.")
     for case_id in case_ids:
         case = load_frozen_case(store, case_id)
+        validate_judge(draft.scoring, case)
         allowed = {fact.fact_id for fact in case.allowed_facts}
         if any(not set(step.decision.fact_ids) <= allowed for step in draft.simulator.script):
             raise InputError("Scripted simulator cites facts outside an experiment case.")
@@ -134,6 +136,23 @@ def validate_role_recipe(recipe: ControllerRecipe) -> None:
         reject_secret_fields(recipe.command.model_dump(mode="json"), location="controller command")
 
 
+def validate_judge(scoring: ScoringConfig, case: FrozenCase | None = None) -> None:
+    judge = scoring.judge
+    if judge is not None and judge.kind == "scripted":
+        raise InputError("Scripted controllers are unsupported as judges.")
+    if (
+        case is not None
+        and any(
+            isinstance(criterion, RubricCriterion) and criterion.required
+            for criterion in case.criteria
+        )
+        and (judge is None or judge.budget.max_calls == 0)
+    ):
+        raise InputError(
+            "Required judge rubrics need a non-scripted judge with a positive call budget."
+        )
+
+
 def load_role[T: StrictModel](
     store: ObjectStore, identifier: str, model: type[T], kind: ObjectKind
 ) -> T:
@@ -154,9 +173,11 @@ def load_experiment(store: ObjectStore, reference: str) -> FrozenExperiment:
     manifest = store.get(identifier, kind=ObjectKind.EXPERIMENT)
     _validate_matrix(frozen, manifest)
     simulator = load_role(store, frozen.simulator_id, ControllerRecipe, ObjectKind.SIMULATOR)
-    load_role(store, frozen.scoring_id, ScoringConfig, ObjectKind.SCORING)
+    scoring = load_role(store, frozen.scoring_id, ScoringConfig, ObjectKind.SCORING)
+    validate_judge(scoring)
     for case_id in frozen.case_ids:
         case = load_frozen_case(store, case_id)
+        validate_judge(scoring, case)
         if any(
             not set(step.decision.fact_ids) <= {fact.fact_id for fact in case.allowed_facts}
             for step in simulator.script

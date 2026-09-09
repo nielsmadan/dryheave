@@ -216,7 +216,7 @@ def test_native_and_run_locks_prevent_duplicate_work(store, benchmark):
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
-def test_controller_cleanup_failure_blocks_capture_and_continuation(
+def test_controller_cleanup_failure_preserves_capture_after_fresh_reconciliation(
     store, benchmark, monkeypatch, interrupted
 ):
     import sys
@@ -273,8 +273,26 @@ def test_controller_cleanup_failure_blocks_capture_and_continuation(
     assert captured.cleanup.errors == ("process_signal_denied",)
     assert captured.workspace.complete is False
     assert captured.evidence_omissions == ("cleanup_unresolved",)
-    with pytest.raises(InputError, match="reconciliation before another subject launch"):
-        run_experiment(store, resume=result.run_id)
+    monkeypatch.undo()
+    resumed = run_experiment(store, resume=result.run_id, retry=(result.attempts[0].trial_id,))
+    assert len(resumed.attempts) == 3
+    assert resumed.unstarted_trials == ()
+    assert resumed.attempts[0].capture_id == result.attempts[0].capture_id
+    assert load_capture(store, result.pending_assessment[0]) == captured
+    journal = RunStore(store.root).inspect(result.run_id)
+    fresh = [
+        event
+        for event in journal.events
+        if event.event == "ownership-reconciled"
+        and event.attempt_id == result.attempts[0].attempt_id
+    ]
+    assert fresh[-1].data["known_writers_stopped"] is True
+    from dryheave.assessments import assess_run
+    from dryheave.integrity import load_assessment
+
+    historical = load_assessment(store, assess_run(store, result.run_id)[0])
+    assert historical.eligible is False
+    assert "cleanup_unresolved" in historical.exclusion_reasons
 
 
 def test_load_capture_batch_traversal_does_not_grow_per_file(store, benchmark, monkeypatch):

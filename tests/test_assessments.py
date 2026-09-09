@@ -116,13 +116,13 @@ def test_mutation_before_capture_publication_quarantines_and_blocks_next_subject
 
 
 @pytest.mark.parametrize(
-    "program, expected",
+    "program",
     [
-        ('print("not the marker")\n', "error"),
-        ("raise SystemExit(1)\n", "error"),
+        'print("not the marker")\n',
+        "raise SystemExit(1)\n",
     ],
 )
-def test_zero_checks_and_failure_are_not_success(store, graded_benchmark, program, expected):
+def test_zero_checks_and_failure_are_not_success(store, graded_benchmark, program):
     case_id = graded_benchmark.cases[0]
     case = load_frozen_case(store, case_id)
     blobs = store.read_blobs(case_id)
@@ -136,9 +136,9 @@ def test_zero_checks_and_failure_are_not_success(store, graded_benchmark, progra
         options=RunOptions(mode="offline-fixture"),
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
-    assert result.criteria[0].outcome == expected
+    assert result.criteria[0].outcome == "error"
     assert result.criteria[0].calibration.status == "unavailable"
-    assert result.completion == ("indeterminate" if expected == "error" else "fail")
+    assert result.completion == "indeterminate"
 
 
 def test_known_future_git_object_is_retained_but_excluded(
@@ -174,7 +174,9 @@ def test_known_future_git_object_is_retained_but_excluded(
     assert result.eligible is False
 
 
-def test_subject_owned_executable_cannot_replace_hidden_verifier(store, graded_benchmark):
+def test_relative_verifier_executable_requires_an_explicit_trusted_path(store, graded_benchmark):
+    import json
+
     from dryheave.models import CommandSpec
 
     case_id = graded_benchmark.cases[0]
@@ -197,6 +199,20 @@ def test_subject_owned_executable_cannot_replace_hidden_verifier(store, graded_b
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.criteria[0].outcome == "error"
     assert result.completion == "indeterminate"
+    errors = [
+        json.loads(content)
+        for name, content in store.read_blobs(result.evidence_id).items()
+        if name.endswith("-error.json")
+    ]
+    assert errors
+    assert all(
+        error
+        == {
+            "type": "InputError",
+            "message": "Verifier executable must be an absolute trusted path or a system executable name.",
+        }
+        for error in errors
+    )
 
 
 def test_interrupted_grading_resume_retains_error_without_reexecuting_command(
@@ -228,8 +244,8 @@ def test_interrupted_grading_resume_retains_error_without_reexecuting_command(
     assert result.evidence_id
 
 
-@pytest.mark.parametrize("shared", [False, True])
-def test_independent_checks_and_explicit_ordered_suites(store, graded_benchmark, shared):
+@pytest.mark.parametrize("layout", ["independent", "shared", "colliding-names"])
+def test_independent_checks_and_explicit_ordered_suites(store, graded_benchmark, layout):
     import sys
 
     from dryheave.models import CommandSpec
@@ -240,6 +256,7 @@ def test_independent_checks_and_explicit_ordered_suites(store, graded_benchmark,
     files["verifiers/first.py"] = (
         b'from pathlib import Path\nPath("marker").write_text("created")\nprint("CHECK_RAN")\n'
     )
+    shared = layout == "shared"
     files["verifiers/second.py"] = (
         'from pathlib import Path\nassert Path("marker").exists() == '
         + repr(shared)
@@ -248,12 +265,14 @@ def test_independent_checks_and_explicit_ordered_suites(store, graded_benchmark,
     suite = "ordered" if shared else None
     criteria = tuple(
         DeterministicCriterion(
-            criterion_id=name,
+            criterion_id="suite-shared"
+            if layout == "colliding-names" and name == "first"
+            else name,
             description="Confirm independent or explicitly shared workspace state.",
             command=CommandSpec(argv=(sys.executable, "{verifier}/" + name + ".py")),
             entrypoint=name + ".py",
             expected_stdout="CHECK_RAN",
-            suite_id=suite,
+            suite_id="shared" if layout == "colliding-names" and name == "second" else suite,
         )
         for name in ("first", "second")
     )

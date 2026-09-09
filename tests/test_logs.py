@@ -13,6 +13,87 @@ from dryheave.storage import ObjectStore
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.mark.parametrize(
+    "preferred,responses,remaining",
+    [
+        (
+            [("same", "one", "n1"), ("other", "two", "n2")],
+            [("same", "one", "n2"), ("different", "three", "n1")],
+            [1],
+        ),
+        (
+            [("same", "one", None), ("same", "two", None)],
+            [("same", "three", None), ("same", "two", None)],
+            [0],
+        ),
+        (
+            [("same", None, None), ("same", "one", None)],
+            [("same", "two", None), ("same", None, None), ("same", "one", None)],
+            [2],
+        ),
+        ([("same", "one", "native")], [("changed text", "other", "native")], []),
+        ([("same", "one", "n1")], [("same", "one", "different")], []),
+    ],
+)
+def test_deduplication_preserves_earliest_compatible_candidates(preferred, responses, remaining):
+    from dryheave.logs.base import LogEvent
+
+    events = []
+    for source, items in (("event_msg", preferred), ("response_item", responses)):
+        for index, (text, turn, native) in enumerate(items):
+            events.append(
+                (
+                    source,
+                    LogEvent(
+                        event_id=f"{source}-{index}",
+                        source_line=len(events) + 1,
+                        kind="user",
+                        text=text,
+                        turn_id=turn,
+                        native_id=native,
+                    ),
+                )
+            )
+    assert [event.event_id for event in codex._dedupe(events)] == [
+        *(f"event_msg-{index}" for index in range(len(preferred))),
+        *(f"response_item-{index}" for index in remaining),
+    ]
+
+
+def test_large_repeated_message_deduplication_has_bounded_candidate_work(monkeypatch):
+    from dryheave.logs.base import LogEvent
+
+    count = 4000
+    events = [
+        (
+            source,
+            LogEvent(
+                event_id=f"{source}-{index}",
+                source_line=index + 1,
+                kind="user",
+                text="Repeated message",
+                turn_id="turn",
+            ),
+        )
+        for source in ("event_msg", "response_item")
+        for index in range(count)
+    ]
+    get = LogEvent.__getattribute__
+    observations = 0
+
+    def observe(event, name):
+        nonlocal observations
+        if name in {"event_id", "kind", "text", "native_id", "turn_id"}:
+            observations += 1
+        return get(event, name)
+
+    with monkeypatch.context() as context:
+        context.setattr(LogEvent, "__getattribute__", observe)
+        result = codex._dedupe(events)
+    assert [event.event_id for event in result] == [f"event_msg-{index}" for index in range(count)]
+    assert observations <= 20 * len(events)
+
+
 def write_log(path: Path, records: list[dict]) -> Path:
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
     return path

@@ -149,11 +149,19 @@ def _safe_link(
 ) -> bool:
     target = blobs[entries[path].blob].decode(errors="replace")
     parts = list(Path(path).parent.parts) + target.split("/")
-    if target.startswith("/"):
+    if not target or target.startswith("/"):
         return False
+    directory_paths = {"", *directories} | {
+        name[:index]
+        for name in (*entries, *directories)
+        for index, character in enumerate(name)
+        if character == "/"
+    }
     resolved: list[str] = []
     hops = 0
     while parts:
+        if "/".join(resolved) not in directory_paths:
+            return False
         part = parts.pop(0)
         if part in {"", "."}:
             continue
@@ -170,16 +178,12 @@ def _safe_link(
             if hops > MAX_LINK_HOPS:
                 return False
             link = blobs[entry.blob].decode(errors="replace")
-            if link.startswith("/"):
+            if not link or link.startswith("/"):
                 return False
             resolved.pop()
             parts = link.split("/") + parts
     result = "/".join(resolved)
-    return (
-        result in directories
-        or result in entries
-        or any(name.startswith(result + "/") for name in entries)
-    )
+    return result in directory_paths or result in entries
 
 
 def _filter_links(builder: CaptureBuilder) -> None:

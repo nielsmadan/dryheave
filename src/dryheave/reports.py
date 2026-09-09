@@ -209,7 +209,7 @@ def report_run(store: ObjectStore, reference: str) -> RunReport:
         )
         if experiment
         else None,
-        durable_sequence=len(journal.events),
+        durable_sequence=journal.sequence,
         scheduled_trials=len(trials) if experiment else None,
         unstarted_trials=tuple(item for item in trials if item not in attempted),
         input_error=input_error,
@@ -265,7 +265,9 @@ def compare_runs(
 ) -> Comparison:
     if bool(before_variant) != bool(after_variant):
         raise InputError("Select both comparison variants, or neither.")
-    left, right = report_run(store, before), report_run(store, after)
+    before_reference = before if re.fullmatch(r"[0-9a-f]{32}", before) else store.resolve(before)
+    after_reference = after if re.fullmatch(r"[0-9a-f]{32}", after) else store.resolve(after)
+    left, right = report_run(store, before_reference), report_run(store, after_reference)
     earlier, later = _pairs(left, before_variant), _pairs(right, after_variant)
     signatures_known = left.compatibility_id is not None and right.compatibility_id is not None
     incompatible = (
@@ -313,6 +315,14 @@ def compare_runs(
     return Comparison(
         before=left.run_id,
         after=right.run_id,
+        before_input=before,
+        after_input=after,
+        before_reference=before_reference,
+        after_reference=after_reference,
+        before_sequence=left.durable_sequence,
+        after_sequence=right.durable_sequence,
+        before_variant=before_variant,
+        after_variant=after_variant,
         pairs=tuple(pairs),
         paired_count=len(pairs),
         excluded_before=sum(
@@ -323,6 +333,14 @@ def compare_runs(
             not item.result or not item.result.eligible or bool(item.current_exclusions)
             for item in later.values()
         ),
-        before_metrics=left.groups,
-        after_metrics=right.groups,
+        before_metrics=tuple(
+            group
+            for group in left.groups
+            if before_variant is None or group.variant == before_variant
+        ),
+        after_metrics=tuple(
+            group
+            for group in right.groups
+            if after_variant is None or group.variant == after_variant
+        ),
     )

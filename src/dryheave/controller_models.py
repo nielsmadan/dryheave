@@ -1,5 +1,5 @@
 import re
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import Field, model_validator
 
@@ -109,24 +109,29 @@ class SimulatorInput(StrictModel):
     )
 
 
-class ControllerResponse(StrictModel):
-    decision: SimulatorDecision
+ObservedSetting = Annotated[
+    str, Field(min_length=1, max_length=256, pattern=r"^[^\x00-\x1f\x7f]+$")
+]
+
+
+class RoleObservation(StrictModel):
     usage: TokenUsage | None = None
-    observed_model: str | None = None
-    observed_effort: str | None = None
+    observed_model: ObservedSetting | None = None
+    observed_effort: ObservedSetting | None = None
 
 
-class RoleCall(StrictModel):
+class ControllerResponse(RoleObservation):
+    decision: SimulatorDecision
+
+
+class RoleCall(RoleObservation):
     call_id: Name
     role: Literal["simulator", "judge"] = "simulator"
     status: Literal["intent", "completed", "failed", "interrupted"]
     elapsed_seconds: float | None = Field(default=None, ge=0)
     decision: SimulatorDecision | None = None
-    usage: TokenUsage | None = None
     cost: float | None = Field(default=None, ge=0)
     cost_reason: str = "No provider-reported cost; pricing is deferred to assessment."
     usage_reason: str = "The call may have spent tokens; usage was not observed."
-    observed_model: str | None = None
-    observed_effort: str | None = None
     error: str | None = None
     cleanup: CleanupReport | None = None

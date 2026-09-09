@@ -90,6 +90,14 @@ class Comparison(StrictModel):
     schema_version: Literal[1] = 1
     before: RunId
     after: RunId
+    before_input: str
+    after_input: str
+    before_reference: str
+    after_reference: str
+    before_sequence: int
+    after_sequence: int
+    before_variant: str | None = None
+    after_variant: str | None = None
     pairs: tuple[PairChange, ...]
     paired_count: int
     excluded_before: int

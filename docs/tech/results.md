@@ -4,6 +4,11 @@ Execution and assessment are explicit commands. `run` stops writers and captures
 `assess RUN_ID` audits, grades and advances each retained attempt to `finished`.
 `assess` and execution resume acquire the exclusive run and native locks. Repeating
 assessment preserves finished IDs and never relaunches a subject or simulator.
+Before loading assessment inputs, recorded native ownership is reconciled across
+the store under nonblocking run locks and the native lock. Active interrupted
+attempts become stopped; absent or corrupt captures remain unscorable. Successful
+fresh cleanup permits later execution but preserves the original capture's failed
+cleanup and exclusions.
 An interrupted verifier/judge intent becomes an error on assessment resume instead
 of repeating an ambiguous external call. SIGINT/SIGTERM cancel the current grader
 and stop recorded writers. The CLI exits 130 with a concise `cancelled` error and
@@ -28,6 +33,10 @@ The run ID is emitted to stderr immediately after reservation. JSON stdout remai
 a single response. Status and report read a consistent complete event prefix
 without acquiring or repairing the writer journal. An incomplete active final
 line is ignored by this read-only view; resume repairs it only under its lock.
+Each report takes one defensive journal snapshot and indexes assessment events
+by attempt. A running assessor extends its local index from newly durable events;
+completed judge calls and unmatched intents remain visible without rescanning
+the whole journal for each attempt.
 
 `assess` returns `assessment_ids` and `report`. Assessment objects use kind `result`,
 schema version 1 and payload kind `assessment`. IDs for the experiment, case,
@@ -59,7 +68,8 @@ uv run dryheave --store .dryheave review RUN_ID --attempt ATTEMPT_ID \
 
 Checks run from frozen hidden entrypoints in independent copies. Criteria with
 the same explicit `suite_id` share a workspace in their frozen criteria order;
-final, baseline and reference copies remain separate. An interrupted shared suite
+independent criteria, shared suites and judge calls have separate directory namespaces.
+Final, baseline and reference copies remain separate. An interrupted shared suite
 does not reconstruct its intermediate mutations; remaining results are errors.
 Materialized hidden bytes are checked before and after each execution. Executables are
 resolved outside subject-owned code; wrapper/inline-program prefixes are refused.
@@ -76,7 +86,10 @@ produce task failure; missing/error results produce indeterminate completion.
 Suspected/confirmed contamination is retained separately and excludes comparisons.
 
 The optional judge uses the frozen JSON-command/Codex recipe and finite role
-budgets. A JSON-command receives `JudgeInput` on stdin and returns `JudgeResponse`:
+budgets. Required rubrics need a judge with a positive call budget; experiment
+validation and loading reject missing or disabled required judges and any explicit
+scripted judge. Optional rubrics can omit the judge. A JSON-command receives
+`JudgeInput` on stdin and returns `JudgeResponse`:
 
 ```json
 {"judgments":[{"criterion_id":"quality","outcome":"pass","score":0.8,
@@ -86,11 +99,22 @@ budgets. A JSON-command receives `JudgeInput` on stdin and returns `JudgeRespons
 
 Missing judgments produce individual errors. Raw requests, responses and rationale
 remain in optional grading evidence; structured results carry evidence hashes.
+For valid JSON with an invalid decision, unavailable fact or invalid criterion IDs,
+independently valid usage and observed model/effort survive in the failed call.
+Observed settings are bounded to 256 characters without control characters;
+invalid fields are omitted independently. Invalid JSON supplies no recovered
+accounting fields. Saved-table estimates prefer the retained observed model.
+Codex judge settings are recovered from its bounded response file; token usage
+comes exclusively from native stdout, even when the response contains usage fields.
 
 Role accounting retains subject, simulator and judge observations independently.
 Token categories do not overlap; reasoning is an output subset. Responses are
 deduplicated, cumulative observations become deltas, and resets retain observed
 segments with partial coverage. Codex exec all-zero fallback usage stays unknown.
+Codex token normalization records its transport policy. The verified exec 0.153.4
+protocol defaults an absent cache-write count to zero; explicit null or invalid
+counts do not establish zero. Generic native/imported logs lack that guarantee,
+so absent cache-write counts and the derived uncached count remain unknown.
 Descendants without observed models are not priced at the requested root model.
 Requested-root estimates are labeled and use only the saved price version, date,
 currency and per-million-token rates. `known_cost` is an observed subtotal; partial
@@ -106,7 +130,10 @@ require matching case, criterion, simulator, scoring, repetition, seed and execu
 profile differences are allowed. Compatible partially completed runs retain
 unstarted-trial attrition. The latest attempt per paired trial is selected,
 including an unassessed retry as attrition, while all earlier spending stays in the
-report. Two trials imply no significance.
+report. Selecting variants also filters each side's metrics and all-attempt spending
+to that variant. Saved comparisons retain each supplied input, resolved immutable
+report reference (or run ID), durable report sequence and selected variant. Moving
+a portable-report alias cannot change the saved reference. Two trials imply no significance.
 
 # Portable bundles
 
@@ -131,8 +158,12 @@ artifacts from durable capture/quarantine IDs, including captures published befo
 assessment. `assessment-evidence` adds raw verifier and judge artifacts. Selected
 classes enter the included inventory only when their objects exist; unavailable
 artifacts retain omission labels and identify the affected attempts.
-`source-sessions` explicitly adds full source transcripts; curated session-ID
-provenance does not automatically include them. Frozen selected input bytes retain
+`source-sessions` explicitly adds full source transcripts named by case origins,
+case evidence, allowed-fact evidence and persona examples, including standalone
+personas. Sources are deduplicated. Missing transcripts are identified in omissions
+and retain the incomplete source-transcript label; corrupt available sources fail
+export. Curated session-ID provenance does not automatically include transcripts.
+Frozen selected input bytes retain
 their original object IDs and hashes. Sensitive selection fails on an invalid
 required closure; ordinary invalid-result summaries can still be exported.
 
@@ -143,3 +174,8 @@ extra closure content before publication. Existing objects are verified, never
 overwritten. Optional exported aliases use `--alias NAME`; import defaults to
 collision error, with explicit `--alias-policy skip` or `replace`. Export refuses
 an existing destination and publishes only a complete archive.
+Before the tar parser runs, import scans physical headers on the same open file.
+PAX/GNU extensions are limited to 64 KiB each and 16 consecutive headers. Normal
+PAX long paths remain supported. PAX size overrides, sparse metadata and physical
+sparse entries are rejected so extension interpretation cannot change the checked
+member boundaries.

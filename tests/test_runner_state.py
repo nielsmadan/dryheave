@@ -6,6 +6,32 @@ from dryheave.runner_models import RunOptions
 from dryheave.runner_state import ExecutionJournal
 
 
+def test_assessment_index_observes_new_durable_events_and_keeps_attempts_separate(store):
+    from dryheave.assessment_inputs import saved_judge_calls
+    from dryheave.controller_models import RoleCall
+
+    run_id = RunStore(store.root).create("a" * 64)
+    with RunStore(store.root).open(run_id) as journal:
+        execution = ExecutionJournal(journal)
+        first, second = execution.reserve("first"), execution.reserve("second")
+        call = RoleCall(call_id="shared-id", role="judge", status="intent")
+        execution.evidence(first, "judge-intent", call)
+        assert saved_judge_calls(execution, first)[0].status == "interrupted"
+        execution.evidence(second, "judge-intent", call)
+        execution.evidence(
+            first, "judge-result", call.model_copy(update={"status": "completed", "cost": 0.5})
+        )
+        assert saved_judge_calls(execution, first)[0].cost == 0.5
+        assert saved_judge_calls(execution, second)[0].status == "interrupted"
+        journal.append("criterion-intent", {"criterion_id": "check"}, attempt_id=first.attempt_id)
+        events = execution.events_for(first.attempt_id, "criterion-intent")
+        assert events[0].data == {"criterion_id": "check"}
+        events[0].data["criterion_id"] = "edited"
+        assert execution.events_for(first.attempt_id, "criterion-intent")[0].data == {
+            "criterion_id": "check"
+        }
+
+
 def test_many_owned_identities_are_linear_journal_deltas(store, benchmark):
     identifier = create_experiment(store, benchmark)
     experiment = load_experiment(store, identifier)

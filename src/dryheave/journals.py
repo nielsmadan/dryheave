@@ -76,7 +76,16 @@ class RunJournal:
 
     @property
     def events(self) -> tuple[JournalEvent, ...]:
-        return tuple(event.model_copy(deep=True) for event in self._events)
+        return self.events_since(0)
+
+    @property
+    def sequence(self) -> int:
+        return len(self._events)
+
+    def events_since(self, sequence: int) -> tuple[JournalEvent, ...]:
+        if not 0 <= sequence <= self.sequence:
+            raise InputError("Journal cursor is outside the durable event prefix.")
+        return tuple(event.model_copy(deep=True) for event in self._events[sequence:])
 
     def close(self) -> None:
         self._active = False

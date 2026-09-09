@@ -128,7 +128,11 @@ class TrialExecution:
         owner = ProcessOwner()
 
         def claim(pid: int) -> None:
-            self.identity(owner.add(psutil.Process(pid)))
+            owner.add(psutil.Process(pid))
+            publish()
+
+        def publish() -> None:
+            owner.publish(self.identity)
 
         try:
             for command in self.case.setup:
@@ -150,7 +154,9 @@ class TrialExecution:
                     self.workspace,
                     environment=environment,
                     on_start=claim,
-                    control=CommandControl(cancelled=self.cancelled, deadline=deadline),
+                    control=CommandControl(
+                        cancelled=self.cancelled, deadline=deadline, on_poll=publish
+                    ),
                 )
                 evidence.record(
                     "result",
@@ -170,8 +176,7 @@ class TrialExecution:
             self.cleanup = owner.stop(timeout=3, terminal_closed=True).model_copy(
                 update={"logs_drained": True}
             )
-            for identity in self.cleanup.owned:
-                self.identity(identity)
+            publish()
             evidence.record("cleanup", self.cleanup)
             if not self.cleanup.known_writers_stopped:
                 raise InputError("Setup cleanup could not stop every known writer.")

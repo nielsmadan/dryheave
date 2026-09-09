@@ -35,6 +35,7 @@ from dryheave.integrity import (
 from dryheave.journals import RunStore
 from dryheave.judges import invoke_judge, judge_projection
 from dryheave.models import ObjectKind, TrialStage
+from dryheave.native_recovery import reconcile_store_ownership
 from dryheave.result_models import (
     Assessment,
     AssessmentEvidence,
@@ -112,10 +113,9 @@ def _saved_results(
     execution: ExecutionJournal, state: AttemptState
 ) -> tuple[dict[str, CriterionResult], bool, tuple[RoleCall, ...]]:
     results = {}
-    for event in execution.journal.events:
-        if event.attempt_id == state.attempt_id and event.event == "criterion-result":
-            result = parse_model(canonical_json(event.data), CriterionResult)
-            results[result.criterion_id] = result
+    for event in execution.events_for(state.attempt_id, "criterion-result"):
+        result = parse_model(canonical_json(event.data), CriterionResult)
+        results[result.criterion_id] = result
     calls = saved_judge_calls(execution, state)
     return results, bool(calls), calls
 
@@ -160,7 +160,8 @@ def _judge(
         recipe,
         judge_projection(inputs.case, inputs.capture, inputs.files),
         ArtifactWriter(
-            root / "judge", recipe.budget.max_input_bytes + 8 * recipe.budget.max_output_bytes
+            root / "judge" / call_id,
+            recipe.budget.max_input_bytes + 8 * recipe.budget.max_output_bytes,
         ),
         context,
     )
@@ -198,8 +199,7 @@ def _grade(
     )
     intents = {
         event.data.get("criterion_id")
-        for event in execution.journal.events
-        if event.attempt_id == state.attempt_id and event.event == "criterion-intent"
+        for event in execution.events_for(state.attempt_id, "criterion-intent")
     }
     resumed_suites = {
         item.suite_id
@@ -387,6 +387,7 @@ def assess_run(store: ObjectStore, run_id: str) -> tuple[str, ...]:
         cancellation_signals(cancelled),
     ):
         execution = ExecutionJournal(journal)
+        reconcile_store_ownership(store, execution)
         for state in tuple(execution.attempts.values()):
             if cancelled.is_set():
                 raise KeyboardInterrupt

@@ -1,6 +1,7 @@
+from collections import defaultdict, deque
 from pathlib import Path
 
-from pydantic import JsonValue, ValidationError
+from pydantic import JsonValue
 
 from dryheave.logs.base import (
     Diagnostic,
@@ -14,29 +15,9 @@ from dryheave.logs.base import (
     string,
     text_content,
 )
-from dryheave.models import AgentKind, TokenUsage
+from dryheave.models import AgentKind
 from dryheave.serialization import digest
-
-
-def _usage(value: dict[str, JsonValue], provenance: str) -> TokenUsage:
-    def number(key: str) -> int | None:
-        item = value.get(key)
-        return item if type(item) is int and item >= 0 else None
-
-    total, cached, written = (
-        number("input_tokens"),
-        number("cached_input_tokens"),
-        number("cache_write_input_tokens"),
-    )
-    uncached = total - cached - (written or 0) if total is not None and cached is not None else None
-    return TokenUsage(
-        uncached_input=uncached,
-        cache_read=cached,
-        cache_write=written,
-        output=number("output_tokens"),
-        reasoning=number("reasoning_output_tokens"),
-        provenance=provenance,
-    )
+from dryheave.token_usage import codex_usage
 
 
 def _event(
@@ -145,44 +126,53 @@ def _record_event(line: int, record: dict[str, JsonValue]) -> LogEvent | None:
     return None
 
 
+class _Candidates:
+    def __init__(self, events: list[tuple[str, LogEvent]]) -> None:
+        self.native: dict[tuple[str, str], deque[int]] = defaultdict(deque)
+        self.text: dict[tuple[str, str], deque[int]] = defaultdict(deque)
+        self.turn: dict[tuple[str, str, str | None], deque[int]] = defaultdict(deque)
+        self.consumed: set[int] = set()
+        for index, (source, event) in enumerate(events):
+            if source != "event_msg" or event.kind not in {"user", "assistant"}:
+                continue
+            if event.native_id is not None:
+                self.native[(event.kind, event.native_id)].append(index)
+            self.text[(event.kind, event.text)].append(index)
+            self.turn[(event.kind, event.text, event.turn_id)].append(index)
+
+    def consume(self, event: LogEvent) -> bool:
+        queues = []
+        if event.native_id is not None:
+            queues.append(self.native.get((event.kind, event.native_id)))
+        if event.turn_id is None:
+            queues.append(self.text.get((event.kind, event.text)))
+        else:
+            queues.extend(
+                self.turn.get((event.kind, event.text, turn)) for turn in (event.turn_id, None)
+            )
+        candidates = []
+        for queue in queues:
+            while queue and queue[0] in self.consumed:
+                queue.popleft()
+            if queue:
+                candidates.append(queue[0])
+        if not candidates:
+            return False
+        self.consumed.add(min(candidates))
+        return True
+
+
 def _dedupe(events: list[tuple[str, LogEvent]]) -> tuple[LogEvent, ...]:
-    preferred = [
+    candidates = _Candidates(events)
+    return tuple(
         event
         for source, event in events
-        if source == "event_msg" and event.kind in {"user", "assistant"}
-    ]
-    consumed: set[str] = set()
-    result: list[LogEvent] = []
-    for source, event in events:
-        match = (
-            next(
-                (
-                    item
-                    for item in preferred
-                    if item.event_id not in consumed
-                    and item.kind == event.kind
-                    and (
-                        (item.native_id is not None and item.native_id == event.native_id)
-                        or (
-                            item.text == event.text
-                            and (
-                                item.turn_id == event.turn_id
-                                or item.turn_id is None
-                                or event.turn_id is None
-                            )
-                        )
-                    )
-                ),
-                None,
-            )
-            if source == "response_item" and event.kind in {"user", "assistant"}
-            else None
+        if not (
+            source == "response_item"
+            and event.kind in {"user", "assistant"}
+            and candidates.consume(event)
         )
-        if match:
-            consumed.add(match.event_id)
-        else:
-            result.append(event)
-    return tuple(result)
+    )
 
 
 def parse(path: Path, limits: ImportLimits | None = None) -> Session:
@@ -303,11 +293,12 @@ def _record_usage(
         if response
         else f"cumulative-{line}"
     )
-    try:
-        parsed = _usage(
-            raw, "codex.token_usage_record" if keyed else "codex.token_count.total_token_usage"
-        )
-    except ValidationError:
+    parsed = codex_usage(
+        raw,
+        protocol="native-log",
+        provenance="codex.token_usage_record" if keyed else "codex.token_count.total_token_usage",
+    )
+    if parsed is None:
         warnings.append(
             Diagnostic(
                 code="invalid_usage",

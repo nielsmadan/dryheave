@@ -3,9 +3,12 @@ from pathlib import Path
 
 import pytest
 
+from dryheave.capture_models import CapturedFile
 from dryheave.cases import CapturePolicy, load_frozen_case
+from dryheave.errors import InputError
 from dryheave.final_capture import capture_workspace, materialize_files
 from dryheave.repositories import Git, SnapshotLimits, materialize_repository
+from dryheave.serialization import digest
 
 
 def workspace_for(store, tmp_path):
@@ -39,6 +42,8 @@ def test_special_files_and_external_links_never_opened(store, benchmark, tmp_pat
     case, root = workspace_for(store, tmp_path)
     os.mkfifo(root / "pipe")
     (root / "escape").symlink_to("../../outside")
+    (root / "cycle-a").symlink_to("cycle-b")
+    (root / "cycle-b").symlink_to("cycle-a")
     (root / "ok").write_text("kept")
     capture, blobs = capture_workspace(
         store, case.repository_id, root, case.capture_policy, tmp_path / "scratch"
@@ -47,8 +52,91 @@ def test_special_files_and_external_links_never_opened(store, benchmark, tmp_pat
     assert {(item.path, item.reason) for item in capture.omissions} >= {
         ("pipe", "special_file"),
         ("escape", "symlink_escape_cycle_or_missing_target"),
+        ("cycle-a", "symlink_escape_cycle_or_missing_target"),
+        ("cycle-b", "symlink_escape_cycle_or_missing_target"),
     }
     assert blobs["workspace/ok"] == b"kept"
+
+
+def test_links_to_workspace_root_preserve_bytes_and_remain_grade_eligible(
+    store, graded_benchmark, tmp_path, monkeypatch
+):
+    from dryheave.assessments import assess_run
+    from dryheave.experiments import create_experiment
+    from dryheave.fixture_subject import FixtureTerminal
+    from dryheave.integrity import load_assessment
+    from dryheave.runner import load_capture, run_experiment
+    from dryheave.runner_models import RunOptions
+
+    close = FixtureTerminal.close
+    targets = {
+        "root-dot": ".",
+        "root-nested": "sub/..",
+        "sub/root-parent": "..",
+        "root-chain": "sub/root-parent",
+    }
+
+    def add_root_links(terminal):
+        workspace = Path(terminal.plan.cwd)
+        (workspace / "sub").mkdir()
+        for path, target in targets.items():
+            (workspace / path).symlink_to(target)
+        return close(terminal)
+
+    monkeypatch.setattr(FixtureTerminal, "close", add_root_links)
+    summary = run_experiment(
+        store,
+        create_experiment(store, graded_benchmark),
+        options=RunOptions(mode="offline-fixture"),
+    )
+    capture_id = summary.pending_assessment[0]
+    captured = load_capture(store, capture_id)
+    blobs = store.read_blobs(capture_id)
+    assert captured.workspace.complete
+    entries = {entry.path: entry for entry in captured.workspace.files}
+    copy = tmp_path / "root-link-copy"
+    materialize_files(
+        copy, captured.workspace.files, blobs, directories=captured.workspace.directories
+    )
+    for path, target in targets.items():
+        assert entries[path].mode == "symlink"
+        assert blobs[entries[path].blob] == target.encode()
+        assert os.readlink(copy / path) == target
+        assert (copy / path).resolve() == copy
+    result = load_assessment(store, assess_run(store, summary.run_id)[0])
+    assert result.eligible
+    assert result.completion == "pass"
+
+
+@pytest.mark.parametrize("target", ["missing/..", "greet.py/.."])
+def test_links_cannot_traverse_missing_or_regular_components_before_parent(
+    store, benchmark, tmp_path, target
+):
+    case, root = workspace_for(store, tmp_path)
+    (root / "invalid").symlink_to(target)
+    capture, blobs = capture_workspace(
+        store, case.repository_id, root, case.capture_policy, tmp_path / "scratch"
+    )
+    assert capture.complete is False
+    assert ("invalid", "symlink_escape_cycle_or_missing_target", False) in {
+        (item.path, item.reason, item.intentional) for item in capture.omissions
+    }
+    assert "invalid" not in {entry.path for entry in capture.files}
+    content = target.encode()
+    forged = CapturedFile(
+        path="invalid",
+        blob="workspace/invalid",
+        mode="symlink",
+        sha256=digest(content),
+        size=len(content),
+    )
+    with pytest.raises(InputError, match="Captured symlink cannot be safely reconstructed"):
+        materialize_files(
+            tmp_path / "forged-copy",
+            (*capture.files, forged),
+            blobs | {forged.blob: content},
+            directories=capture.directories,
+        )
 
 
 def test_frozen_ignored_and_exclusion_policy(store, benchmark, tmp_path):
