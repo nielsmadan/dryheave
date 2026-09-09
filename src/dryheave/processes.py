@@ -4,6 +4,7 @@ import selectors
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,7 @@ def run_command(
     *,
     input_bytes: bytes = b"",
     environment: dict[str, str] | None = None,
+    on_start: Callable[[int], None] | None = None,
 ) -> CommandResult:
     cwd = root if command.cwd == "." else root / command.cwd
     if not cwd.resolve().is_relative_to(root.resolve()):
@@ -53,6 +55,7 @@ def run_command(
     deadline = time.monotonic() + command.timeout_seconds
     streams = (process.stdin, process.stdout, process.stderr)
     try:
+        _observe_start(on_start, process.pid)
         with selectors.DefaultSelector() as selector:
             _register(selector, streams, bool(input_bytes))
             offset = 0
@@ -121,3 +124,8 @@ def _wait(process: subprocess.Popen[bytes], deadline: float) -> Literal["exited"
     except subprocess.TimeoutExpired:
         return "timeout"
     return "exited"
+
+
+def _observe_start(callback: Callable[[int], None] | None, pid: int) -> None:
+    if callback is not None:
+        callback(pid)

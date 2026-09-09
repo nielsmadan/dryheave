@@ -108,3 +108,30 @@ def capture_profile_fixture(
             limits=limits or CaptureLimits(),
         ),
     )
+
+
+@pytest.fixture
+def driver_plan(tmp_path: Path):
+    from dryheave.profile_models import ExecutableResolution, LaunchPlan
+
+    config = tmp_path / "config"
+    config.mkdir()
+    return LaunchPlan(
+        profile_id="a" * 64,
+        agent=AgentKind.CODEX,
+        argv=(sys.executable, "-u", "fixture.py"),
+        cwd=str(tmp_path),
+        executable=ExecutableResolution(
+            requested=sys.executable, resolved=sys.executable, expected_version=None
+        ),
+        config_roots={"config": str(config)},
+        generated_environment={"CODEX_HOME": str(config)},
+        environment_references=(),
+        runtime_files=(),
+        generated_files={},
+        overlays=(),
+        discovery_roots=(),
+        issues=(),
+        fidelity="captured",
+        launchable=True,
+    )

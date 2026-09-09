@@ -1,0 +1,1 @@
+{"ok":true,"data":{"cols":120,"exited":null,"log":null,"pid":12001,"rows":40,"session":"fixture","shell":null,"shell_pid":12002,"timeouts":{"command":30000,"exit":30000,"idle":5000,"ready":30000,"text":5000},"version":"0.1.0-beta.3"}}
