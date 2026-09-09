@@ -1,4 +1,5 @@
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import JsonValue
@@ -18,12 +19,15 @@ class ArtifactWriter:
         self.max_bytes = max_bytes
         self.written = 0
         self.sequence = 0
+        self.on_record: Callable[[str, StrictModel | dict[str, JsonValue]], None] | None = None
 
     def record(self, name: str, value: StrictModel | dict[str, JsonValue]) -> Path:
         self.sequence += 1
         path = self.root / f"{self.sequence:06d}-{name}.json"
         self._reserve(len(content := canonical_json(value)))
         atomic_write(path, content, replace=False)
+        if self.on_record is not None:
+            self.on_record(name, value)
         return path
 
     def append(self, name: str, content: bytes) -> None:

@@ -63,6 +63,7 @@ class ObjectKind(StrEnum):
     SIMULATOR = "simulator"
     SCORING = "scoring"
     RESULT = "result"
+    CAPTURE = "capture"
 
 
 class AgentKind(StrEnum):

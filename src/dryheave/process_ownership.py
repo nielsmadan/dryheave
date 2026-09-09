@@ -41,6 +41,10 @@ class ProcessOwner:
                 self.identities[key] = identity
             return identity
 
+    def snapshot(self) -> tuple[ProcessIdentity, ...]:
+        with self.lock:
+            return tuple(self.identities.values())
+
     def scan(self) -> None:
         with self.lock:
             self._prune()

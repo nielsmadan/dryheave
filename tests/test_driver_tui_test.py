@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -93,3 +94,44 @@ def test_recorded_daemon_status_shapes(tmp_path, monkeypatch, name, code, runnin
     monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
     with terminal(tmp_path, monkeypatch) as transport:
         assert transport._call("daemon", "status")["running"] is running
+
+
+def test_subject_flags_follow_transport_option_boundary(tmp_path, monkeypatch, driver_plan):
+    calls = []
+
+    def run(command, root, **kwargs):
+        return CommandResult(command.argv, 0, b"tui-test 0.1.0-beta.3\n", b"", "exited")
+
+    def call(transport, *arguments, cleanup=False):
+        calls.append(arguments)
+        if arguments[0] == "run":
+            raise TransportError("fixture stopped before subject launch")
+        return {"running": False}
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    monkeypatch.setattr(TuiTestTerminal, "_call", call)
+    plan = driver_plan.model_copy(
+        update={
+            "argv": (*driver_plan.argv, "--config", 'first="café path"', "--config", "second=true")
+        }
+    )
+    with terminal(tmp_path, monkeypatch) as transport:
+        with pytest.raises(TransportError, match="fixture stopped"):
+            transport.start(plan, {})
+        assert calls[0][calls[0].index("--") + 1 :] == plan.argv
+
+
+def test_cli_parse_rejection_retains_original_diagnostics(tmp_path, monkeypatch):
+    diagnostic = b"error: the argument '--config <PATH>' cannot be used multiple times\n"
+
+    def run(command, root, **kwargs):
+        return CommandResult(command.argv, 2, b"", diagnostic, "exited")
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    with terminal(tmp_path, monkeypatch) as transport:
+        with pytest.raises(TransportError, match=r"Terminal run returned exit 2.*retained command"):
+            transport._call("run", "--config", "first", "--config", "second")
+        evidence = json.loads(next(transport.runtime.glob("*-command.json")).read_bytes())
+        assert evidence["exit_code"] == 2
+        assert evidence["stderr"] == diagnostic.decode()
+        assert evidence["stdout"] == ""

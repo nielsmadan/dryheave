@@ -46,3 +46,10 @@ uv run dryheave --store .dryheave profile preflight everyday --destination .cach
 Profile preparation preserves native HOME by default and creates a fresh agent
 config root. Captured mode reports unresolved ambient sources; `--strict` refuses
 them. Preparation does not start an agent or bind authentication.
+
+Freeze and execute experiment matrices with `experiment validate/create/inspect`
+and `run`. Native execution uses the selected TUI and an explicit short runtime
+root; `--mode offline-fixture` exercises the same runner without an agent launch.
+`run --resume` preserves attempts, and `--retry TRIAL_ID` requests a new one.
+See [runner contracts](docs/tech/runner.md) for controller JSON, budgets, native
+setup, final captures and the pending-assessment recovery seam.

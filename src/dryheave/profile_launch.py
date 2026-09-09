@@ -80,6 +80,16 @@ def _disabled_paths(profile: FrozenProfile, roots: dict[str, str]) -> tuple[str,
 def _codex_args(profile: FrozenProfile, roots: dict[str, str]) -> list[str]:
     recipe = profile.recipe
     arguments: list[str] = []
+    if recipe.workspace_trust != "prompt":
+        arguments.extend(
+            (
+                "--config",
+                "projects."
+                + json.dumps(roots["project"])
+                + ".trust_level="
+                + json.dumps(recipe.workspace_trust),
+            )
+        )
     if recipe.model:
         arguments.extend(("--model", recipe.model))
     if recipe.effort:
@@ -466,6 +476,7 @@ def preflight_profile(
             for item in issues
         ),
         required_environment=tuple(item.name for item in profile.recipe.environment),
+        workspace_trust=profile.recipe.workspace_trust,
     )
 
 

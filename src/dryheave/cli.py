@@ -12,6 +12,7 @@ from dryheave.commands import ArgumentParser, CommandHandler, CommandRegistrar, 
 from dryheave.constants import VERSION
 from dryheave.errors import DryheaveError, InputError
 from dryheave.profile_cli import register_profiles
+from dryheave.runner_cli import register_runner
 from dryheave.serialization import validation_message
 from dryheave.storage import ObjectStore, default_store_path
 
@@ -82,6 +83,7 @@ def build_parser(registrars: Sequence[CommandRegistrar] = ()) -> ArgumentParser:
     register_store(registry)
     register_authoring(registry)
     register_profiles(registry)
+    register_runner(registry)
     for registrar in registrars:
         registrar(registry)
     return parser

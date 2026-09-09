@@ -390,3 +390,20 @@ def test_captured_skill_disables_original_source_path_not_derived_copy(
     disabled = [root.path for root in plan.discovery_roots if root.status == "disabled"]
     assert str(source / "SKILL.md") in disabled
     assert all(path != str(frozen) for path in disabled)
+
+
+@pytest.mark.parametrize("trust", ["trusted", "untrusted"])
+def test_explicit_owned_workspace_trust_is_separate_from_native_permissions(store, tmp_path, trust):
+    from conftest import profile_recipe
+    from dryheave.profile_models import CaptureSpec
+    from dryheave.profiles import capture_profile
+
+    root = tmp_path / 'workspace "quoted"'
+    root.mkdir()
+    identifier = capture_profile(store, CaptureSpec(recipe=profile_recipe(workspace_trust=trust)))
+    plan = materialize_profile(store, identifier, tmp_path / "runtime", root)
+    import json
+
+    assert plan.workspace_trust == trust
+    assert "projects." + json.dumps(str(root)) + ".trust_level=" + json.dumps(trust) in plan.argv
+    assert plan.fidelity == "captured"

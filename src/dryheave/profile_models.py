@@ -67,6 +67,7 @@ class NativeRecipe(StrictModel):
     effort: Text | None = None
     workflow: Text | None = None
     home_policy: Literal["native", "isolated"] = "native"
+    workspace_trust: Literal["prompt", "trusted", "untrusted"] = "prompt"
     disabled_skill_paths: tuple[Text, ...] = ()
     disabled_skill_names: tuple[Name, ...] = (
         "dryheave-collect",
@@ -78,6 +79,8 @@ class NativeRecipe(StrictModel):
 
     @model_validator(mode="after")
     def environment_contract(self) -> Self:
+        if self.agent != AgentKind.CODEX and self.workspace_trust != "prompt":
+            raise ValueError("explicit workspace trust is currently verified only for Codex")
         names = [item.name for item in self.environment]
         reserved = {
             "HOME",
@@ -210,6 +213,7 @@ class LaunchPlan(StrictModel):
     fidelity: Literal["captured", "strict"]
     launchable: bool
     required_environment: tuple[str, ...] = ()
+    workspace_trust: Literal["prompt", "trusted", "untrusted"] = "prompt"
     execution_mode: Literal["native"] = "native"
     isolation: Literal["repository-object"] = "repository-object"
 

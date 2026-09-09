@@ -126,7 +126,12 @@ class TuiTestTerminal:
             )
         if result.outcome != "exited":
             raise DeliveryUncertain("Terminal command ended without a delivery acknowledgement.")
-        response = parse_json(result.stdout)
+        try:
+            response = parse_json(result.stdout)
+        except InputError as error:
+            raise TransportError(
+                f"Terminal {arguments[0]} returned exit {result.returncode} without a valid JSON acknowledgement; see retained command stdout/stderr evidence."
+            ) from error
         if arguments == ("daemon", "status"):
             if result.returncode == DAEMON_ABSENT_EXIT and response.get("running") is False:
                 return response
@@ -204,6 +209,7 @@ class TuiTestTerminal:
                 "--config",
                 str(config),
                 "--no-wait-ready",
+                "--",
                 *plan.argv,
             )
             status = self._call("daemon", "status")

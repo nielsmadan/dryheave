@@ -3,6 +3,7 @@ import os
 import selectors
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -12,6 +13,12 @@ from typing import Literal
 
 from dryheave.errors import InputError
 from dryheave.models import CommandSpec
+
+
+@dataclass(frozen=True)
+class CommandControl:
+    cancelled: threading.Event | None = None
+    deadline: float | None = None
 
 
 @dataclass(frozen=True)
@@ -37,6 +44,7 @@ def run_command(
     input_bytes: bytes = b"",
     environment: dict[str, str] | None = None,
     on_start: Callable[[int], None] | None = None,
+    control: CommandControl | None = None,
 ) -> CommandResult:
     cwd = root if command.cwd == "." else root / command.cwd
     if not cwd.resolve().is_relative_to(root.resolve()):
@@ -52,7 +60,8 @@ def run_command(
     )
     output = {"stdout": bytearray(), "stderr": bytearray()}
     outcome: Literal["exited", "timeout", "output_limit"] = "exited"
-    deadline = time.monotonic() + command.timeout_seconds
+    control = control or CommandControl()
+    deadline = min(control.deadline or float("inf"), time.monotonic() + command.timeout_seconds)
     streams = (process.stdin, process.stdout, process.stderr)
     try:
         _observe_start(on_start, process.pid)
@@ -61,7 +70,7 @@ def run_command(
             offset = 0
             while selector.get_map():
                 remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                if remaining <= 0 or (control.cancelled is not None and control.cancelled.is_set()):
                     outcome = "timeout"
                     break
                 for key, _ in selector.select(min(remaining, 0.1)):
@@ -86,7 +95,7 @@ def run_command(
                 if outcome != "exited":
                     break
             if outcome == "exited":
-                outcome = _wait(process, deadline)
+                outcome = _wait(process, deadline, control.cancelled)
     finally:
         if process.returncode is None:
             _stop(process)
@@ -118,12 +127,16 @@ def _close_input(process: subprocess.Popen[bytes]) -> None:
         process.stdin.close()
 
 
-def _wait(process: subprocess.Popen[bytes], deadline: float) -> Literal["exited", "timeout"]:
-    try:
-        process.wait(timeout=max(0.001, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        return "timeout"
-    return "exited"
+def _wait(
+    process: subprocess.Popen[bytes], deadline: float, cancelled: threading.Event | None
+) -> Literal["exited", "timeout"]:
+    while time.monotonic() < deadline and not (cancelled is not None and cancelled.is_set()):
+        try:
+            process.wait(timeout=min(0.1, max(0.001, deadline - time.monotonic())))
+            return "exited"
+        except subprocess.TimeoutExpired:
+            continue
+    return "timeout"
 
 
 def _observe_start(callback: Callable[[int], None] | None, pid: int) -> None:

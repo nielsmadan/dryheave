@@ -27,6 +27,7 @@ class NativeLogSource:
     agent: AgentKind
     artifacts: ArtifactWriter
     limits: DriverLimits = field(default_factory=DriverLimits)
+    include_existing: bool = False
     files: dict[str, _LogFile] = field(default_factory=dict, init=False)
     sequence: int = field(default=0, init=False)
     bytes_read: int = field(default=0, init=False)
@@ -39,9 +40,14 @@ class NativeLogSource:
             with regular_fd(path, os.O_RDONLY) as descriptor:
                 info = os.fstat(descriptor)
                 self.files[str(path.relative_to(self.root))] = _LogFile(
-                    FileCursor(device=info.st_dev, inode=info.st_ino, offset=info.st_size, line=0),
+                    FileCursor(
+                        device=info.st_dev,
+                        inode=info.st_ino,
+                        offset=0 if self.include_existing else info.st_size,
+                        line=0,
+                    ),
                     self._adapter(),
-                    old=True,
+                    old=not self.include_existing,
                 )
 
     def _adapter(self) -> CodexAdapter | ClaudeAdapter:

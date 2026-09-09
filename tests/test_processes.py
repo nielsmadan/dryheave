@@ -77,3 +77,32 @@ def test_symlink_cwd_rejected(tmp_path: Path) -> None:
     (tmp_path / "escape").symlink_to(tmp_path.parent, target_is_directory=True)
     with pytest.raises(InputError, match="escapes"):
         run_command(CommandSpec(argv=("true",), cwd="escape"), tmp_path)
+
+
+def test_parent_cancellation_interrupts_a_child_with_closed_pipes(tmp_path):
+    import threading
+    import time
+
+    from dryheave.processes import CommandControl
+
+    cancelled = threading.Event()
+    timer = threading.Timer(0.2, cancelled.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        result = run_command(
+            CommandSpec(
+                argv=(
+                    sys.executable,
+                    "-c",
+                    "import os,time; os.close(0); os.close(1); os.close(2); time.sleep(10)",
+                ),
+                timeout_seconds=10,
+            ),
+            tmp_path,
+            control=CommandControl(cancelled=cancelled),
+        )
+    finally:
+        timer.cancel()
+    assert result.outcome == "timeout"
+    assert time.monotonic() - started < 2

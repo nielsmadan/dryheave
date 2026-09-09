@@ -135,3 +135,97 @@ def driver_plan(tmp_path: Path):
         fidelity="captured",
         launchable=True,
     )
+
+
+@pytest.fixture
+def benchmark(store, historical_repo, tmp_path):
+    from dryheave.cases import DeterministicCriterion, TaskFact, draft_case, freeze_case
+    from dryheave.controller_models import ControllerRecipe, ScriptStep, SimulatorDecision
+    from dryheave.experiment_models import ExperimentDraft, FixtureTurn, VariantSpec
+    from dryheave.logs.service import import_session
+    from dryheave.models import CommandSpec
+    from dryheave.personas import Persona
+    from dryheave.repositories import capture_repository
+
+    source, baseline, _, _ = historical_repo
+    repository = capture_repository(store, source, baseline)
+    session = import_session(store, Path("tests/fixtures/codex-recorded.jsonl"), AgentKind.CODEX)
+    draft = draft_case(store, session, repository_id=repository)
+    verifier = tmp_path / "hidden.py"
+    verifier.write_text('print("PRIVATE_VERIFIER_SENTINEL")\n')
+    case = freeze_case(
+        store,
+        draft.model_copy(
+            update={
+                "initial_prompt": "Fix the greeting; ask me which punctuation.",
+                "intent_confirmed": True,
+                "facts_reviewed": True,
+                "unresolved_issues": (),
+                "persona": Persona(
+                    name="User",
+                    instructions="Give concise factual replies.",
+                    disclosure_policy="Disclose approved facts on request.",
+                    unknown_answer_policy="Say when a fact is unknown.",
+                    reviewed_subject_safe=True,
+                ),
+                "allowed_facts": (
+                    TaskFact(
+                        fact_id="punctuation",
+                        text="Use a comma after Hello.",
+                        curator_authored=True,
+                    ),
+                ),
+                "hidden_files": {"hidden.py": str(verifier)},
+                "criteria": (
+                    DeterministicCriterion(
+                        criterion_id="greeting",
+                        description="Validate punctuation and correct name handling.",
+                        command=CommandSpec(argv=(sys.executable, "{verifier}/hidden.py")),
+                        entrypoint="hidden.py",
+                        expected_stdout="PRIVATE_VERIFIER_SENTINEL",
+                    ),
+                ),
+            }
+        ),
+        tmp_path,
+    )
+    profile = capture_profile(store, CaptureSpec(recipe=profile_recipe()))
+    store.set_alias("task", case)
+    store.set_alias("subject", profile)
+    return ExperimentDraft(
+        name="Greeting",
+        cases=("task",),
+        variants=(VariantSpec(name="base", profile="subject"),),
+        simulator=ControllerRecipe(
+            script=(
+                ScriptStep(
+                    assistant="Which punctuation?",
+                    decision=SimulatorDecision(
+                        action="reply",
+                        text="Use a comma after Hello.",
+                        fact_ids=("punctuation",),
+                        reason="The approved punctuation fact answers the question.",
+                    ),
+                ),
+                ScriptStep(
+                    assistant="Done.",
+                    decision=SimulatorDecision(
+                        action="stop", reason="The subject reported its implementation."
+                    ),
+                ),
+            )
+        ),
+        fixture=(
+            FixtureTurn(
+                prompt="Fix the greeting; ask me which punctuation.", assistant="Which punctuation?"
+            ),
+            FixtureTurn(
+                prompt="Use a comma after Hello.",
+                assistant="Done.",
+                files={
+                    "greet.py": 'def greet(name):\n    return "Hello, " + name\n',
+                    "added.txt": "new task file\n",
+                },
+            ),
+        ),
+    )

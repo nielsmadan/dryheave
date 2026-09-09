@@ -257,3 +257,10 @@ ordinary ChatGPT login tokens cannot simply be extracted into it. No profile
 operation changes subscription authentication into API billing. See
 [Codex authentication](https://developers.openai.com/codex/auth) and the pinned
 [auth storage implementation](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/login/src/auth/storage.rs).
+
+A Codex recipe may explicitly set `workspace_trust` to `trusted` or `untrusted`.
+The default `prompt` preserves native onboarding. Materialization adds the exact
+owned workspace's `projects."PATH".trust_level` argv override and records the
+choice in `LaunchPlan`. It preserves captured config bytes and existing native
+permission/sandbox settings. Non-prompt trust choices currently reject Claude;
+no global trust store is copied or modified. See runner.md for native execution.
