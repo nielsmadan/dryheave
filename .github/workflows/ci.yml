@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.8.10"
+          python-version: "3.13"
+      - name: Sync dependencies
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check
+      - name: Check formatting
+        run: uv run ruff format --check
+      - name: Check circular imports
+        run: uv run pylint src/dryheave
+      - name: Type check
+        run: uv run mypy
+      - name: Test
+        run: uv run pytest -q
+      - name: Coverage
+        run: uv run pytest -q --cov --cov-report=xml
+      - name: Build package
+        run: uv build

@@ -1,0 +1,18 @@
+pre-commit:
+  parallel: true
+  commands:
+    ruff-format:
+      glob: "*.py"
+      run: UV_CACHE_DIR=.cache/uv uv run ruff format --check {staged_files}
+    ruff-lint:
+      glob: "*.py"
+      run: UV_CACHE_DIR=.cache/uv uv run ruff check {staged_files}
+
+pre-push:
+  commands:
+    pylint:
+      run: UV_CACHE_DIR=.cache/uv uv run pylint src/dryheave
+    mypy:
+      run: UV_CACHE_DIR=.cache/uv uv run mypy
+    tests:
+      run: UV_CACHE_DIR=.cache/uv uv run pytest -q --cov
