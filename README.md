@@ -1,8 +1,9 @@
 # Dryheave
 
 Dryheave builds reusable interactive coding-agent benchmarks from frozen inputs
-and retained evidence. This initial package provides validated artifacts, an
-immutable store, aliases, and durable run journals.
+and retained evidence. Import Codex/Claude logs, curate cases and personas, and
+freeze exact historical repositories with their reachable Git ancestry. The core
+also provides immutable storage, aliases and durable run journals.
 
 Requires Python 3.13 or newer. For development, install uv, just and Lefthook,
 then run `just setup`, `just check`, and `just coverage`.
@@ -28,5 +29,7 @@ point to immutable IDs. Loading an object checks its content and references.
 An object ID detects accidental changes; it is not a signature or access control.
 Store artifacts can contain sensitive task evidence and should be kept private.
 
-See [storage contracts](docs/tech/storage.md) for the Python API and recovery rules.
-Build an sdist and wheel with `just build`.
+See [authoring](docs/tech/authoring.md) for collection commands, editable drafts,
+historical snapshots and replay APIs. See [storage contracts](docs/tech/storage.md)
+for immutable artifacts and recovery rules. Build an sdist and wheel with
+`just build`.

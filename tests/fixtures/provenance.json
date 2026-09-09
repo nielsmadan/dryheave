@@ -1,0 +1,16 @@
+{
+  "codex": {
+    "source_version": "0.153.4",
+    "source_kind": "local actual JSONL session",
+    "derived_on": "2026-09-09",
+    "fixture_lines": 14,
+    "policy": "Preserved selected structural shapes, numbers and protocol tags. Replaced all identifiers, paths, free text and tool inputs with synthetic fixture content. Omitted reasoning/signatures and compaction replacement histories. Private source path and line mapping is kept in ignored .cache/fixture-provenance. Dialogue semantics are fixture scenarios, not claims about the private original task."
+  },
+  "claude": {
+    "source_version": "2.1.263",
+    "source_kind": "local actual JSONL session",
+    "derived_on": "2026-09-09",
+    "fixture_lines": 11,
+    "policy": "Preserved selected structural shapes, numbers and protocol tags. Replaced all identifiers, paths, free text and tool inputs with synthetic fixture content. Omitted reasoning/signatures and compaction replacement histories. Private source path and line mapping is kept in ignored .cache/fixture-provenance. Dialogue semantics are fixture scenarios, not claims about the private original task."
+  }
+}

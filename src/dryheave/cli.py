@@ -1,36 +1,18 @@
 import argparse
 import json
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Never, TextIO
+from typing import TextIO
 
 from pydantic import JsonValue, ValidationError
 
+from dryheave.authoring_cli import register_authoring
+from dryheave.commands import ArgumentParser, CommandHandler, CommandRegistrar, CommandRegistry
 from dryheave.constants import VERSION
 from dryheave.errors import DryheaveError, InputError
 from dryheave.serialization import validation_message
 from dryheave.storage import ObjectStore, default_store_path
-
-type CommandHandler = Callable[[argparse.Namespace, ObjectStore], dict[str, JsonValue]]
-type CommandRegistrar = Callable[["CommandRegistry"], None]
-
-
-class ArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> Never:
-        raise InputError(message)
-
-
-class CommandRegistry:
-    def __init__(self, parser: argparse.ArgumentParser) -> None:
-        self.commands = parser.add_subparsers(dest="command", required=True)
-
-    def add(self, name: str, *, help_text: str) -> argparse.ArgumentParser:
-        return self.commands.add_parser(name, help=help_text, description=help_text)
-
-    @staticmethod
-    def handler(parser: argparse.ArgumentParser, handler: CommandHandler) -> None:
-        parser.set_defaults(handler=handler)
 
 
 def _path(_args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
@@ -97,6 +79,7 @@ def build_parser(registrars: Sequence[CommandRegistrar] = ()) -> ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Emit a structured JSON response.")
     registry = CommandRegistry(parser)
     register_store(registry)
+    register_authoring(registry)
     for registrar in registrars:
         registrar(registry)
     return parser

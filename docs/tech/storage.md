@@ -118,7 +118,10 @@ signatures. Immutable input checks and native audit remain separate concerns.
 
 ## CLI registration and errors
 
-Domain CLI modules supply a registrar taking `CommandRegistry`. Add a parser with
+Domain CLI modules import `CommandRegistry` from the low-level `commands.py`
+module; `cli.py` preserves its existing public imports. Built-in registration
+composes storage and authoring modules without domain services importing the CLI.
+Add a parser with
 `registry.add(name, help_text=...)`, configure argparse options, and associate a
 handler with `registry.handler(parser, handler)`. Handlers take `(args, store)` and
 return a JSON-compatible dictionary. `main(..., registrars=(register,))` composes
