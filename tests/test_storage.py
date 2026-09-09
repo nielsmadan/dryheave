@@ -234,3 +234,34 @@ def test_default_store_uses_only_documented_xdg_setting(
     monkeypatch.delenv("XDG_DATA_HOME")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     assert default_store_path() == tmp_path / ".local/share/dryheave"
+
+
+def test_scoped_blob_read_traverses_closure_once_and_rechecks_returned_bytes(
+    store, payload, monkeypatch
+):
+    from dryheave.errors import IntegrityError
+    from dryheave.models import ObjectKind
+
+    dependency = store.put(ObjectKind.PERSONA, payload, files={"dependency": b"stable"})
+    files = {f"file-{index}": str(index).encode() for index in range(40)}
+    identifier = store.put(ObjectKind.RESULT, payload, files=files, references=(dependency,))
+    original = store._manifest
+    visited = []
+
+    def manifest(current):
+        visited.append(current)
+        return original(current)
+
+    monkeypatch.setattr(store, "_manifest", manifest)
+    assert store.read_blobs(identifier) == files
+    assert visited == [identifier, dependency]
+    verify = store.verify
+
+    def mutate_after_verify(current):
+        result = verify(current)
+        (store.object_path(current) / "blobs" / result.files["file-0"]).write_bytes(b"altered")
+        return result
+
+    monkeypatch.setattr(store, "verify", mutate_after_verify)
+    with pytest.raises(IntegrityError, match="hash mismatch"):
+        store.read_blobs(identifier, ("file-0",))

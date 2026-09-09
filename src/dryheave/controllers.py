@@ -17,6 +17,7 @@ from dryheave.controller_models import (
     SimulatorDecision,
     SimulatorInput,
 )
+from dryheave.controller_schema import controller_schema
 from dryheave.controller_watch import ControllerWatch
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.models import CleanupReport, ProcessIdentity
@@ -215,13 +216,13 @@ def invoke_controller(
             status="failed",
             elapsed_seconds=time.monotonic() - started,
             error=type(error).__name__,
-            usage=_failure_usage(recipe, artifacts),
+            usage=failure_usage(recipe, artifacts),
             usage_reason="Failed call; any observed usage is retained independently of response validity.",
             cleanup=context.cleanup,
         )
 
 
-def _failure_usage(recipe: ControllerRecipe, artifacts: ArtifactWriter) -> TokenUsage | None:
+def failure_usage(recipe: ControllerRecipe, artifacts: ArtifactWriter) -> TokenUsage | None:
     try:
         content = read_bytes(artifacts.root / "stdout.bin", limit=recipe.budget.max_output_bytes)
         if recipe.kind == "codex":
@@ -240,8 +241,7 @@ def _native(
 ) -> ControllerResponse:
     root = artifacts.root
     if recipe.kind == "codex":
-        schema = SimulatorDecision.model_json_schema()
-        schema["required"] = list(schema["properties"])
+        schema = controller_schema(SimulatorDecision)
         atomic_write(
             root / "schema.json",
             canonical_json(schema),
@@ -256,7 +256,7 @@ def _native(
             "isolation": recipe.isolation,
         },
     )
-    result = _run_native(recipe, content, artifacts, context, command)
+    result = run_role_command(recipe, content, artifacts, context, command)
     if result.returncode or result.outcome != "exited":
         raise InputError("Controller command did not complete successfully.")
     if recipe.kind == "codex":
@@ -268,7 +268,7 @@ def _native(
     return parse_model(result.stdout, ControllerResponse)
 
 
-def _run_native(
+def run_role_command(
     recipe: ControllerRecipe,
     content: bytes,
     artifacts: ArtifactWriter,
@@ -285,9 +285,13 @@ def _run_native(
     )
 
     def claim(pid: int) -> None:
-        context.on_identity(owner.add(psutil.Process(pid)))
+        owner.add(psutil.Process(pid))
+        publish()
 
-    control = CommandControl(deadline=context.deadline, cancelled=watch.cancelled)
+    def publish() -> None:
+        owner.publish(context.on_identity)
+
+    control = CommandControl(deadline=context.deadline, cancelled=watch.cancelled, on_poll=publish)
     try:
         if recipe.kind == "codex" and recipe.command is not None:
             version = run_command(
@@ -340,8 +344,7 @@ def _run_native(
             }
         )
         context.cleanup = cleanup
-        for identity in cleanup.owned:
-            context.on_identity(identity)
+        publish()
         artifacts.record("cleanup", cleanup)
         if not cleanup.known_writers_stopped or watch.error is not None:
             raise InputError(watch.error or "Controller cleanup could not stop every known writer.")

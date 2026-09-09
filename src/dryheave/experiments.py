@@ -2,7 +2,7 @@ from pathlib import Path
 
 from dryheave.cases import load_frozen_case
 from dryheave.controller_models import ControllerRecipe
-from dryheave.errors import InputError
+from dryheave.errors import DryheaveError, InputError
 from dryheave.experiment_models import (
     MAX_TRIALS,
     ExperimentDraft,
@@ -13,7 +13,7 @@ from dryheave.experiment_models import (
     VariantSpec,
 )
 from dryheave.filesystem import read_bytes
-from dryheave.models import ObjectKind, StrictModel
+from dryheave.models import Manifest, ObjectKind, StrictModel
 from dryheave.profile_models import DeriveSpec, NativeRecipe
 from dryheave.profile_security import reject_secret_fields, validate_arguments
 from dryheave.profiles import derive_profile, load_profile
@@ -152,18 +152,7 @@ def load_experiment(store: ObjectStore, reference: str) -> FrozenExperiment:
     identifier = store.resolve(reference)
     frozen = store.load(identifier, FrozenExperiment, kind=ObjectKind.EXPERIMENT)
     manifest = store.get(identifier, kind=ObjectKind.EXPERIMENT)
-    if manifest.references != references(frozen) or manifest.files:
-        raise InputError("Experiment input closure differs from its declared inputs.")
-    if len(set(frozen.case_ids)) != len(frozen.case_ids) or len(
-        {variant.name for variant in frozen.variants}
-    ) != len(frozen.variants):
-        raise InputError("Frozen experiment matrix contains duplicates.")
-    if len(frozen.case_ids) * len(frozen.variants) * frozen.repetitions > MAX_TRIALS:
-        raise InputError("Frozen experiment matrix exceeds its bound.")
-    if frozen.trials != expand_trials(
-        frozen.case_ids, frozen.variants, frozen.repetitions, frozen.seed
-    ):
-        raise InputError("Frozen experiment expansion does not match its matrix.")
+    _validate_matrix(frozen, manifest)
     simulator = load_role(store, frozen.simulator_id, ControllerRecipe, ObjectKind.SIMULATOR)
     load_role(store, frozen.scoring_id, ScoringConfig, ObjectKind.SCORING)
     for case_id in frozen.case_ids:
@@ -176,3 +165,36 @@ def load_experiment(store: ObjectStore, reference: str) -> FrozenExperiment:
     for variant in frozen.variants:
         load_profile(store, variant.profile_id)
     return frozen
+
+
+def _validate_matrix(frozen: FrozenExperiment, manifest: Manifest) -> None:
+    if manifest.references != references(frozen) or manifest.files:
+        raise InputError("Experiment input closure differs from its declared inputs.")
+    if len(set(frozen.case_ids)) != len(frozen.case_ids) or len(
+        {variant.name for variant in frozen.variants}
+    ) != len(frozen.variants):
+        raise InputError("Frozen experiment matrix contains duplicates.")
+    if len(frozen.case_ids) * len(frozen.variants) * frozen.repetitions > MAX_TRIALS:
+        raise InputError("Frozen experiment matrix exceeds its bound.")
+    if frozen.trials != expand_trials(
+        frozen.case_ids, frozen.variants, frozen.repetitions, frozen.seed
+    ):
+        raise InputError("Frozen experiment expansion does not match its matrix.")
+
+
+def inspect_experiment(
+    store: ObjectStore, reference: str
+) -> tuple[FrozenExperiment | None, str | None]:
+    try:
+        return load_experiment(store, reference), None
+    except DryheaveError as error:
+        failure = str(error)
+    try:
+        evidence = store.read_evidence(reference)
+        if evidence.manifest.kind != ObjectKind.EXPERIMENT:
+            raise InputError("Expected frozen experiment evidence.")
+        frozen = parse_model(canonical_json(evidence.manifest.payload), FrozenExperiment)
+        _validate_matrix(frozen, evidence.manifest)
+        return frozen, failure
+    except DryheaveError:
+        return None, failure

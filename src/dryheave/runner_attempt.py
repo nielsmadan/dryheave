@@ -38,7 +38,7 @@ from dryheave.process_ownership import ProcessOwner
 from dryheave.processes import CommandControl, run_command
 from dryheave.profile_launch import launch_environment, materialize_profile
 from dryheave.repositories import materialize_repository
-from dryheave.runner_models import AttemptState, CapturedAttempt
+from dryheave.runner_models import AttemptState, CapturedAttempt, QuarantinedCapture
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import digest
 from dryheave.storage import ObjectStore
@@ -464,9 +464,20 @@ class TrialExecution:
             evidence_omissions=omissions,
             errors=tuple(self.errors),
         )
-        identifier = self.store.put(
-            ObjectKind.CAPTURE, captured, files=blobs, references=(captured.experiment_id,)
-        )
+        try:
+            identifier = self.store.put(
+                ObjectKind.CAPTURE, captured, files=blobs, references=(captured.experiment_id,)
+            )
+        except DryheaveError as error:
+            identifier = self.store.put(
+                ObjectKind.QUARANTINE,
+                QuarantinedCapture(failure=str(error), capture=captured),
+                files=blobs,
+            )
+            self.update(
+                stage=TrialStage.CAPTURED, quarantine_id=identifier, capture_error=str(error)
+            )
+            return
         self.update(stage=TrialStage.CAPTURED, capture_id=identifier)
 
     def _evidence(self) -> tuple[dict[str, bytes], tuple[str, ...]]:

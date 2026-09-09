@@ -19,6 +19,11 @@ from dryheave.models import CommandSpec
 class CommandControl:
     cancelled: threading.Event | None = None
     deadline: float | None = None
+    on_poll: Callable[[], None] | None = None
+
+    def poll(self) -> None:
+        if self.on_poll is not None:
+            self.on_poll()
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,7 @@ def run_command(
             _register(selector, streams, bool(input_bytes))
             offset = 0
             while selector.get_map():
+                control.poll()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or (control.cancelled is not None and control.cancelled.is_set()):
                     outcome = "timeout"
@@ -95,7 +101,7 @@ def run_command(
                 if outcome != "exited":
                     break
             if outcome == "exited":
-                outcome = _wait(process, deadline, control.cancelled)
+                outcome = _wait(process, deadline, control)
     finally:
         if process.returncode is None:
             _stop(process)
@@ -128,9 +134,12 @@ def _close_input(process: subprocess.Popen[bytes]) -> None:
 
 
 def _wait(
-    process: subprocess.Popen[bytes], deadline: float, cancelled: threading.Event | None
+    process: subprocess.Popen[bytes], deadline: float, control: CommandControl
 ) -> Literal["exited", "timeout"]:
-    while time.monotonic() < deadline and not (cancelled is not None and cancelled.is_set()):
+    while time.monotonic() < deadline and not (
+        control.cancelled is not None and control.cancelled.is_set()
+    ):
+        control.poll()
         try:
             process.wait(timeout=min(0.1, max(0.001, deadline - time.monotonic())))
             return "exited"

@@ -290,3 +290,21 @@ def test_authoring_rejects_invalid_persona_inputs_before_publication(
     with pytest.raises(InputError, match="self-contained curated text"):
         freeze_case(store, draft, tmp_path)
     publish.assert_not_called()
+
+
+@pytest.mark.parametrize("marker", ["", " ", "x" * 1001])
+def test_failure_execution_marker_requires_bounded_nonblank_text(marker):
+    from pydantic import ValidationError
+
+    from dryheave.cases import DeterministicCriterion
+    from dryheave.models import CommandSpec
+
+    with pytest.raises(ValidationError):
+        DeterministicCriterion(
+            criterion_id="check",
+            description="Check the explicit failure evidence contract.",
+            command=CommandSpec(argv=("python3", "{verifier}/check.py")),
+            entrypoint="check.py",
+            expected_stdout="CHECKS_PASSED",
+            expected_failure_stdout=marker,
+        )

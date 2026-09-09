@@ -229,3 +229,48 @@ def benchmark(store, historical_repo, tmp_path):
             ),
         ),
     )
+
+
+@pytest.fixture
+def graded_benchmark(store, benchmark):
+    from dryheave.cases import load_frozen_case
+    from dryheave.models import ObjectKind
+
+    case_id = store.resolve(benchmark.cases[0])
+    case = load_frozen_case(store, case_id)
+    files = store.read_blobs(case_id)
+    files["verifiers/hidden.py"] = (
+        b"import runpy\n"
+        b'greet = runpy.run_path("greet.py")["greet"]\n'
+        b"try:\n"
+        b'    assert greet("Niels") == "Hello, Niels"\n'
+        b'    assert greet("") == "Hello, "\n'
+        b"except AssertionError:\n"
+        b'    print("GREETING_ASSERTION_FAILED", flush=True)\n'
+        b"    raise SystemExit(1)\n"
+        b'print("PRIVATE_VERIFIER_SENTINEL", flush=True)\n'
+    )
+    files["reference.patch"] = (
+        b"diff --git a/greet.py b/greet.py\n"
+        b"--- a/greet.py\n"
+        b"+++ b/greet.py\n"
+        b"@@ -1,2 +1,2 @@\n"
+        b" def greet(name):\n"
+        b'-    return "Hello " + name\n'
+        b'+    return "Hello, " + name\n'
+    )
+    changed = store.put(
+        ObjectKind.CASE,
+        case.model_copy(
+            update={
+                "reference_patch_file": "reference.patch",
+                "criteria": tuple(
+                    item.model_copy(update={"expected_failure_stdout": "GREETING_ASSERTION_FAILED"})
+                    for item in case.criteria
+                ),
+            }
+        ),
+        files=files,
+        references=(case.persona_id, case.repository_id),
+    )
+    return benchmark.model_copy(update={"cases": (changed,)})

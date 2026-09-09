@@ -457,7 +457,7 @@ def materialize_repository(
     store: ObjectStore, reference: str, destination: Path
 ) -> RepositorySnapshot:
     snapshot = load_repository(store, reference)
-    files = {name: store.read_blob(reference, name) for name in store.get(reference).files}
+    files = store.read_blobs(reference)
     _materialize(snapshot, files, destination)
     return snapshot
 

@@ -64,6 +64,9 @@ class ObjectKind(StrEnum):
     SCORING = "scoring"
     RESULT = "result"
     CAPTURE = "capture"
+    QUARANTINE = "quarantine"
+    ASSESSMENT_EVIDENCE = "assessment-evidence"
+    PORTABLE_REPORT = "portable-report"
 
 
 class AgentKind(StrEnum):

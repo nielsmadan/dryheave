@@ -31,7 +31,12 @@ store.set_alias("everyday", identifier)
 bytes for logical file paths. Domain services own concrete payload schemas and
 use `load(reference, Model, kind=...)` to validate them again when loading.
 `get(reference, kind=...)` returns the strict generic envelope. `read_blob` returns
-verified bytes by logical filename. `verify(id)` checks the entire object closure.
+verified bytes by logical filename. `read_blobs(reference, names=None)` verifies
+the closure once per scoped batch, then hashes the actual returned bytes. It does
+not cache verification across subject execution. `read_evidence` verifies an
+object’s own manifest/blob map and returns an explicit `dependency_error` if its
+closure cannot validate; only audit/report code consumes this evidence boundary.
+It does not authorize normal loading or grading of invalid dependencies. `verify(id)` checks the entire object closure.
 `resolve` only resolves a name; it does not itself prove integrity or existence.
 
 Every object is `objects/<id>/manifest.json` plus `blobs/<content-sha256>`. The ID
@@ -83,6 +88,10 @@ with runs.open(run_id, experiment_id=experiment_id) as journal:
 The run service verifies/freezes the experiment before `RunStore.create`. The
 journal layer validates and pins the experiment ID without depending on a domain
 service. `runs/<run-id>/metadata.json` contains this ID and an aware creation time.
+`RunStore.inspect` returns a read-only, hash-validated complete event prefix without
+locking, repairing a tail or trusting a racing checkpoint. Its handle refuses
+writes. Status/report may inspect a run while its writer is active.
+
 `RunStore.open` holds an exclusive stable run lock for its entire context and
 rejects a conflicting supplied experiment. All writes use the yielded journal.
 `ObjectStore.native_lock` additionally serializes native subject execution across

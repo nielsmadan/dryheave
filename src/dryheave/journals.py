@@ -55,11 +55,13 @@ def _read_events(path: Path) -> tuple[list[JournalEvent], bytes]:
 
 
 class RunJournal:
-    def __init__(self, path: Path, metadata: RunMetadata) -> None:
+    def __init__(self, path: Path, metadata: RunMetadata, *, read_only: bool = False) -> None:
         self.path = path
         self.metadata = metadata
         self._events, self.recovered_tail = _read_events(path / "events.jsonl")
-        self._active = True
+        self._active = not read_only
+        if read_only:
+            return
         self.read_checkpoint()
         if self.recovered_tail:
             atomic_write(path / f"torn-{uuid4().hex}.bin", self.recovered_tail, replace=False)
@@ -195,6 +197,21 @@ class RunStore:
             if staged.exists():
                 shutil.rmtree(staged)
         return identifier
+
+    def inspect(self, identifier: str) -> RunJournal:
+        identifier = _run_id(identifier)
+        path = self.root / "runs" / identifier
+        try:
+            content = read_bytes(path / "metadata.json", limit=MAX_MANIFEST_BYTES)
+        except FileNotFoundError as error:
+            raise NotFoundError(f"Run does not exist: {identifier}") from error
+        try:
+            metadata = parse_model(content, RunMetadata)
+        except InputError as error:
+            raise IntegrityError(f"Run metadata is invalid. {error}") from error
+        if metadata.run_id != identifier:
+            raise IntegrityError("Run metadata has a mismatched run ID.")
+        return RunJournal(path, metadata, read_only=True)
 
     @contextmanager
     def open(self, identifier: str, *, experiment_id: str | None = None) -> Iterator[RunJournal]:

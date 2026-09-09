@@ -1,5 +1,6 @@
 import threading
 import time
+from collections.abc import Callable
 from contextlib import suppress
 
 import psutil
@@ -17,6 +18,7 @@ class ProcessOwner:
         self.interval = interval
         self.processes: dict[ProcessIdentityKey, psutil.Process] = {}
         self.identities: dict[ProcessIdentityKey, ProcessIdentity] = {}
+        self.published: set[ProcessIdentityKey] = set()
         self.errors: set[str] = set()
         self.lock = threading.RLock()
         self.stopping = threading.Event()
@@ -44,6 +46,13 @@ class ProcessOwner:
     def snapshot(self) -> tuple[ProcessIdentity, ...]:
         with self.lock:
             return tuple(self.identities.values())
+
+    def publish(self, on_identity: Callable[[ProcessIdentity], None]) -> None:
+        for identity in self.snapshot():
+            key = (identity.pid, identity.created)
+            if key not in self.published:
+                on_identity(identity)
+                self.published.add(key)
 
     def scan(self) -> None:
         with self.lock:

@@ -241,3 +241,21 @@ def test_oversized_checkpoint_preserves_previous_state(
             with pytest.raises(LimitError):
                 journal.checkpoint({"status": "preparing"})
         assert journal.read_checkpoint().state == {"status": "reserved"}
+
+
+def test_read_only_inspection_does_not_lock_or_repair_active_tail(tmp_path):
+    from dryheave.journals import RunStore
+
+    runs = RunStore(tmp_path / "store")
+    run_id = runs.create("a" * 64)
+    with runs.open(run_id) as writer:
+        writer.append("observed", {"stage": "working"})
+        path = writer.path / "events.jsonl"
+        original = path.read_bytes()
+        with path.open("ab") as stream:
+            stream.write(b'{"partial":')
+        view = runs.inspect(run_id)
+        assert len(view.events) == 1
+        assert view.events[0].data == {"stage": "working"}
+        assert path.read_bytes() == original + b'{"partial":'
+        assert list(writer.path.glob("torn-*")) == []

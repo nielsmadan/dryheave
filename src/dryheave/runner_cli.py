@@ -66,7 +66,11 @@ def _run(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
             }
         )
     return run_experiment(
-        store, args.reference, resume=args.resume, retry=tuple(args.retry), options=options
+        store,
+        args.reference,
+        resume=args.resume,
+        retry=tuple(args.retry),
+        options=options,
     ).model_dump(mode="json")
 
 

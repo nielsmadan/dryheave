@@ -39,6 +39,8 @@ class AttemptState(StrictModel):
     calls: tuple[RoleCall, ...] = ()
     capture_id: ObjectId | None = None
     assessment_id: ObjectId | None = None
+    quarantine_id: ObjectId | None = None
+    capture_error: str | None = None
     stop_reason: str | None = None
 
 
@@ -83,11 +85,19 @@ class CapturedAttempt(StrictModel):
     )
 
 
+class QuarantinedCapture(StrictModel):
+    schema_version: Literal[1] = 1
+    input_integrity: Literal["unverified"] = "unverified"
+    failure: str
+    capture: CapturedAttempt
+
+
 class RunSummary(StrictModel):
     run_id: RunId
     experiment_id: ObjectId
-    options: RunOptions
-    scheduled_trials: int
+    options: RunOptions | None
+    scheduled_trials: int | None
+    input_error: str | None = None
     attempts: tuple[AttemptState, ...]
     unstarted_trials: tuple[Name, ...]
     pending_assessment: tuple[ObjectId, ...]

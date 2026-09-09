@@ -30,3 +30,8 @@ class PathError(InputError):
 
 class LimitError(InputError):
     code = "limit_exceeded"
+
+
+class CancelledError(DryheaveError):
+    code = "cancelled"
+    exit_code = 130

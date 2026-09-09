@@ -87,6 +87,7 @@ A deterministic criterion looks like this in draft JSON:
     "max_output_bytes": 65536
   },
   "expected_stdout": "GREETING_CHECK_EXECUTED",
+  "expected_failure_stdout": "GREETING_ASSERTION_FAILED",
   "suite_id": null,
   "calibration": "uncalibrated"
 }
@@ -99,8 +100,28 @@ command must name its hidden entrypoint as the exact argv element
 `{verifier}/ENTRYPOINT`; the grader substitutes its private verifier directory
 without shell interpolation. It must execute from an independent final-workspace
 copy, use the trusted entrypoint bytes, and require both a successful exit and the
-expected stdout sentinel. A sentinel should be emitted only after the intended
-checks ran. Exit zero alone is insufficient execution evidence.
+expected stdout sentinel. Positive nonzero exits require `expected_failure_stdout`,
+or the common `expected_stdout` marker when no separate failure marker is configured.
+Missing evidence and signal termination are errors, so syntax/import/setup failures
+cannot become task failures or demonstrated baseline calibration. Emit success only
+after all checks pass, and catch only expected assertion failures around the bounded
+checks:
+
+```python
+import runpy
+
+greet = runpy.run_path("greet.py")["greet"]
+try:
+    assert greet("Niels") == "Hello, Niels"
+    assert greet("") == "Hello, "
+except AssertionError:
+    print("GREETING_ASSERTION_FAILED", flush=True)
+    raise SystemExit(1)
+print("GREETING_CHECK_EXECUTED", flush=True)
+```
+
+Keep verifier imports and setup outside that assertion wrapper. A success marker
+printed before the checks does not establish their execution.
 
 Default `suite_id: null` means an independent copy per criterion. A shared non-null
 suite ID declares a suite whose criteria execute in saved order on the same copy.

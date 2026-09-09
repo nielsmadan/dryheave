@@ -157,8 +157,8 @@ a stop, cancellation, budget exhaustion or unresolved delivery.
 
 `scoring` freezes `policy: "required-criteria-v1"`, optional `judge` controller
 recipe, and an optional version/date/currency price table with per-million-token
-rates. These are saved assessment inputs; this task does not interpret them as
-completed grades or current market pricing.
+rates. These are saved assessment inputs, interpreted only by the explicit `assess`
+command, and are not current market pricing. See [results.md](results.md).
 
 ## Durable recovery and assessment integration
 
@@ -202,18 +202,19 @@ configuration, hooks or filters. External alternates are retained as evidence
 but never followed. A successful final turn, stopped writers, complete files and
 later assessment eligibility are separate observations.
 
-Task 6 can obtain `run_status(...).pending_assessment`, load each capture and
+Assessment services can obtain `run_status(...).pending_assessment`, load each capture and
 restore its files with `final_capture.materialize_files(destination,
 capture.workspace.files, blobs, directories=capture.workspace.directories)`.
-Supply verified `store.read_blob(capture_id, entry.blob)` bytes in `blobs` keyed
-by blob path, and use a fresh destination. `load_capture` validates the domain
+Supply `store.read_blobs(capture_id)` bytes in `blobs` keyed by blob path, and use
+a fresh destination. The batch verifies the complete closure once and hashes each
+returned blob, avoiding repeated closure traversal per captured file. `load_capture` validates the domain
 identities, hashes, sizes and exact file/reference maps. For tampered input audit,
 retain validation failures as evidence rather than declaring the capture valid.
 
-After auditing/grading, Task 6 opens `RunStore.open(run_id)`, constructs
+After auditing/grading, the assessment service opens `RunStore.open(run_id)`, constructs
 `ExecutionJournal(journal)` and saves the selected `AttemptState` through audited,
 grading and finished. `capture_id` is immutable across these transitions;
-`assessment_id` can name Task 6's result object. Its service must validate its own
+`assessment_id` names the retained result object. Its service must validate its own
 assessment objects before saving the result ID. `run --resume` skips all those
 stages, and pending assessment excludes finished attempts. These transitions
 require no subject or simulator call. The journal remains the source of truth;

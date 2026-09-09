@@ -275,3 +275,26 @@ def test_controller_cleanup_failure_blocks_capture_and_continuation(
     assert captured.evidence_omissions == ("cleanup_unresolved",)
     with pytest.raises(InputError, match="reconciliation before another subject launch"):
         run_experiment(store, resume=result.run_id)
+
+
+def test_load_capture_batch_traversal_does_not_grow_per_file(store, benchmark, monkeypatch):
+    additions = {f"file-{index}.txt": str(index) for index in range(30)}
+    turn = benchmark.fixture[-1].model_copy(
+        update={"files": benchmark.fixture[-1].files | additions}
+    )
+    modified = benchmark.model_copy(update={"fixture": (*benchmark.fixture[:-1], turn)})
+    summary = run_experiment(
+        store, create_experiment(store, modified), options=RunOptions(mode="offline-fixture")
+    )
+    identifier = summary.pending_assessment[0]
+    original = store._manifest
+    visits = []
+
+    def visit(current):
+        visits.append(current)
+        return original(current)
+
+    monkeypatch.setattr(store, "_manifest", visit)
+    capture = load_capture(store, identifier)
+    assert {entry.path for entry in capture.workspace.files} >= set(additions)
+    assert visits.count(identifier) == 3

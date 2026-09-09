@@ -43,6 +43,7 @@ class DeterministicCriterion(StrictModel):
     command: CommandSpec
     entrypoint: RelativePath
     expected_stdout: str = Field(min_length=1, max_length=1000)
+    expected_failure_stdout: str | None = Field(default=None, min_length=1, max_length=1000)
     suite_id: Name | None = None
     calibration: Literal["uncalibrated"] = "uncalibrated"
 
@@ -56,7 +57,9 @@ class DeterministicCriterion(StrictModel):
             raise ValueError(
                 "command must invoke the supplied hidden entrypoint with {verifier}/PATH"
             )
-        if not self.expected_stdout.strip():
+        if not self.expected_stdout.strip() or (
+            self.expected_failure_stdout is not None and not self.expected_failure_stdout.strip()
+        ):
             raise ValueError("expected execution evidence must not be blank")
         return self
 
@@ -172,8 +175,8 @@ def load_frozen_case(store: ObjectStore, reference: str) -> FrozenCase:
         expected.add(case.reference_patch_file)
     if set(manifest.files) != expected:
         raise InputError("Frozen case blob map does not match its declared hidden inputs.")
-    for name in expected:
-        if not store.read_blob(reference, name).strip():
+    for content in store.read_blobs(reference, tuple(expected)).values():
+        if not content.strip():
             raise InputError("Frozen hidden inputs must be nonempty.")
     load_repository(store, case.repository_id)
     load_frozen_persona(store, case.persona_id)

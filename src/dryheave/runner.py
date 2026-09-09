@@ -1,15 +1,17 @@
 import os
 import signal
+import sys
 import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
+from dryheave.assessment_recovery import reconcile_grading
 from dryheave.cases import load_frozen_case
 from dryheave.drivers.tui_test import MAX_RUNTIME_PATH_BYTES
 from dryheave.errors import InputError
 from dryheave.experiment_models import FrozenExperiment
-from dryheave.experiments import load_experiment
+from dryheave.experiments import inspect_experiment, load_experiment
 from dryheave.journals import RunStore
 from dryheave.models import ObjectKind, TrialStage
 from dryheave.runner_attempt import TrialExecution
@@ -38,12 +40,15 @@ def load_capture(store: ObjectStore, reference: str) -> CapturedAttempt:
         raise InputError("Captured persona differs from the frozen case.")
     if captured.launch_plan is not None and captured.launch_plan.profile_id != captured.profile_id:
         raise InputError("Captured launch plan differs from the trial profile.")
+    blobs = store.read_blobs(identifier)
     expected = dict(captured.evidence_files)
     for entry in (*captured.workspace.files, *captured.workspace.git_files):
         if entry.blob in expected:
             raise InputError("Capture evidence overlaps task or Git files.")
         expected[entry.blob] = entry.sha256
-        if len(store.read_blob(identifier, entry.blob)) != entry.size:
+        if entry.blob not in blobs:
+            raise InputError("Capture blob map omits a declared file.")
+        if len(blobs[entry.blob]) != entry.size:
             raise InputError("Captured file size differs from its declared size.")
     if any(not name.startswith("evidence/") for name in captured.evidence_files):
         raise InputError("Captured evidence requires its dedicated blob namespace.")
@@ -57,18 +62,21 @@ def load_capture(store: ObjectStore, reference: str) -> CapturedAttempt:
     return captured
 
 
-def _summary(execution: ExecutionJournal, experiment: FrozenExperiment) -> RunSummary:
-    if execution.options is None:
-        raise InputError("Run has no frozen options; initialize it explicitly before execution.")
+def _summary(
+    execution: ExecutionJournal, experiment: FrozenExperiment | None, input_error: str | None = None
+) -> RunSummary:
     attempted = {state.trial_id for state in execution.attempts.values()}
     return RunSummary(
         run_id=execution.journal.metadata.run_id,
         experiment_id=execution.journal.metadata.experiment_id,
         options=execution.options,
-        scheduled_trials=len(experiment.trials),
+        scheduled_trials=len(experiment.trials) if experiment is not None else None,
+        input_error=input_error,
         attempts=tuple(execution.attempts.values()),
         unstarted_trials=tuple(
-            trial.trial_id for trial in experiment.trials if trial.trial_id not in attempted
+            trial.trial_id
+            for trial in (experiment.trials if experiment else ())
+            if trial.trial_id not in attempted
         ),
         pending_assessment=tuple(
             state.capture_id
@@ -79,10 +87,10 @@ def _summary(execution: ExecutionJournal, experiment: FrozenExperiment) -> RunSu
 
 
 def run_status(store: ObjectStore, run_id: str) -> RunSummary:
-    with RunStore(store.root).open(run_id) as journal:
-        return _summary(
-            ExecutionJournal(journal), load_experiment(store, journal.metadata.experiment_id)
-        )
+    journal = RunStore(store.root).inspect(run_id)
+    execution = ExecutionJournal(journal)
+    experiment, error = inspect_experiment(store, journal.metadata.experiment_id)
+    return _summary(execution, experiment, error)
 
 
 def _options(options: RunOptions) -> RunOptions:
@@ -141,6 +149,7 @@ def run_experiment(
         if retry:
             raise InputError("Explicit retry requires --resume RUN_ID.")
         resume = RunStore(store.root).create(identifier)
+        print(f"dryheave run reserved: {resume}", file=sys.stderr, flush=True)
     cancelled = cancelled or threading.Event()
     with RunStore(store.root).open(resume, experiment_id=identifier) as journal:
         execution = ExecutionJournal(journal)
@@ -171,6 +180,8 @@ def _run_trials(
     for state in tuple(execution.attempts.values()):
         if state.trial_id not in trials:
             raise InputError("Journal names a trial outside its experiment.")
+        if state.stage in {TrialStage.GRADING, TrialStage.FINISHED}:
+            reconcile_grading(execution, state)
         if state.stage in {
             TrialStage.RESERVED,
             TrialStage.PREPARING,
@@ -183,6 +194,8 @@ def _run_trials(
                     store, execution, experiment, trials[state.trial_id], state, cancelled
                 )
             )
+    if any(state.capture_error for state in execution.attempts.values()):
+        raise InputError("Frozen input integrity failed; further subject launches are blocked.")
     cleanups = (
         load_capture(store, state.capture_id).cleanup
         for state in execution.attempts.values()
@@ -200,5 +213,9 @@ def _run_trials(
         state = execution.reserve(trial.trial_id)
         runner = TrialExecution(store, execution, experiment, trial, state, cancelled)
         runner.execute(inherited)
-        if not runner.cleanup.terminal_closed or not runner.cleanup.known_writers_stopped:
+        if (
+            runner.state.capture_error
+            or not runner.cleanup.terminal_closed
+            or not runner.cleanup.known_writers_stopped
+        ):
             break

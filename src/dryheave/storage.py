@@ -3,13 +3,21 @@ import re
 import shutil
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 from pydantic import ValidationError
 
 from dryheave.constants import MAX_BLOB_BYTES, MAX_MANIFEST_BYTES
-from dryheave.errors import ConflictError, InputError, IntegrityError, LimitError, NotFoundError
+from dryheave.errors import (
+    ConflictError,
+    DryheaveError,
+    InputError,
+    IntegrityError,
+    LimitError,
+    NotFoundError,
+)
 from dryheave.filesystem import (
     atomic_write,
     directory_names,
@@ -51,6 +59,13 @@ def validated_alias(value: str) -> str:
     if re.fullmatch(r"[0-9a-f]{64}", value):
         raise InputError("An alias cannot look like an object ID.")
     return value
+
+
+@dataclass(frozen=True)
+class ObjectEvidence:
+    manifest: Manifest
+    files: dict[str, bytes]
+    dependency_error: str | None
 
 
 class ObjectStore:
@@ -103,6 +118,25 @@ class ObjectStore:
                 self._publish(identifier, encoded, contents, manifest)
         return identifier
 
+    def put_manifest(self, manifest: Manifest, files: Mapping[str, bytes]) -> str:
+        manifest = parse_model(canonical_json(manifest), Manifest)
+        if {name: digest(content) for name, content in files.items()} != manifest.files:
+            raise IntegrityError("Imported object bytes differ from their exact manifest map.")
+        if any(len(content) > MAX_BLOB_BYTES for content in files.values()):
+            raise LimitError("Imported object exceeds its blob byte limit.")
+        encoded = canonical_json(manifest)
+        if len(encoded) > MAX_MANIFEST_BYTES:
+            raise LimitError("Imported manifest exceeds its byte limit.")
+        identifier = digest(encoded)
+        for reference in manifest.references:
+            self.verify(reference)
+        with file_lock(self.root / "locks" / "objects.lock"):
+            try:
+                self.verify(identifier)
+            except NotFoundError:
+                self._publish(identifier, encoded, dict(files), manifest)
+        return identifier
+
     def _publish(
         self, identifier: str, encoded: bytes, files: dict[str, bytes], manifest: Manifest
     ) -> None:
@@ -138,6 +172,24 @@ class ObjectStore:
             raise IntegrityError(f"Object manifest is not canonical: {identifier}")
         return manifest
 
+    def _local(self, identifier: str) -> tuple[Manifest, dict[str, bytes]]:
+        manifest = self._manifest(identifier)
+        path = self.object_path(identifier)
+        contents = {}
+        try:
+            if directory_names(path) != {"manifest.json", "blobs"}:
+                raise IntegrityError(f"Unexpected object entries: {identifier}")
+            if directory_names(path / "blobs") != set(manifest.files.values()):
+                raise IntegrityError(f"Object blob set mismatch: {identifier}")
+            for blob_hash in set(manifest.files.values()):
+                content = read_bytes(path / "blobs" / blob_hash, limit=MAX_BLOB_BYTES)
+                if digest(content) != blob_hash:
+                    raise IntegrityError(f"Object blob hash mismatch: {identifier}/{blob_hash}")
+                contents[blob_hash] = content
+        except FileNotFoundError as error:
+            raise IntegrityError(f"Object content is missing: {identifier}") from error
+        return manifest, {name: contents[sha] for name, sha in manifest.files.items()}
+
     def verify(self, identifier: str) -> Manifest:
         pending = [validated_id(identifier)]
         verified: dict[str, Manifest] = {}
@@ -145,22 +197,21 @@ class ObjectStore:
             current = pending.pop()
             if current in verified:
                 continue
-            manifest = self._manifest(current)
-            path = self.object_path(current)
-            try:
-                if directory_names(path) != {"manifest.json", "blobs"}:
-                    raise IntegrityError(f"Unexpected object entries: {current}")
-                if directory_names(path / "blobs") != set(manifest.files.values()):
-                    raise IntegrityError(f"Object blob set mismatch: {current}")
-                for blob_hash in set(manifest.files.values()):
-                    content = read_bytes(path / "blobs" / blob_hash, limit=MAX_BLOB_BYTES)
-                    if digest(content) != blob_hash:
-                        raise IntegrityError(f"Object blob hash mismatch: {current}/{blob_hash}")
-            except FileNotFoundError as error:
-                raise IntegrityError(f"Object content is missing: {current}") from error
+            manifest, _ = self._local(current)
             verified[current] = manifest
             pending.extend(manifest.references)
         return verified[identifier]
+
+    def read_evidence(self, reference: str) -> ObjectEvidence:
+        identifier = self.resolve(reference)
+        manifest, files = self._local(identifier)
+        dependency_error = None
+        try:
+            for dependency in manifest.references:
+                self.verify(dependency)
+        except DryheaveError as error:
+            dependency_error = str(error)
+        return ObjectEvidence(manifest, files, dependency_error)
 
     def get(self, reference: str, *, kind: ObjectKind | None = None) -> Manifest:
         identifier = self.resolve(reference)
@@ -177,18 +228,25 @@ class ObjectStore:
         manifest = self.get(reference, kind=kind)
         return parse_model(canonical_json(manifest.payload), model)
 
-    def read_blob(self, reference: str, name: str) -> bytes:
+    def read_blobs(self, reference: str, names: tuple[str, ...] | None = None) -> dict[str, bytes]:
         identifier = self.resolve(reference)
         manifest = self.verify(identifier)
-        if name not in manifest.files:
-            raise NotFoundError(f"Object has no file named {name!r}.")
-        blob_hash = manifest.files[name]
-        content = read_bytes(
-            self.object_path(identifier) / "blobs" / blob_hash, limit=MAX_BLOB_BYTES
-        )
-        if digest(content) != blob_hash:
-            raise IntegrityError(f"Object blob hash mismatch: {identifier}/{blob_hash}")
-        return content
+        selected = tuple(manifest.files) if names is None else names
+        contents = {}
+        for name in selected:
+            if name not in manifest.files:
+                raise NotFoundError(f"Object has no file named {name!r}.")
+            blob_hash = manifest.files[name]
+            content = read_bytes(
+                self.object_path(identifier) / "blobs" / blob_hash, limit=MAX_BLOB_BYTES
+            )
+            if digest(content) != blob_hash:
+                raise IntegrityError(f"Object blob hash mismatch: {identifier}/{blob_hash}")
+            contents[name] = content
+        return contents
+
+    def read_blob(self, reference: str, name: str) -> bytes:
+        return self.read_blobs(reference, (name,))[name]
 
     def aliases(self) -> dict[str, str]:
         try:
