@@ -15,7 +15,7 @@ from dryheave.controllers import CallContext, invoke_controller, simulator_proje
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.auth import RuntimeBindings
 from dryheave.drivers.fake import FakeEventSource
-from dryheave.drivers.log_source import NativeLogSource
+from dryheave.drivers.log_source import NativeLogSource, native_log_root
 from dryheave.drivers.models import (
     CleanupReport,
     DriverLimits,
@@ -206,7 +206,10 @@ class TrialExecution:
         terminal.artifacts.on_record = self._transport_event
         self.update(runtime=str(runtime), terminal_session=terminal.session)
         source_native = NativeLogSource(
-            Path(self.state.launch_plan.config_roots["config"]),
+            native_log_root(
+                Path(self.state.launch_plan.config_roots["config"]),
+                self.state.launch_plan.agent,
+            ),
             self.state.launch_plan.agent,
             artifacts,
             limits=limits,

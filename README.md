@@ -11,9 +11,10 @@ Python 3.13+, Git, macOS or Linux are required. Native trials additionally requi
 a supported agent CLI, explicit authentication and **tui-test 0.1.0-beta.3**.
 The offline example needs no agent installation or model calls. This is an alpha:
 Codex 0.153.4 and Claude 2.1.263 log shapes have fixture coverage; Claude's live
-TUI integration is unverified. Full live task completion also remains unverified
-for Codex; the bounded native attempt reached trust onboarding and stopped before
-task delivery. See [native setup and limits](docs/user/native-setup.md) and the
+TUI integration is unverified. Codex 0.154.0 has completed a live clarification
+exchange at Terra low and high effort. Both subjects then requested design
+approval and stopped without editing; successful live task completion remains
+unverified. See [native setup and limits](docs/user/native-setup.md) and the
 [dated QA records](docs/tests/qa-cli/).
 
 ## Install and try the complete offline loop

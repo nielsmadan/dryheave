@@ -4,7 +4,7 @@ from uuid import uuid4
 from dryheave.controller_models import DialogueMessage
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.fake import FakeTerminal
-from dryheave.drivers.log_source import NativeLogSource
+from dryheave.drivers.log_source import NativeLogSource, native_log_root
 from dryheave.drivers.models import Observation
 from dryheave.drivers.session import DriverSession
 from dryheave.errors import DryheaveError
@@ -68,7 +68,10 @@ def _drain(execution: TrialExecution) -> None:
             execution.root / "recovery-driver" / uuid4().hex, 64 * 1024 * 1024
         )
         source = NativeLogSource(
-            Path(plan.config_roots["config"]), plan.agent, artifacts, include_existing=True
+            native_log_root(Path(plan.config_roots["config"]), plan.agent),
+            plan.agent,
+            artifacts,
+            include_existing=True,
         )
         driver = DriverSession(FakeTerminal([]), source, artifacts, agent=plan.agent)
         driver.launch = execution.state.launch

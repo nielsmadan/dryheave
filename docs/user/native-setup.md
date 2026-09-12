@@ -126,11 +126,19 @@ Codex's adapter recognizes its recorded composer, fresh acceptance and root-turn
 lifecycle evidence. Claude's driver is fixture-tested only. Unknown versions or
 UI shapes may stop conservatively rather than report task completion.
 
-The final bounded Codex attempt on 2026-09-09 reached directory trust onboarding
-and stopped before task delivery, with zero accepted turns. The recorded argv
-revealed a dotted-key trust-override encoding bug; its correction is tested
-offline, with no further paid launch in that allocation. Full live task completion
-remains unverified. The dated QA record retains exact attempt and cleanup evidence.
+The 2026-09-10 Terra low/high trials on Codex 0.154.0 each accepted the initial
+task and scripted clarification answer, retaining model/effort and usage evidence.
+Both then requested design approval after loading an automatically supplied
+Superpowers plugin. The scripted user stopped there, and the unchanged task code
+failed calibrated hidden checks. Successful live task completion remains
+unverified. The [Terra QA record](../tests/qa-cli/runs/2026-09-10-terra.md) preserves
+these observations and the two earlier scanner failures in that run.
+
+Native log discovery uses only the owned `sessions` directory for Codex and
+`projects` directory for Claude, including recovery. Plugins, caches and bundled
+skills outside those directories do not consume the bounded log-entry budget.
+Fresh Codex configuration roots can still acquire plugins automatically; review
+the actual skill/configuration discovery when designing controlled comparisons.
 
 The real non-model transport smoke verifies paste bytes, terminal exit and owned
 cleanup with a Python receiver. It proves no model/TUI completion behavior. See

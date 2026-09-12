@@ -5,7 +5,7 @@ import pytest
 
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.fake import FakeTerminal
-from dryheave.drivers.log_source import NativeLogSource
+from dryheave.drivers.log_source import NativeLogSource, native_log_root
 from dryheave.drivers.models import DriverLimits
 from dryheave.drivers.session import DriverSession
 from dryheave.errors import InputError, LimitError
@@ -25,6 +25,40 @@ def source(tmp_path, **limits):
 
 def record(kind="session_meta", **payload):
     return json.dumps({"type": kind, "payload": payload}).encode() + b"\n"
+
+
+@pytest.mark.parametrize(
+    "agent,directory", [(AgentKind.CODEX, "sessions"), (AgentKind.CLAUDE, "projects")]
+)
+def test_native_roots_exclude_plugin_files_and_unrelated_jsonl(tmp_path, agent, directory):
+    config = tmp_path / "config"
+    plugin = config / "plugins"
+    plugin.mkdir(parents=True)
+    for index in range(260):
+        (plugin / f"asset-{index}.jsonl").write_bytes(b"not a native record\n")
+    root = native_log_root(config, agent)
+    assert root == config / directory
+    reader = NativeLogSource(root, agent, ArtifactWriter(tmp_path / "evidence", 100000))
+    assert reader.poll() == ()
+    root.mkdir()
+    content = (
+        record(id="root", cwd="/fixture")
+        if agent == AgentKind.CODEX
+        else b'{"type":"user","sessionId":"root","uuid":"u","message":{"content":"hello"}}\n'
+    )
+    (root / "root.jsonl").write_bytes(content)
+    events = reader.poll()
+    assert events[0].session_id == "root"
+    assert reader.cursor().files["root.jsonl"].offset == len(content)
+    assert reader.drained()
+
+
+def test_scoped_log_directory_keeps_entry_limit(tmp_path):
+    reader = source(tmp_path, max_files=1)
+    (reader.root / "one.jsonl").write_bytes(record(id="one"))
+    (reader.root / "two.jsonl").write_bytes(record(id="two"))
+    with pytest.raises(LimitError, match="entry limit"):
+        reader.poll()
 
 
 def test_reads_incrementally_preserves_partial_tail_and_raw_bytes(tmp_path):

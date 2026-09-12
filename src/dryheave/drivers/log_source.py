@@ -13,6 +13,10 @@ from dryheave.models import AgentKind
 from dryheave.serialization import digest, parse_json
 
 
+def native_log_root(config_root: Path, agent: AgentKind) -> Path:
+    return config_root / ("sessions" if agent == AgentKind.CODEX else "projects")
+
+
 @dataclass
 class _LogFile:
     cursor: FileCursor

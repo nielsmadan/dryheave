@@ -53,7 +53,8 @@ def test_native_wiring_builds_log_source_before_launch_and_preserves_plan(
 
     def logs(root, agent, artifacts, *, limits):
         order.append("log-source")
-        assert root.is_dir()
+        assert root.parent.is_dir()
+        assert root.name == "sessions"
         assert agent == AgentKind.CODEX
         return source
 

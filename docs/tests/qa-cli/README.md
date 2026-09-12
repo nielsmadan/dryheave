@@ -156,3 +156,4 @@ Recorded runs:
 
 - [Installed CLI and offline workflow](runs/2026-09-09-installed.md)
 - [Final allocated native Codex smoke](runs/2026-09-09-native.md)
+- [Terra low/high interactive comparison](runs/2026-09-10-terra.md)
