@@ -211,8 +211,11 @@ and are never inventoried. The rules do not prevent arbitrary filesystem reads.
 See the pinned [discovery implementation](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/ext/skills/src/host_roots.rs)
 and [skill rules](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/config/src/skills_config.rs).
 
-The default operator skill names are `dryheave-collect`, `dryheave-case` and
-`dryheave-results`. Codex disables them through session rules; Claude uses
+The historical `NativeRecipe` defaults disable `dryheave-collect`, `dryheave-case`
+and `dryheave-results`; these defaults remain unchanged for old frozen profiles.
+New CLI captures whose spec omits `disabled_skill_names` explicitly add those
+three plus `dryheave-voice-profile`, `dryheave-generate-problem` and
+`dryheave-agent-profile`. Codex disables them through session rules; Claude uses
 `skillOverrides` in generated settings. Explicitly changing
 `disabled_skill_names` changes that policy and its immutable profile ID.
 Claude's generated `claudeMdExcludes` omits ancestor instruction files/rules,

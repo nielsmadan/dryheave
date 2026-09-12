@@ -1,5 +1,42 @@
 # Collection, authoring and repository contracts
 
+For the selected-log workflow, see [the user guide](../user/selected-log-authoring.md).
+`authoring_catalog.py` owns a strict version-1 bounded catalog at the initialized
+workspace's authoring directory. Directory flock serializes writers; every write
+checks the expected catalog revision and atomically publishes the next one.
+Malformed, stale or symlinked content is preserved as an error. Selection membership
+pins immutable session IDs and cannot be replaced. Requests retain policy, typed
+candidate decisions, coverage gaps and immutable case references. It is authoring
+metadata, not a runner database; runs and object storage retain their own contracts.
+
+`mining.py` verifies candidate evidence and case provenance inside the selected
+user-start/inclusive-end range. Explicit baseline and historical dirty-state
+rationales accompany each decision. New selected-log voices require nonempty exact
+user-role excerpts, safe policies and a curator safety review. Legacy Personas
+remain compatible. Source session membership is curator provenance, not a new
+runtime dependency for portable cases/personas.
+
+`collect metadata SELECTION --session ID` reads bounded serialized session metadata
+with selected-membership checks. `--key` targets a top-level value such as `cwd` or
+`git`; a missing key is an error. Character offsets, total length, next offset and
+truncation are explicit, with a 4,000-character default and 8,000-character maximum.
+Codex `session_meta` contributes to `Session.metadata`, separately from events.
+The legacy `collect show` still returns the full session unchanged.
+
+Problem draft paths inside the authoring root are stored lexically relative to
+it; outside drafts keep absolute paths. Reads retain no-follow checks for every
+directory component and the final file, and reject parent traversal. No path
+normalization resolves away symlinks before those checks.
+
+Problem validation references bind request revision, curated decision, canonical
+draft content and hashes of every hidden verifier and reference patch. Temporary
+owned copies provide the exact bytes used by existing case validation/freezing.
+Request edits clear prior validations; freeze detects draft or file changes and
+refuses stale references. The catalog records a frozen case ID only after success.
+Frozen decisions cannot be replaced. Import/freeze may leave harmless immutable
+objects after a later catalog publication error; the catalog never claims them
+as completed work before its atomic publication succeeds.
+
 The shipped authoring commands use the same global `--store PATH` and `--json`
 options as the storage commands. Development examples below use `.dryheave`,
 which is ignored. Draft files are editable JSON; creation refuses to overwrite an

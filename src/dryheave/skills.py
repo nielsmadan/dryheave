@@ -13,7 +13,14 @@ from dryheave.filesystem import atomic_write, directory_fd, directory_names, rea
 from dryheave.models import ObjectId, StrictModel
 from dryheave.serialization import parse_model
 
-SKILL_NAMES = ("dryheave-collect", "dryheave-case", "dryheave-results")
+SKILL_NAMES = (
+    "dryheave-collect",
+    "dryheave-case",
+    "dryheave-results",
+    "dryheave-voice-profile",
+    "dryheave-generate-problem",
+    "dryheave-agent-profile",
+)
 OWNER_FILE = ".dryheave-owned.json"
 SKILL_LIMIT = 1024 * 1024
 
@@ -21,7 +28,14 @@ SKILL_LIMIT = 1024 * 1024
 class SkillOwnership(StrictModel):
     schema_version: Literal[1]
     owner: Literal["dryheave"]
-    name: Literal["dryheave-collect", "dryheave-case", "dryheave-results"]
+    name: Literal[
+        "dryheave-collect",
+        "dryheave-case",
+        "dryheave-results",
+        "dryheave-voice-profile",
+        "dryheave-generate-problem",
+        "dryheave-agent-profile",
+    ]
     version: str = Field(min_length=1, max_length=100)
     files: dict[Literal["SKILL.md"], ObjectId] = Field(min_length=1, max_length=1)
 
@@ -130,7 +144,7 @@ def manage_skills(
         try:
             present = set(os.listdir(descriptor))
             for name in selected:
-                if action != "install" or name in present:
+                if action == "uninstall" or name in present:
                     ownership = _owned(target / name, name)
                     if action == "install" and (
                         ownership.version != VERSION
@@ -146,7 +160,7 @@ def manage_skills(
                 if action == "uninstall":
                     _remove_skill(target, name, descriptor)
                 else:
-                    if action == "install":
+                    if name not in present:
                         os.mkdir(name, mode=0o700, dir_fd=descriptor)
                     _write_skill(target / name, name, replace=action == "update")
         finally:

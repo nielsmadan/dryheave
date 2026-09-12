@@ -30,7 +30,9 @@ def test_packaged_skill_resources_have_matching_frontmatter_and_workflows():
 def test_bundle_listing_and_missing_target_are_read_only(tmp_path):
     target = tmp_path / "absent"
     assert [item["name"] for item in list_skills()["skills"]] == list(SKILL_NAMES)
-    assert [item["status"] for item in list_skills(target)["skills"]] == ["missing"] * 3
+    assert [item["status"] for item in list_skills(target)["skills"]] == ["missing"] * len(
+        SKILL_NAMES
+    )
     assert list(tmp_path.iterdir()) == []
 
 
@@ -184,3 +186,19 @@ def test_install_refuses_outdated_owned_skills_without_overwriting(tmp_path, mon
         manage_skills("install", target)
     assert {path.name for path in target.iterdir()} == {name}
     assert (target / name / "SKILL.md").read_bytes() == old
+
+
+def test_update_upgrades_three_owned_skills_and_installs_new_bundle_names(tmp_path, monkeypatch):
+    target = tmp_path / "skills"
+    old_names = ("dryheave-collect", "dryheave-case", "dryheave-results")
+    contents = {name: bundled_skill(name) + b"\nPrevious bundle bytes.\n" for name in old_names}
+    with monkeypatch.context() as context:
+        context.setattr("dryheave.skills.bundled_skill", contents.__getitem__)
+        manage_skills("install", target, old_names)
+    (target / "personal-notes").write_text("Preserve unrelated user file")
+    result = manage_skills("update", target)
+    assert result["skills"] == list(SKILL_NAMES)
+    assert [item["status"] for item in list_skills(target)["skills"]] == ["current"] * len(
+        SKILL_NAMES
+    )
+    assert (target / "personal-notes").read_text() == "Preserve unrelated user file"

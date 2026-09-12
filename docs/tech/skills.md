@@ -1,6 +1,7 @@
 # Packaged operator resources and ownership
 
-`skills.py` discovers `dryheave-collect`, `dryheave-case` and `dryheave-results`
+`skills.py` discovers `dryheave-collect`, `dryheave-case`, `dryheave-results`,
+`dryheave-voice-profile`, `dryheave-generate-problem` and `dryheave-agent-profile`
 through `importlib.resources` in the installed `dryheave` package. The wheel and
 sdist ship their agent-neutral SKILL.md bytes and the standalone public examples.
 No checkout path, global installation or dynamic network fetch is needed.
@@ -12,7 +13,7 @@ workflow from those installed resources. It refuses existing destinations.
 `missing`, `current`, `outdated` or `conflict`. `install` defaults to the initialized
 workspace's configured skills path (`.agents/skills`); explicit `--target` works
 outside workspaces too. `doctor`, `update` and `uninstall` require `--target`.
-Optional positional skill names select a distinct subset, otherwise all three
+Optional positional skill names select a distinct subset, otherwise all six
 are selected. Targets are never inferred from the operator's agent or HOME.
 Listing/doctor do not create an absent target or store.
 
@@ -26,7 +27,9 @@ Every selected directory is checked before any skill content changes. Install
 skips exact current owned installations without rewriting files. It refuses
 foreign or edited collisions, even byte-identical content without ownership,
 and requires explicit update for intact outdated owned installations.
-Update and uninstall require matching ownership names, exact expected entries,
+Update installs missing selected bundled names into an existing target, so an
+owned three-skill installation upgrades with one `skills update --target PATH`.
+Existing selected skills and uninstall targets require matching ownership names, exact expected entries,
 regular files and bytes matching the old owned hashes. Foreign extra files,
 missing files, changed bytes and malformed manifests cause refusal; the operator
 must preserve/review the conflict or select another target. There is no force or
@@ -44,8 +47,10 @@ transactional filesystem rollback. Concurrent external edits are outside this
 cooperative ownership model.
 
 These operator skills help select evidence and explain actual public JSON fields.
-They are not runtime controllers or trusted graders, and are disabled for subjects
-by the native profile defaults. Skill installation changes neither those defaults
+They are not runtime controllers or trusted graders. New CLI profile captures
+explicitly set all six disabled names when the spec omits a list; explicit lists
+are preserved. `NativeRecipe` retains its historical three-name default so old
+frozen recipes load unchanged. Skill installation changes neither those defaults
 nor agent global configuration. Use the target directory actually recognized by
 your operator agent and reload its discovery according to that agent's behavior.
 

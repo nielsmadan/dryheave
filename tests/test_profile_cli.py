@@ -3,6 +3,9 @@ import sys
 from pathlib import Path
 
 from dryheave.cli import main
+from dryheave.models import AgentKind
+from dryheave.profile_models import NativeRecipe
+from dryheave.skills import SKILL_NAMES
 
 
 def test_profile_cli_capture_derive_diff_inspect_and_materialize(tmp_path: Path, capsys) -> None:
@@ -34,6 +37,7 @@ def test_profile_cli_capture_derive_diff_inspect_and_materialize(tmp_path: Path,
     assert main([*common, "profile", "inspect", "everyday"]) == 0
     inspected = json.loads(capsys.readouterr().out)["data"]
     assert inspected["profile"]["assets"][0]["target"] == "AGENTS.md"
+    assert inspected["profile"]["recipe"]["disabled_skill_names"] == list(SKILL_NAMES)
     override = tmp_path / "derive.json"
     override.write_text(
         json.dumps({"recipe_changes": {"model": "variant-model", "effort": "high"}})
@@ -102,3 +106,31 @@ def test_profile_cli_diagnostics_do_not_echo_credential_values(tmp_path: Path, c
         == "Credential-bearing argv entry 0; use a runtime reference."
     )
     assert list((tmp_path / "store").rglob("manifest.json")) == []
+
+
+def test_new_capture_honors_explicit_skill_policy_and_old_recipe_defaults(tmp_path, capsys):
+    old_recipe = NativeRecipe(agent=AgentKind.CODEX, executable="codex")
+    assert old_recipe.disabled_skill_names == (
+        "dryheave-collect",
+        "dryheave-case",
+        "dryheave-results",
+    )
+    path = tmp_path / "capture.json"
+    path.write_text(
+        json.dumps(
+            {
+                "recipe": {
+                    "agent": "codex",
+                    "executable": "codex",
+                    "disabled_skill_names": ["custom-skill"],
+                }
+            }
+        )
+    )
+    common = ["--store", str(tmp_path / "store"), "--json"]
+    assert main([*common, "profile", "capture", "--spec", str(path)]) == 0
+    identifier = json.loads(capsys.readouterr().out)["data"]["id"]
+    assert main([*common, "profile", "inspect", identifier]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["profile"]["recipe"][
+        "disabled_skill_names"
+    ] == ["custom-skill"]

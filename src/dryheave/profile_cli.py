@@ -11,11 +11,16 @@ from dryheave.profile_launch import materialize_profile, preflight_profile
 from dryheave.profile_models import CaptureSpec, DeriveSpec
 from dryheave.profiles import capture_profile, derive_profile, diff_profiles, load_profile
 from dryheave.serialization import parse_json, parse_model
+from dryheave.skills import SKILL_NAMES
 from dryheave.storage import ObjectStore
 
 
 def _capture(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     spec = parse_model(read_bytes(args.spec, limit=4 * 1024 * 1024), CaptureSpec)
+    if "disabled_skill_names" not in spec.recipe.model_fields_set:
+        spec = spec.model_copy(
+            update={"recipe": spec.recipe.model_copy(update={"disabled_skill_names": SKILL_NAMES})}
+        )
     if args.agent and args.agent != spec.recipe.agent.value:
         raise InputError(
             "Selected agent does not match the capture recipe; translation is unsupported."

@@ -1,5 +1,56 @@
 # Compare one real subject change
 
+## Start with the selected-log operator workflow
+
+Ordinary users can let the packaged skills write internal drafts and specs:
+
+```sh
+dryheave init ./bench
+cd bench
+dryheave skills install
+dryheave collect select work /explicit/session.jsonl --agent codex --json
+dryheave problem request "Find a small command bug" --selection work --name command-bug --micro-bug --json
+```
+
+In Codex invoke `$dryheave-voice-profile` for selection `work`, then
+`$dryheave-generate-problem` for request `command-bug`, and
+`$dryheave-agent-profile` for the frozen result. Other operator agents use their
+own installed-skill invocation syntax. The skills use public commands and write
+the internal JSON shown later in this document; users need no preparation script.
+The problem skill inspects and resumes the supplied `command-bug` request with
+its saved selection, policy, decisions and current revisions. It creates a new
+request only when none was supplied; an unknown supplied name needs correction.
+
+Recover names/revisions with `collect selections`, `problem list`,
+`problem inspect command-bug`, and `voice list`. Read selected evidence with
+`collect evidence work --session ID --limit 20 --offset 0`; follow `next_offset`.
+Long messages support `--event EVENT --text-offset N --text-limit N`.
+Read recorded `cwd` and `git.commit_hash` with
+`collect metadata work --session ID --key cwd` and `--key git`. Codex session
+metadata is separate from the event stream. This command returns bounded
+`metadata_json`; follow `text_next_offset` with `--text-offset N --text-limit N`
+and join chunks before parsing. Missing metadata keys are reported explicitly.
+The default problem request seeks up to six varied supported tasks; `--micro-bug`
+seeks one and still needs explicit scope/baseline reasoning. Unsupported candidates
+remain rejected/unresolved and coverage gaps are retained. Never fill a quota or
+substitute synthetic tasks. Changing source membership needs a new selection/request.
+
+New selected-log voice creation requires exact nonempty actual user-role excerpts,
+safe policies and curator review of solution leakage and injected instruction
+blocks. `problem record` captures source/event boundaries, baseline/dirty-state
+reasoning and a drafted case path. `problem validate REQUEST CANDIDATE
+--expect-revision N` binds the current draft and hidden files; freeze with the
+returned revision using `problem freeze REQUEST CANDIDATE --expect-revision N`.
+Any draft/hidden-file edit requires revalidation. Calibrate before subject spend.
+Frozen cases/profiles are reusable across repetitions; changed inputs need a new
+experiment and retries retain earlier evidence.
+
+For an existing owned skill installation, `skills update --target .agents/skills`
+updates intact owned bytes and installs missing bundled skills. Edited/foreign
+collisions remain errors. Reload your operator's skill discovery as needed.
+
+## Lower-level authoring and comparison reference
+
 Use an installed `dryheave` executable. Commands below use `bench-store` explicitly;
 keep it private and outside any source repository you are benchmarking. JSON
 responses place returned IDs under `data.id`. Save those IDs when indicated.

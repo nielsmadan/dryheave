@@ -11,6 +11,7 @@ from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.logs import claude, codex
 from dryheave.logs.base import ImportLimits, Session, candidates, discover
 from dryheave.logs.service import import_session
+from dryheave.mining_cli import register_mining, register_mining_collection
 from dryheave.models import AgentKind, ObjectKind, StrictModel
 from dryheave.personas import Persona, freeze_persona, load_frozen_persona
 from dryheave.repositories import capture_repository
@@ -149,6 +150,8 @@ def register_authoring(registry: CommandRegistry) -> None:
     show = commands.add_parser("show")
     show.add_argument("reference")
     registry.handler(show, _show)
+    register_mining_collection(registry, commands)
+    register_mining(registry)
     _register_cases(registry)
     _register_personas(registry)
 

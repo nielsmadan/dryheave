@@ -54,6 +54,13 @@ homes or making model calls. Native runtime paths must fit a 70-byte limit;
 `init --runtime-root /short/new-directory` supplies a shorter location when needed.
 See [workspace setup](docs/user/workspaces.md) for config, ownership and resume behavior.
 
+For selected-log mining, use `collect select NAME FILE --agent codex`, then
+`problem request [DESCRIPTION] --selection NAME [--micro-bug]`. The packaged
+voice/problem/profile skills curate internal drafts and retain supported tasks,
+rejections and gaps. Follow [selected-log authoring](docs/user/selected-log-authoring.md)
+for the exact commands and Codex invocation sequence; no hand-authored JSON is
+needed for this operator-guided workflow.
+
 Follow the packaged [real workflow](src/dryheave/resources/examples/real-workflow.md)
 (also written by `example write`) for complete JSON shapes and commands:
 
@@ -88,9 +95,11 @@ missing tools. Preflight adds exact profile argv, native roots and fidelity issu
 
 ## Optional operator skills
 
-The wheel bundles three agent-neutral skills: `dryheave-collect`, `dryheave-case`
-and `dryheave-results`. They guide the operator through evidence collection,
-curation and analysis. Subject profiles disable these names by default.
+The wheel bundles six agent-neutral skills: `dryheave-collect`, `dryheave-case`,
+`dryheave-results`, `dryheave-voice-profile`, `dryheave-generate-problem` and
+`dryheave-agent-profile`. They guide evidence collection, voice/task curation,
+profile setup and analysis. New CLI captures disable all six names when no
+explicit list is supplied; old frozen recipes retain their historical defaults.
 
 ```sh
 dryheave skills list --json
@@ -103,10 +112,12 @@ dryheave skills uninstall --target .agents/skills --json
 
 Installation defaults to the initialized workspace's `.agents/skills`; use
 `--target` to select another directory your agent discovers. Optional positional
-skill names limit an operation; omission selects all three. Repeated installation
+skill names limit an operation; omission selects all six. Repeated installation
 skips matching owned skills and refuses foreign, edited or outdated collisions.
 Update/uninstall verify the per-skill ownership manifest and exact
-bytes first, refusing edited, foreign, missing or unsafe content. Symlink target
+bytes first, refusing edited, foreign, incomplete or unsafe content. Update adds
+missing bundled skills to an existing target, including upgrades from three to six.
+Symlink target
 components are rejected. Save and review a conflict manually or select a new
 target; no force mode discards it. See [skill ownership](docs/tech/skills.md).
 
