@@ -47,6 +47,13 @@ a fresh output directory. Build a distributable wheel/sdist with `uv build`.
 
 ## Run your own benchmark
 
+Start a dedicated workspace with `dryheave init ./bench`, enter it, then run
+`dryheave skills install`. Workspace discovery also works from nested directories.
+Setup creates private authoring/store/runtime directories without scanning agent
+homes or making model calls. Native runtime paths must fit a 70-byte limit;
+`init --runtime-root /short/new-directory` supplies a shorter location when needed.
+See [workspace setup](docs/user/workspaces.md) for config, ownership and resume behavior.
+
 Follow the packaged [real workflow](src/dryheave/resources/examples/real-workflow.md)
 (also written by `example write`) for complete JSON shapes and commands:
 
@@ -87,15 +94,18 @@ curation and analysis. Subject profiles disable these names by default.
 
 ```sh
 dryheave skills list --json
+dryheave skills install --json
 dryheave skills install --target .agents/skills --json
 dryheave skills doctor --target .agents/skills --json
 dryheave skills update --target .agents/skills --json
 dryheave skills uninstall --target .agents/skills --json
 ```
 
-Select your agent's actual discovery directory explicitly. Optional positional
-skill names limit an operation; omission selects all three. Installation refuses
-collisions. Update/uninstall verify the per-skill ownership manifest and exact
+Installation defaults to the initialized workspace's `.agents/skills`; use
+`--target` to select another directory your agent discovers. Optional positional
+skill names limit an operation; omission selects all three. Repeated installation
+skips matching owned skills and refuses foreign, edited or outdated collisions.
+Update/uninstall verify the per-skill ownership manifest and exact
 bytes first, refusing edited, foreign, missing or unsafe content. Symlink target
 components are rejected. Save and review a conflict manually or select a new
 target; no force mode discards it. See [skill ownership](docs/tech/skills.md).
@@ -126,8 +136,9 @@ unobserved descendants remain repeatability limits even with frozen input bytes.
 
 ## CLI and storage
 
-`--store PATH` and `--json` work before or after subcommands. The default store is
-`$XDG_DATA_HOME/dryheave`, or `~/.local/share/dryheave`. JSON success uses `ok` and
+`--store PATH` and `--json` work before or after subcommands. Store selection uses
+explicit `--store`, then the nearest `dryheave.toml` workspace, then
+`$XDG_DATA_HOME/dryheave` or `~/.local/share/dryheave`. JSON success uses `ok` and
 `data`; errors use `ok: false` and `error.code/message` on stderr with nonzero exit.
 Help/version remain plain text. Runs announce their ID on stderr at reservation.
 

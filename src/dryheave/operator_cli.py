@@ -11,6 +11,7 @@ from dryheave.errors import ConflictError, PathError
 from dryheave.filesystem import atomic_write, directory_fd
 from dryheave.skills import SKILL_NAMES, list_skills, manage_skills
 from dryheave.storage import ObjectStore
+from dryheave.workspaces import initialized_workspace
 
 
 def _list(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]:
@@ -18,7 +19,8 @@ def _list(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]
 
 
 def _manage(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]:
-    return manage_skills(args.skills_command, args.target, tuple(args.names))
+    target = args.target if args.target is not None else initialized_workspace().path("skills")
+    return manage_skills(args.skills_command, target, tuple(args.names))
 
 
 def _doctor(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]:
@@ -42,12 +44,12 @@ def _example(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonVal
 
 def register_operators(registry: CommandRegistry) -> None:
     parser = registry.add(
-        "skills", help_text="Manage packaged operator skills in an explicit target."
+        "skills", help_text="Manage packaged operator skills in a workspace or explicit target."
     )
     commands = parser.add_subparsers(dest="skills_command", required=True)
     for action in ("list", "doctor", "install", "update", "uninstall"):
         command = commands.add_parser(action)
-        command.add_argument("--target", type=Path, required=action != "list")
+        command.add_argument("--target", type=Path, required=action not in {"list", "install"})
         if action in {"list", "doctor"}:
             registry.handler(command, _list)
         else:

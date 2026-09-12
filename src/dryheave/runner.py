@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from dryheave.cases import load_frozen_case
-from dryheave.drivers.tui_test import MAX_RUNTIME_PATH_BYTES
+from dryheave.constants import MAX_RUNTIME_PATH_BYTES
 from dryheave.errors import DryheaveError, InputError
 from dryheave.experiment_models import FrozenExperiment
 from dryheave.experiments import inspect_experiment, load_experiment

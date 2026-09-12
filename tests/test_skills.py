@@ -56,7 +56,7 @@ def test_install_updates_from_recorded_old_bytes_and_uninstalls_owned_files(tmp_
     }
 
 
-@pytest.mark.parametrize("action", ["update", "uninstall"])
+@pytest.mark.parametrize("action", ["install", "update", "uninstall"])
 @pytest.mark.parametrize(
     "change", ["edit", "extra", "missing", "owner", "unowned", "schema", "traversal"]
 )
@@ -154,3 +154,33 @@ def test_concurrent_writer_lock_preserves_target(tmp_path):
         with pytest.raises(LockBusyError):
             manage_skills("install", target)
     assert list(target.iterdir()) == []
+
+
+def test_repeated_install_is_read_only_for_current_owned_skills(tmp_path):
+    target = tmp_path / "skills"
+    manage_skills("install", target)
+    before = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in target.rglob("*")
+        if path.is_file()
+    }
+    result = manage_skills("install", target)
+    assert result["skills"] == list(SKILL_NAMES)
+    assert {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in target.rglob("*")
+        if path.is_file()
+    } == before
+
+
+def test_install_refuses_outdated_owned_skills_without_overwriting(tmp_path, monkeypatch):
+    target = tmp_path / "skills"
+    name = SKILL_NAMES[0]
+    old = bundled_skill(name) + b"\nOld bundle\n"
+    with monkeypatch.context() as context:
+        context.setattr("dryheave.skills.bundled_skill", lambda _name: old)
+        manage_skills("install", target, (name,))
+    with pytest.raises(ConflictError, match="skills update"):
+        manage_skills("install", target)
+    assert {path.name for path in target.iterdir()} == {name}
+    assert (target / name / "SKILL.md").read_bytes() == old

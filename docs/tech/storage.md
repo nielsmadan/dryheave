@@ -148,6 +148,12 @@ not-found, conflict and I/O errors exit 1. Pydantic diagnostics expose field
 locations and validation codes, excluding supplied values. Help and version use
 argparse's text output.
 
+CLI store selection uses an explicit `--store`, then the nearest workspace's
+`dryheave.toml` store path, then the XDG fallback. Configuration is a strict
+versioned TOML boundary; relative paths resolve from that file's directory.
+Workspace setup and directory ownership are separate from immutable object
+storage. See [workspace setup](../user/workspaces.md).
+
 ## Filesystem portability
 
 Directory traversal uses descriptor-relative operations with `O_NOFOLLOW` and

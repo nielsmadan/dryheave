@@ -14,6 +14,7 @@ from dryheave.experiments import (
 from dryheave.runner import load_capture, run_experiment, run_status
 from dryheave.runner_models import RunOptions
 from dryheave.storage import ObjectStore
+from dryheave.workspaces import Workspace, validate_runtime_root
 
 
 def _validate(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
@@ -55,13 +56,20 @@ def _run(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
         ):
             raise InputError("Run status cannot be combined with execution options.")
         return run_status(store, args.status).model_dump(mode="json")
+    runtime_root = args.runtime_root
+    workspace: Workspace | None = args.benchmark_workspace
+    if not args.resume and args.mode != "offline-fixture":
+        if runtime_root is None and workspace is not None:
+            runtime_root = workspace.path("runtime")
+        if runtime_root is not None:
+            validate_runtime_root(runtime_root)
     options = None
     if not args.resume or args.mode or args.runtime_root or args.tui_test or args.strict:
         options = RunOptions.model_validate(
             {
                 "mode": args.mode or "native",
                 "strict": args.strict,
-                "runtime_root": str(args.runtime_root) if args.runtime_root else None,
+                "runtime_root": str(runtime_root) if runtime_root else None,
                 "transport": str(args.tui_test) if args.tui_test else None,
             }
         )

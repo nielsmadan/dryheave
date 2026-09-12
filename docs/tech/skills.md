@@ -9,10 +9,12 @@ workflow from those installed resources. It refuses existing destinations.
 
 `skills list` lists the bundle. `skills list --target PATH` and
 `skills doctor --target PATH` inspect the explicit target read-only, reporting
-`missing`, `current`, `outdated` or `conflict`. `install`, `update` and `uninstall`
-require `--target`; optional positional skill names select a distinct subset,
-otherwise all three are selected. Targets are never inferred from the operator's
-agent, HOME or config. Listing/doctor do not create an absent target or store.
+`missing`, `current`, `outdated` or `conflict`. `install` defaults to the initialized
+workspace's configured skills path (`.agents/skills`); explicit `--target` works
+outside workspaces too. `doctor`, `update` and `uninstall` require `--target`.
+Optional positional skill names select a distinct subset, otherwise all three
+are selected. Targets are never inferred from the operator's agent or HOME.
+Listing/doctor do not create an absent target or store.
 
 Each installed directory contains SKILL.md and `.dryheave-owned.json`, a strict
 schema-version-1 manifest with owner, skill name, package version and SHA-256 of
@@ -21,7 +23,9 @@ an intact older installation as outdated. The stored hashes establish ownership
 of bytes for maintenance, not cryptographic authenticity or access control.
 
 Every selected directory is checked before any skill content changes. Install
-refuses any name collision, even byte-identical content without ownership.
+skips exact current owned installations without rewriting files. It refuses
+foreign or edited collisions, even byte-identical content without ownership,
+and requires explicit update for intact outdated owned installations.
 Update and uninstall require matching ownership names, exact expected entries,
 regular files and bytes matching the old owned hashes. Foreign extra files,
 missing files, changed bytes and malformed manifests cause refusal; the operator

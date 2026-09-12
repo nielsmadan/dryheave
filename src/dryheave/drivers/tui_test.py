@@ -14,6 +14,7 @@ from typing import Self
 import psutil
 from pydantic import JsonValue
 
+from dryheave.constants import MAX_RUNTIME_PATH_BYTES
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.base import DeliveryUncertain, TransportError
 from dryheave.drivers.models import (
@@ -32,7 +33,6 @@ from dryheave.processes import run_command
 from dryheave.profile_models import LaunchPlan
 from dryheave.serialization import parse_json
 
-MAX_RUNTIME_PATH_BYTES = 70
 DAEMON_ABSENT_EXIT = 3
 
 

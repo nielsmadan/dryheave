@@ -20,6 +20,9 @@ def test_public_skill_lifecycle_json_and_conflict_error(tmp_path, capsys):
         assert response["data"]["target"] == str(target)
     assert main([*prefix, "install", "--target", str(target), SKILL_NAMES[0]]) == 0
     capsys.readouterr()
+    assert main([*prefix, "install", "--target", str(target), SKILL_NAMES[0]]) == 0
+    capsys.readouterr()
+    (target / SKILL_NAMES[0] / "SKILL.md").write_bytes(b"User edits")
     assert main([*prefix, "install", "--target", str(target), SKILL_NAMES[0]]) == 1
     response = capsys.readouterr()
     assert response.out == ""

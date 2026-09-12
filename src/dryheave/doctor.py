@@ -6,12 +6,12 @@ from pathlib import Path
 
 from pydantic import JsonValue
 
+from dryheave.constants import MAX_RUNTIME_PATH_BYTES
 from dryheave.models import CommandSpec
 from dryheave.processes import run_command
 
 TUI_TEST_VERSION = "0.1.0-beta.3"
 TUI_TEST_RELEASE = "https://github.com/microsoft/tui-test/releases/tag/" + TUI_TEST_VERSION
-MAX_RUNTIME_BYTES = 70
 
 
 def _tool(executable: str, *, expected: str | None = None) -> dict[str, JsonValue]:
@@ -83,11 +83,11 @@ def runtime_doctor(
         checks.append(
             {
                 "tool": "runtime-root",
-                "status": "available" if length <= MAX_RUNTIME_BYTES else "too-long",
+                "status": "available" if length <= MAX_RUNTIME_PATH_BYTES else "too-long",
                 "attempt_path_bytes": length,
-                "maximum_bytes": MAX_RUNTIME_BYTES,
+                "maximum_bytes": MAX_RUNTIME_PATH_BYTES,
                 "action": "Use this explicit root with run --runtime-root."
-                if length <= MAX_RUNTIME_BYTES
+                if length <= MAX_RUNTIME_PATH_BYTES
                 else "Select a shorter explicit runtime root; each attempt adds 11 bytes.",
             }
         )

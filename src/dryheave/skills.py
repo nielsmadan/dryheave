@@ -130,14 +130,19 @@ def manage_skills(
         try:
             present = set(os.listdir(descriptor))
             for name in selected:
-                if action == "install":
-                    if name in present:
+                if action != "install" or name in present:
+                    ownership = _owned(target / name, name)
+                    if action == "install" and (
+                        ownership.version != VERSION
+                        or ownership.files["SKILL.md"]
+                        != hashlib.sha256(bundled_skill(name)).hexdigest()
+                    ):
                         raise ConflictError(
-                            f"Skill already exists; inspect skills doctor: {target / name}"
+                            f"Owned skill is outdated; run skills update: {target / name}"
                         )
-                else:
-                    _owned(target / name, name)
             for name in selected:
+                if action == "install" and name in present:
+                    continue
                 if action == "uninstall":
                     _remove_skill(target, name, descriptor)
                 else:

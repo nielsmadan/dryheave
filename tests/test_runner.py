@@ -126,6 +126,69 @@ def test_native_requires_explicit_short_runtime(store, benchmark):
         )
 
 
+def test_real_cli_resume_and_status_ignore_changed_workspace_runtime(store, benchmark, tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    from dryheave.workspaces import CONFIG_FILE
+
+    identifier = create_experiment(store, benchmark)
+    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    (tmp_path / CONFIG_FILE).write_text(
+        f'store = {json.dumps(str(store.root))}\nruntime = "{"long" * 40}"\n'
+    )
+    for operation in ("--resume", "--status"):
+        resumed = subprocess.run(
+            [sys.executable, "-m", "dryheave", "run", operation, result.run_id, "--json"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert resumed.returncode == 0, resumed.stderr
+        data = json.loads(resumed.stdout)["data"]
+        assert data["options"] == result.options.model_dump(mode="json")
+        assert data["attempts"] == result.model_dump(mode="json")["attempts"]
+
+
+@pytest.mark.parametrize("mode", ["native", "offline-fixture"])
+def test_new_cli_run_uses_workspace_runtime_only_for_native(
+    store, benchmark, tmp_path, monkeypatch, capsys, mode
+):
+    import json
+    from pathlib import Path
+
+    from dryheave.workspaces import CONFIG_FILE
+
+    identifier = create_experiment(store, benchmark)
+    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    runtime = (Path(".cache") / "rt").absolute()
+    (tmp_path / CONFIG_FILE).write_text(
+        f"store = {json.dumps(str(store.root))}\nruntime = {json.dumps(str(runtime))}\n"
+    )
+    observed = []
+
+    def launch(_store, _reference, **kwargs):
+        observed.append(kwargs["options"])
+        return result
+
+    monkeypatch.setattr("dryheave.runner_cli.run_experiment", launch)
+    monkeypatch.chdir(tmp_path)
+    assert main(["run", identifier, "--mode", mode, "--json"]) == 0
+    capsys.readouterr()
+    assert observed[-1].runtime_root == (str(runtime) if mode == "native" else None)
+    assert observed[-1].mode == mode
+    if mode == "native":
+        assert main(["run", identifier, "--runtime-root", "override", "--json"]) == 2
+        assert "native limit" in json.loads(capsys.readouterr().err)["error"]["message"]
+        override = runtime.with_name("other")
+        assert main(["run", identifier, "--runtime-root", str(override), "--json"]) == 0
+        capsys.readouterr()
+        assert observed[-1].runtime_root == str(override)
+
+
 def test_turn_and_controller_budgets_stop_further_submission(store, benchmark):
     from dryheave.controller_models import RoleBudget
 
