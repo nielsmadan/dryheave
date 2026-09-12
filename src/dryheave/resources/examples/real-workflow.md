@@ -41,7 +41,16 @@ blocks. `problem record` captures source/event boundaries, baseline/dirty-state
 reasoning and a drafted case path. `problem validate REQUEST CANDIDATE
 --expect-revision N` binds the current draft and hidden files; freeze with the
 returned revision using `problem freeze REQUEST CANDIDATE --expect-revision N`.
-Any draft/hidden-file edit requires revalidation. Calibrate before subject spend.
+Any draft/hidden-file edit requires revalidation. Before subject spend, run
+`dryheave case calibrate CASE_ID --json`, save `data.id`, and inspect
+`dryheave case calibration CALIBRATION_ID --json`. Review the returned status and
+baseline/reference executions; use `--evidence PATH` from its `files` map for
+retained output. Only `demonstrated` establishes baseline failure/reference
+success for every deterministic criterion. A passing baseline is `ineffective`;
+missing references/errors are `unavailable`; judge-only cases are `not_applicable`.
+No model calls occur. Correct hidden inputs by freezing and calibrating a new case.
+Verifier copies do not execute case setup; required tools/environment references
+must already be available.
 Frozen cases/profiles are reusable across repetitions; changed inputs need a new
 experiment and retries retain earlier evidence.
 
@@ -82,6 +91,8 @@ Keep any reference patch and hidden tests curator-only.
 dryheave --store bench-store case validate case.json --json
 dryheave --store bench-store case freeze case.json --json
 dryheave --store bench-store case inspect CASE_ID --json
+dryheave --store bench-store case calibrate CASE_ID --json
+dryheave --store bench-store case calibration CALIBRATION_ID --json
 ```
 
 Snapshots retain exact reachable Git ancestry through the selected commit. Later
@@ -274,3 +285,13 @@ Use `data.roots[0]` from import for the portable report. Default exports contain
 curated inputs and structured results. Raw terminal/native logs, final files and
 grading artifacts require explicit sensitive-class selection. Curated inputs may
 still contain private text; review them before sharing.
+
+To share pre-run calibration independently of any subject run:
+
+```sh
+dryheave --store bench-store export CALIBRATION_ID --include-sensitive calibration-evidence --output calibration.tar --json
+dryheave --store imported-store import calibration.tar --json
+dryheave --store imported-store case calibration CALIBRATION_ID --json
+```
+
+The exact case and retained verifier outputs are included and validated.

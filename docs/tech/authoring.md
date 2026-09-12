@@ -164,11 +164,37 @@ Default `suite_id: null` means an independent copy per criterion. A shared non-n
 suite ID declares a suite whose criteria execute in saved order on the same copy.
 A judge criterion has `criterion_id`, `kind: "judge"`, `required` and a substantive
 `rubric`. `reference_patch` optionally names a curator-only source file; freeze
-stores it as `reference.patch`. Setup and grading execution/calibration belong to
-later runner/grading services. Authoring validation rejects empty entrypoints,
+stores it as `reference.patch`. `case calibrate CASE_REF` executes baseline/reference
+checks before a subject run; setup belongs to later runner execution. Authoring validation rejects empty entrypoints,
 missing files, blank sentinels, obvious placeholders and empty rubrics; it cannot
 prove that a curator's program tests the intended behavior. Criteria remain
-explicitly uncalibrated until later execution records establish otherwise.
+explicitly uncalibrated in immutable case objects. Standalone calibration records
+and later assessment records establish observed calibration without mutating inputs.
+
+`calibrations.calibrate_case` uses the neutral `VerifierContext` and shared
+`grading.check_copy`/`execute_check` operations. Each baseline/reference side is an
+independent repository copy. Non-null suite IDs share a copy only within that side,
+with criteria in frozen order. Neither calibration nor assessment runs `case.setup`
+on verifier copies; dependencies must be available through trusted executables and
+explicit inherited environment references. No grading model is called.
+
+The standalone `calibration` object stores exact `case_id`, ordered `criteria_id`,
+per-criterion `verifier_id` (criterion definition plus all hidden byte hashes),
+execution results, evidence hashes and cleanup. It references only the exact case;
+no run, capture or Assessment is synthesized. `load_calibration` checks these
+identities against the frozen case, verifies retained result/output hashes and
+observed pass/fail markers, and requires stopped owned writers. Explicit omissions
+prevent demonstrated status. Export/import requires `calibration-evidence` and
+preserves the exact record/input closure; source sessions are still optional.
+
+`case calibration ID [--evidence PATH --offset N --limit N]` validates the record
+and reads bounded output slices. The service holds the store native lock and an
+operation lock. Atomic `STORE/calibrations/UUID/operation.json` records owned process
+identities and cleanup; interrupted working evidence stays in that directory.
+Recovery signals only matching recorded PID/create-time pairs and their observed
+descendants. Calibration, native run and assessment reconcile this ownership before
+execution. Failed cleanup blocks snapshot/publication. Retrying calibration starts
+fresh copies; it does not infer results from interrupted work.
 
 ## Historical repository snapshots
 

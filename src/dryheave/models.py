@@ -66,6 +66,7 @@ class ObjectKind(StrEnum):
     CAPTURE = "capture"
     QUARANTINE = "quarantine"
     ASSESSMENT_EVIDENCE = "assessment-evidence"
+    CALIBRATION = "calibration"
     PORTABLE_REPORT = "portable-report"
 
 

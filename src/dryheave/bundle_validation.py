@@ -1,3 +1,4 @@
+from dryheave.calibrations import load_calibration
 from dryheave.cases import load_frozen_case
 from dryheave.controller_models import ControllerRecipe
 from dryheave.errors import IntegrityError
@@ -23,6 +24,7 @@ def validate_bundle_object(store: ObjectStore, identifier: str, included: tuple[
         ObjectKind.QUARANTINE: "captures",
         ObjectKind.SESSION: "source-sessions",
         ObjectKind.ASSESSMENT_EVIDENCE: "assessment-evidence",
+        ObjectKind.CALIBRATION: "calibration-evidence",
     }.get(manifest.kind)
     if required and required not in included:
         raise IntegrityError("Bundle contains an undeclared sensitive artifact class.")
@@ -34,6 +36,7 @@ def validate_bundle_object(store: ObjectStore, identifier: str, included: tuple[
         ObjectKind.EXPERIMENT: load_experiment,
         ObjectKind.CAPTURE: load_capture,
         ObjectKind.RESULT: load_assessment,
+        ObjectKind.CALIBRATION: load_calibration,
     }
     if loader := loaders.get(manifest.kind):
         loader(store, identifier)

@@ -31,7 +31,7 @@ from dryheave.tar_bounds import preflight_tar
 
 MAX_BUNDLE_BYTES = 1024 * 1024 * 1024
 MAX_BUNDLE_FILES = 200000
-SENSITIVE_CLASSES = ("captures", "assessment-evidence", "source-sessions")
+SENSITIVE_CLASSES = ("captures", "assessment-evidence", "source-sessions", "calibration-evidence")
 RAW_CLASSES = {
     "raw terminal/native logs and screens": "captures",
     "final files and patches": "captures",
@@ -40,6 +40,7 @@ RAW_CLASSES = {
     "judge requests and responses": "assessment-evidence",
     "verifier stdout/stderr": "assessment-evidence",
     "full source transcripts": "source-sessions",
+    "standalone calibration verifier outputs": "calibration-evidence",
 }
 OMITTED_RAW = tuple(RAW_CLASSES)
 
@@ -76,7 +77,7 @@ def _portable(report: RunReport, roots: list[str], omissions: tuple[str, ...]) -
 def _selected_results(
     report: RunReport, roots: list[str], sensitive: tuple[str, ...], omitted: list[str]
 ) -> set[str]:
-    complete = set(sensitive) - {"source-sessions"}
+    complete = set(sensitive) & {"captures", "assessment-evidence"}
     for category in ("captures", "assessment-evidence"):
         if category not in sensitive:
             continue
@@ -121,6 +122,7 @@ def _roots(
             ObjectKind.QUARANTINE: "captures",
             ObjectKind.SESSION: "source-sessions",
             ObjectKind.ASSESSMENT_EVIDENCE: "assessment-evidence",
+            ObjectKind.CALIBRATION: "calibration-evidence",
         }.get(manifest.kind)
         if required and required not in sensitive:
             raise InputError(f"Raw {required} export requires --include-sensitive {required}.")
@@ -226,6 +228,7 @@ def export_bundle(
         "captures": {ObjectKind.CAPTURE, ObjectKind.QUARANTINE},
         "assessment-evidence": {ObjectKind.ASSESSMENT_EVIDENCE},
         "source-sessions": {ObjectKind.SESSION},
+        "calibration-evidence": {ObjectKind.CALIBRATION},
     }
     exported_kinds = {item.kind for item, _ in objects.values()}
     included = tuple(
@@ -238,6 +241,9 @@ def export_bundle(
         omitted=omitted,
         aliases=names,
     )
+    for identifier in objects:
+        if objects[identifier][0].kind == ObjectKind.CALIBRATION:
+            validate_bundle_object(store, identifier, manifest.included)
     ensure_directory(destination.parent)
     temporary = destination.parent / (".bundle-" + uuid4().hex)
     try:

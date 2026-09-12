@@ -2,6 +2,7 @@ import re
 
 import psutil
 
+from dryheave.calibration_recovery import reconcile_calibrations
 from dryheave.drivers.models import CleanupReport, ProcessIdentity
 from dryheave.errors import InputError
 from dryheave.filesystem import directory_names
@@ -113,13 +114,19 @@ def reconcile_execution(execution: ExecutionJournal) -> None:
         )
 
 
-def reconcile_store_ownership(store: ObjectStore, current: ExecutionJournal) -> None:
-    reconcile_execution(current)
+def reconcile_store_ownership(store: ObjectStore, current: ExecutionJournal | None = None) -> None:
+    reconcile_calibrations(store)
+    if current is not None:
+        reconcile_execution(current)
     runs = RunStore(store.root)
-    for identifier in sorted(directory_names(store.root / "runs")):
-        if identifier == current.journal.metadata.run_id or not re.fullmatch(
-            r"[0-9a-f]{32}", identifier
-        ):
+    try:
+        names = directory_names(store.root / "runs")
+    except FileNotFoundError:
+        return
+    for identifier in sorted(names):
+        if (
+            current is not None and identifier == current.journal.metadata.run_id
+        ) or not re.fullmatch(r"[0-9a-f]{32}", identifier):
             continue
         with runs.open(identifier) as journal:
             reconcile_execution(ExecutionJournal(journal))

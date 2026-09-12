@@ -32,8 +32,15 @@ description: Curate Dryheave case and persona JSON, freeze historical repositori
    `kind: "judge"`, `criterion_id`, `required` and a substantive `rubric`.
 5. Run `dryheave --store STORE case validate case.json --json`, then
    `case freeze case.json --json` and `case inspect CASE_ID --json`. Save immutable
-   IDs. Validation establishes structure and evidence consistency; later assessment
-   must demonstrate that baseline fails and reference passes.
+   IDs. Run `case calibrate CASE_ID --json` before subject spend. Inspect
+   `data.calibration.status` and save `data.id` as CALIBRATION_ID. `demonstrated`
+   means every deterministic criterion observed baseline failure and reference
+   success; `ineffective` means a baseline passed; `unavailable` includes verifier
+   errors or a missing reference; judge-only cases are `not_applicable`.
+   Use `case calibration CALIBRATION_ID --json` and `--evidence PATH` from its
+   `files` map to inspect outputs. Fix errors or ineffective criteria, freeze a
+   new case and calibrate again. Verifier copies do not execute `case.setup`:
+   required tools and declared environment references must already be available.
 6. Copy the public examples with `dryheave example write --target FRESH_DIRECTORY`.
    Follow its `real-workflow.md` to select actual config, instructions and skill
    resources explicitly, then `profile capture NAME --spec capture.json --json`.

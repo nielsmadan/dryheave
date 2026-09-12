@@ -72,8 +72,16 @@ description: Mine and curate supported Dryheave benchmark problems from explicit
    Use its returned revision for `problem freeze REQUEST CANDIDATE --expect-revision REVISION`.
    These helpers bind draft and hidden-file bytes. Any request edit invalidates
    prior validation; any file edit requires validation again. Inspect the frozen
-   `case_id`, then calibrate through the available case calibration command before
-   subject spend. Consult `case --help`; structural validation alone is not calibration.
+   `case_id`, then run `dryheave case calibrate CASE_ID --json` before subject
+   spend. Retain `data.id` and review `data.calibration.status`: `demonstrated`
+   requires observed baseline failure/reference success for each deterministic
+   criterion; `ineffective` identifies a passing baseline; `unavailable` includes
+   missing references and verifier errors; judge-only cases are `not_applicable`.
+   Inspect `case calibration CALIBRATION_ID --json` and its retained `files` with
+   `--evidence PATH` (paged using `--offset N --limit N`). Verifier copies do not
+   run `case.setup`; provide required tools and declared environment references.
+   Correct the draft/hidden verifier and freeze a new case before recalibrating;
+   an older calibration always describes its original immutable case ID.
 8. Return frozen/drafted/rejected/unresolved candidates separately, their scope
    and baseline reasoning, gaps and next action. Use `problem inspect REQUEST` to
    recover progress and `problem list` to find requests. Changing sources requires

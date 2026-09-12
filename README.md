@@ -66,7 +66,9 @@ Follow the packaged [real workflow](src/dryheave/resources/examples/real-workflo
 
 1. `collect scan/import/show` finds candidate log evidence; `case draft` requires
    an explicitly verified historical SHA. Curate facts, persona and hidden checks,
-   then `case validate/freeze`.
+   then `case validate/freeze` and `case calibrate CASE_ID --json` before subject
+   spend. Inspect the standalone record with `case calibration CALIBRATION_ID`;
+   `demonstrated` requires observed baseline failure and reference success.
 2. `profile capture` freezes explicitly selected native config, instruction,
    skill and plugin bytes. `profile derive/diff` records one model, skill or
    workflow change while historical inputs remain immutable.

@@ -22,20 +22,24 @@ from dryheave.processes import CommandControl, run_command
 from dryheave.repositories import Git, SnapshotLimits, materialize_repository
 from dryheave.result_models import Calibration, CheckExecution, CriterionResult, Outcome
 from dryheave.runner_models import CapturedAttempt
-from dryheave.serialization import digest
+from dryheave.serialization import canonical_json, digest
 from dryheave.storage import ObjectStore
 
 
 @dataclass
-class GradingContext:
+class VerifierContext:
     store: ObjectStore
     case: FrozenCase
-    capture: CapturedAttempt
     blobs: dict[str, bytes]
     root: Path
-    original_workspace: Path
+    original_workspace: Path | None
     on_identity: Callable[[ProcessIdentity], None]
     cancelled: Event
+
+
+@dataclass
+class GradingContext(VerifierContext):
+    capture: CapturedAttempt
 
 
 def _command(
@@ -87,14 +91,14 @@ def execute_check(
     workspace: Path,
     hidden: Path,
     artifacts: ArtifactWriter,
-    context: GradingContext,
+    context: VerifierContext,
 ) -> CheckExecution:
     started = time.monotonic()
     owner = ProcessOwner()
     watch = ControllerWatch(
         artifacts.root,
         context.cancelled,
-        max_bytes=8 * criterion.command.max_output_bytes,
+        max_bytes=artifacts.max_bytes,
         output_bytes=criterion.command.max_output_bytes,
     )
 
@@ -108,7 +112,11 @@ def execute_check(
     try:
         if context.cancelled.is_set():
             raise KeyboardInterrupt
-        command = _command(criterion, hidden, (workspace, context.original_workspace))
+        forbidden = (
+            workspace,
+            *((context.original_workspace,) if context.original_workspace else ()),
+        )
+        command = _command(criterion, hidden, forbidden)
         artifacts.record("command", command)
         executable = Path(command.argv[0])
         artifacts.record(
@@ -166,7 +174,7 @@ def execute_check(
     return execution
 
 
-def _hidden(context: GradingContext, root: Path) -> Path:
+def _hidden(context: VerifierContext, root: Path) -> Path:
     hidden = root / "hidden"
     if not hidden.exists():
         for name, blob in context.case.hidden_files.items():
@@ -177,38 +185,46 @@ def _hidden(context: GradingContext, root: Path) -> Path:
     return hidden
 
 
-def _check_copy(
-    context: GradingContext, criterion: DeterministicCriterion, kind: str
-) -> CheckExecution:
-    root = (
-        context.root
-        / ("suites" if criterion.suite_id else "criteria")
+def check_path(criterion: DeterministicCriterion, kind: str) -> Path:
+    return (
+        Path("suites" if criterion.suite_id else "criteria")
         / (criterion.suite_id or criterion.criterion_id)
         / kind
     )
+
+
+def check_copy(
+    context: VerifierContext, criterion: DeterministicCriterion, kind: str
+) -> CheckExecution:
+    root = context.root / check_path(criterion, kind)
     ensure_directory(root)
-    workspace = root / "workspace"
-    if not workspace.exists():
-        _materialize_check(context, kind, workspace)
-    hidden = _hidden(context, root)
-    execution = execute_check(
-        criterion,
-        workspace,
-        hidden,
-        ArtifactWriter(
-            root / (criterion.criterion_id + "-evidence"), 8 * criterion.command.max_output_bytes
-        ),
-        context,
+    artifacts = ArtifactWriter(
+        root / (criterion.criterion_id + "-evidence"),
+        max(65536, 8 * criterion.command.max_output_bytes),
     )
+    try:
+        workspace = root / "workspace"
+        if not workspace.exists():
+            _materialize_check(context, kind, workspace)
+        hidden = _hidden(context, root)
+        execution = execute_check(criterion, workspace, hidden, artifacts, context)
+    except (DryheaveError, OSError) as error:
+        artifacts.record("error", {"type": type(error).__name__, "message": str(error)})
+        execution = CheckExecution(outcome="error", error=type(error).__name__)
     try:
         _hidden(context, root)
     except (DryheaveError, OSError):
-        return execution.model_copy(update={"outcome": "error", "error": "hidden_verifier_changed"})
+        execution = execution.model_copy(
+            update={"outcome": "error", "error": "hidden_verifier_changed"}
+        )
+    atomic_write(artifacts.root / "result.json", canonical_json(execution), replace=False)
     return execution
 
 
-def _materialize_check(context: GradingContext, kind: str, workspace: Path) -> None:
+def _materialize_check(context: VerifierContext, kind: str, workspace: Path) -> None:
     if kind == "final":
+        if not isinstance(context, GradingContext):
+            raise InputError("Final grading requires a captured workspace.")
         materialize_files(
             workspace,
             context.capture.workspace.files,
@@ -232,14 +248,14 @@ def _materialize_check(context: GradingContext, kind: str, workspace: Path) -> N
 
 def grade_criterion(context: GradingContext, criterion: DeterministicCriterion) -> CriterionResult:
     try:
-        final = _check_copy(context, criterion, "final")
+        final = check_copy(context, criterion, "final")
     except (DryheaveError, OSError) as error:
         final = CheckExecution(outcome="error", error=type(error).__name__)
     baseline = reference = None
     try:
-        baseline = _check_copy(context, criterion, "baseline")
+        baseline = check_copy(context, criterion, "baseline")
         if context.case.reference_patch_file:
-            reference = _check_copy(context, criterion, "reference")
+            reference = check_copy(context, criterion, "reference")
     except (DryheaveError, OSError) as error:
         reference = CheckExecution(outcome="error", error=type(error).__name__)
     demonstrated = (

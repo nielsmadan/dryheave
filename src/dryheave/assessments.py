@@ -190,12 +190,12 @@ def _grade(
     context = GradingContext(
         store,
         inputs.case,
-        inputs.capture,
         inputs.files | hidden,
         root,
         Path(state.workspace),
         own,
         cancelled,
+        inputs.capture,
     )
     intents = {
         event.data.get("criterion_id")

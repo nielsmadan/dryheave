@@ -139,8 +139,50 @@ edits require revalidation, even if the catalog revision did not change. A store
 validation reference describes the last check; freeze always verifies current
 content. Validation is structural, not a demonstrated passing benchmark.
 
-Calibrate the frozen case before subject spend, then use profile/experiment
-commands and `dryheave-results` to compare repeated runs. Repetitions reuse frozen
+Calibrate the frozen case before subject spend:
+
+```sh
+dryheave case calibrate CASE_ID --json
+dryheave case calibration CALIBRATION_ID --json
+dryheave case calibration CALIBRATION_ID --evidence PATH_FROM_FILES --limit 4000 --json
+```
+
+The first command returns `data.id` for a standalone immutable calibration and
+`data.calibration.status`. `demonstrated` means every deterministic criterion
+observed an assertion-failing baseline and successful reference. `ineffective`
+means a baseline passed. `unavailable` includes verifier errors, missing reference
+patches or incomplete retained evidence. Judge-only cases are `not_applicable`;
+no judge/model calls run during calibration. Inspect each criterion's baseline
+and reference execution, including `outcome`, `error`, `returncode` and markers.
+The `files` map lists retained output paths. Evidence reads use byte offsets and
+return `next_offset`, byte length and truncation; invalid UTF-8 displays replacement
+characters while the immutable bytes and hashes remain exact.
+
+Verifier copies use the same command/environment rules as assessment. They do
+not execute `case.setup`: required trusted tools and declared environment-name
+references must already be available. Suite criteria execute in frozen order on
+one copy per side; other criteria get independent copies. Source repositories
+remain read-only. Commands have frozen finite time/output limits. Cancellation
+stops recorded owned processes and retains working evidence under
+`STORE/calibrations/OPERATION_ID`; retrying starts a fresh calibration after
+reconciliation. Native run and assessment also reconcile interrupted calibration
+ownership before proceeding. Unresolved writers block evidence publication.
+
+Correct the draft/reference/verifier when calibration is unavailable or
+ineffective, validate/freeze a new case and calibrate its new ID. Old calibrations
+keep describing their original frozen bytes even when aliases or drafts change.
+A zero command exit means the record was saved; inspect its status before spend.
+Share the exact standalone record and input closure explicitly:
+
+```sh
+dryheave export CALIBRATION_ID --include-sensitive calibration-evidence --output calibration.tar --json
+dryheave --store imported-store import calibration.tar --json
+dryheave --store imported-store case calibration CALIBRATION_ID --json
+```
+
+This export contains curator-only verifier output and hidden case inputs; it
+requires the sensitive selection. Then use profile/experiment commands and
+`dryheave-results` to compare repeated runs. Repetitions reuse frozen
 IDs with fresh subject workspaces. Retries preserve earlier attempts. New voices,
 source selections or task content need new frozen inputs and a new experiment;
 old experiments retain their original behavior.

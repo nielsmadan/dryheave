@@ -165,3 +165,14 @@ after an actual not-found result. POSIX flock provides process ownership.
 The macOS verification used CPython 3.13.6 and its exposed `os.O_SEARCH`. Linux
 coverage runs in CI using the same tests and `os.O_PATH` fallback. Windows is not
 a supported platform for this persistence implementation.
+
+## Standalone calibrations
+
+`ObjectKind.CALIBRATION` has a strict version-1 `CaseCalibration` payload and a
+manifest reference to its exact frozen case. Its payload `files` map must match
+the retained evidence blobs. The calibration loader checks ordered criteria and
+verifier identities, baseline/reference results against retained output, and
+resolved cleanup. These records do not create run journals or subject captures.
+Exporting one requires `--include-sensitive calibration-evidence`; import verifies
+the declared sensitive class and the full exact input/evidence closure before
+publishing objects. Existing object kinds, frozen schemas and IDs are unchanged.

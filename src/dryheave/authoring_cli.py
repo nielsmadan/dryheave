@@ -1,12 +1,14 @@
 import argparse
 import json
+import shlex
 from pathlib import Path
 
 from pydantic import JsonValue
 
+from dryheave.calibrations import calibrate_case, load_calibration
 from dryheave.cases import draft_case, freeze_case, load_frozen_case, read_draft, validate_case
 from dryheave.commands import CommandRegistry
-from dryheave.errors import InputError
+from dryheave.errors import CancelledError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.logs import claude, codex
 from dryheave.logs.base import ImportLimits, Session, candidates, discover
@@ -17,6 +19,8 @@ from dryheave.personas import Persona, freeze_persona, load_frozen_persona
 from dryheave.repositories import capture_repository
 from dryheave.serialization import parse_model
 from dryheave.storage import ObjectStore
+
+MAX_CALIBRATION_EVIDENCE_BYTES = 65536
 
 
 def _write(path: Path, model: StrictModel) -> None:
@@ -103,12 +107,57 @@ def _validate(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonVal
 
 def _freeze(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     identifier = freeze_case(store, read_draft(args.path), args.path.absolute().parent)
-    return {"id": identifier, "next": f"Inspect frozen inputs with case inspect {identifier}."}
+    return {
+        "id": identifier,
+        "next": f"Calibrate before subject spend with case calibrate {identifier}.",
+    }
 
 
 def _case_inspect(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     case = load_frozen_case(store, args.reference)
     return {"id": store.resolve(args.reference), "case": case.model_dump(mode="json")}
+
+
+def _calibrate(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
+    try:
+        identifier = calibrate_case(store, args.reference)
+    except KeyboardInterrupt as error:
+        retry = shlex.join(
+            ("dryheave", "--store", str(store.root), "case", "calibrate", args.reference)
+        )
+        raise CancelledError(
+            f"Calibration interrupted; retained work is in {store.root / 'calibrations'}. Reconcile owned processes and start a fresh calibration with: {retry}"
+        ) from error
+    record = load_calibration(store, identifier)
+    return {
+        "id": identifier,
+        "calibration": record.model_dump(mode="json"),
+        "next": f"Inspect retained evidence with case calibration {identifier} --evidence PATH; review status before subject spend.",
+    }
+
+
+def _calibration(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
+    record = load_calibration(store, args.reference)
+    result: dict[str, JsonValue] = {
+        "id": store.resolve(args.reference),
+        "calibration": record.model_dump(mode="json"),
+    }
+    if args.evidence:
+        content = store.read_blob(args.reference, args.evidence)
+        limit = args.limit
+        if not 1 <= limit <= MAX_CALIBRATION_EVIDENCE_BYTES or args.offset < 0:
+            raise InputError("Evidence byte offset must be nonnegative and limit must be 1-65536.")
+        end = min(len(content), args.offset + limit)
+        result["evidence"] = {
+            "path": args.evidence,
+            "sha256": record.files[args.evidence],
+            "bytes": len(content),
+            "offset": args.offset,
+            "text": content[args.offset : end].decode("utf-8", errors="replace"),
+            "next_offset": end if end < len(content) else None,
+            "truncated": args.offset > 0 or end < len(content),
+        }
+    return result
 
 
 def _persona_draft(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
@@ -175,6 +224,23 @@ def _register_cases(registry: CommandRegistry) -> None:
     inspect = commands.add_parser("inspect")
     inspect.add_argument("reference")
     registry.handler(inspect, _case_inspect)
+    calibrate = commands.add_parser(
+        "calibrate", help="Run bounded baseline/reference verifiers before subject spend."
+    )
+    calibrate.add_argument("reference", metavar="CASE_REF")
+    registry.handler(calibrate, _calibrate)
+    calibration = commands.add_parser(
+        "calibration", help="Validate a standalone calibration and inspect its retained evidence."
+    )
+    calibration.add_argument("reference", metavar="CALIBRATION_REF")
+    calibration.add_argument(
+        "--evidence", metavar="PATH", help="Read a path from the calibration files map."
+    )
+    calibration.add_argument("--offset", type=int, default=0, help="Evidence byte offset.")
+    calibration.add_argument(
+        "--limit", type=int, default=4000, help="Evidence byte limit (maximum 65536)."
+    )
+    registry.handler(calibration, _calibration)
 
 
 def _register_personas(registry: CommandRegistry) -> None:
