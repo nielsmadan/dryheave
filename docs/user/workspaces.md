@@ -53,9 +53,19 @@ The command reports the actual byte count and override instructions on failure;
 it never relocates files automatically. UTF-8 path bytes count toward the limit.
 
 New native runs use the workspace runtime unless `--runtime-root` is explicit.
-`--tui-test PATH` remains required. Offline fixture runs have no native runtime.
+Set `init ./bench --tui-test /path/to/tui-test` once, or set
+`tui_test = "tools/tui-test"` in the workspace config. Relative transport paths
+resolve from the config directory. New runs prefer explicit `run --tui-test`,
+then workspace `tui_test`, then an installed `tui-test` on PATH. Setup does not
+execute the selected transport; `doctor --tui-test PATH` checks its version.
+Offline fixture runs have no native runtime.
 Omitted resume/status options keep the run's frozen settings even after config
 changes; moving a workspace does not rewrite historical native runtime paths.
+
+Claude operators should install explicitly with
+`dryheave skills install --target .claude/skills`; invoke `/dryheave-agent-profile`
+in Claude Code. The default `.agents/skills` target and Codex `$skill-name`
+invocation remain unchanged.
 
 Repeated initialization of matching owned state leaves existing bytes untouched.
 An interrupted initialization resumes from its ownership record. Foreign or

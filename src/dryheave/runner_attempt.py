@@ -325,7 +325,7 @@ class TrialExecution:
             self.update(stop_reason="controller_budget")
             return ""
         request = simulator_projection(
-            self.case, self.persona, tuple(self.dialogue), self.trial.seed
+            self.case, self.persona, tuple(self.dialogue), self.trial.seed, recipe=self.recipe
         )
         call_id = "c-" + uuid4().hex
         call = RoleCall(call_id=call_id, status="intent")
@@ -348,6 +348,7 @@ class TrialExecution:
             cancelled=self.cancelled,
             inherited=inherited,
             on_identity=self.identity,
+            runtime_root=self.root / "role-runtime" / call_id,
         )
         try:
             call = invoke_controller(self.recipe, request, artifacts, context)

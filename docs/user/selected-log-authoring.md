@@ -22,6 +22,17 @@ $dryheave-generate-problem Work through request cli-tasks using that voice.
 $dryheave-agent-profile Prepare Terra low and high profiles for the frozen case.
 ```
 
+For Claude Code, install into its project-local discovery directory:
+
+```sh
+dryheave skills install --target .claude/skills
+```
+
+Then invoke `/dryheave-voice-profile`, `/dryheave-generate-problem` and
+`/dryheave-agent-profile` with the same selection/request names. Use
+`collect select ... --agent claude` when the selected source logs are Claude
+logs; the operator's agent need not match the source-log agent.
+
 The operator reads bounded selected evidence, writes internal draft JSON, records
 its decisions, and runs public validation/freezing commands. You supply task
 preferences and review the resulting problems and voice; you do not need to write
@@ -186,6 +197,53 @@ requires the sensitive selection. Then use profile/experiment commands and
 IDs with fresh subject workspaces. Retries preserve earlier attempts. New voices,
 source selections or task content need new frozen inputs and a new experiment;
 old experiments retain their original behavior.
+
+## Freeze profiles and adaptive simulation
+
+Friendly setup does not launch agents. For the approved Haiku-default versus
+Sonnet-low configuration comparison, select explicit provider model IDs:
+
+```sh
+dryheave profile create haiku --agent claude --model claude-haiku-4-5-20251001
+dryheave profile derive haiku --model claude-sonnet-4-6 --effort low --name sonnet-low
+dryheave profile diff haiku sonnet-low --json
+dryheave experiment setup comparison --case CASE_ID \
+  --profile haiku=haiku --profile sonnet-low=sonnet-low \
+  --simulator claude --simulator-model claude-haiku-4-5-20251001 \
+  --simulator-max-calls 3 --simulator-call-seconds 30 --simulator-total-seconds 90 \
+  --design-approval
+dryheave run comparison --assess --json
+```
+
+These model IDs are explicit example choices, not auto-discovered current defaults.
+Calibrate CASE_ID first. Add only explicitly selected `--config`, `--instruction`,
+`--skill` and `--plugin` inputs to profile creation. Both profiles retain the same
+selected bytes and runtime references. Haiku has no effort flag; deriving back
+from Sonnet needs `--model claude-haiku-4-5-20251001 --clear-effort`.
+Do not describe this as an effort-only comparison.
+
+Claude setup requires the runtime reference `CLAUDE_CODE_OAUTH_TOKEN`; no helper
+reads its value. Subjects use their native TUI and stop on native trust/auth/
+permission dialogs. The simulator uses print mode with built-in tools disabled,
+strict empty MCP config and bounded separately owned runtime. Managed settings
+remain a recorded fidelity limit. `--design-approval` authorizes ordinary
+in-scope design conversation only; without it the policy is facts-only.
+Persona writing style never authorizes actions. `--bare` and permission bypasses
+are not supported.
+
+For Codex 0.154.0, use `profile create terra-low --agent codex --model
+gpt-5.6-terra --effort low`, then derive only `--effort high`. New profiles disable
+plugins and bundled skills; selected config still loads. Selecting plugins needs
+`--plugins selected-plugins` and records unresolved discovery/sync limitations.
+`experiment setup ... --simulator codex` uses a versioned trusted-native adapter,
+not a tool-free controller. `--simulator none` explicitly freezes zero replies.
+Legacy JSON spec commands remain supported.
+
+New native runs resolve transport from `run --tui-test`, workspace `tui_test`,
+then PATH. `run --assess` starts assessment only after complete capture and owned
+cleanup; it can run the experiment's frozen judge. Capture-only `run` remains
+available. A failure retains the announced run ID and evidence; use
+`run --resume RUN_ID` or `assess RUN_ID` separately. Viewing never starts models.
 
 ## Upgrade existing operator skills
 

@@ -74,7 +74,7 @@ are errors. Cases, variant names and repetitions define at most 10,000 trials.
 SHA-256 ordering of the frozen seed and trial identity is deterministic; paired
 variants share a case/repetition seed. Moving an alias cannot change saved trials.
 Validation, creation and frozen experiment loading reject any scripted judge recipe.
-Cases with required judge rubrics need a JSON-command or Codex judge with
+Cases with required judge rubrics need a JSON-command, Codex or Claude judge with
 `budget.max_calls` greater than zero before execution can begin. Optional rubrics
 can remain without a judge.
 
@@ -86,7 +86,9 @@ uv run dryheave --store .dryheave run greeting --mode native \
 ```
 
 The native run honors the materialized `LaunchPlan` and uses the real pinned
-`tui-test` transport. It requires an explicit short runtime root: each generated
+`tui-test` transport. The CLI resolves new-run transport from an explicit option,
+workspace config, then PATH; omitted resume options never resolve new defaults.
+It requires a configured or explicit short runtime root: each generated
 10-character attempt child must keep the absolute `TUI_TEST_HOME` at 70 bytes or
 less. The runtime root is recorded and never silently relocated. Keep the runner
 process alive until it returns; its terminal controller is persistent. Every
@@ -152,6 +154,47 @@ references and adds no permission bypass flags. `CODEX_HOME` can be an explicit
 controller command environment reference; otherwise native HOME auth discovery
 is left to the selected executable. Credentials are never inspected or logged.
 
+Codex 0.154.0 requires `runtime.discovery: "codex-clean-0.154.0"`. Its owned
+CODEX_HOME and TMPDIR are separate from evidence; plugins/startup sync and bundled
+skills are disabled. Optional opaque auth.json links require the frozen
+source-write acknowledgement. The adapter verifies the exact executable version.
+New calls retain cumulative usage even on invalid output or process failure;
+model/effort are not inferred from the prompt. Historical 0.153.4 serialization
+and launch behavior are preserved.
+
+Claude uses `kind: "claude"`, `version: "2.1.278"`, one executable in
+`command.argv`, an explicit model and
+`runtime: {"discovery":"claude-tool-free-2.1.278","home_policy":"native"}`.
+Its only command environment reference is `CLAUDE_CODE_OAUTH_TOKEN`; it has no
+Codex sandbox/auth-file fields. The adapter verifies `2.1.278 (Claude Code)` and
+adds print/JSON/schema/model flags, `--tools ''`, empty setting sources,
+strict empty MCP configuration, disabled hooks/plugins and session persistence.
+Haiku omits effort; supported Sonnet/Opus settings may specify it. Native subjects
+remain TUI and receive none of these simulator-only print flags.
+
+The Claude result envelope must be a successful `type: "result"` with a valid
+`structured_output`; prose `result` is never treated as a substitute. Unknown
+envelope fields, native permission denials and reported server tool use fail the
+call. Provider usage is retained independently of decision validity and exit
+status. Only a single measured modelUsage identity becomes observed_model;
+observed_effort stays unknown. A judge uses the same transport and lifecycle but
+validates judgments rather than simulator decisions. Model output cannot
+self-report usage or effective settings through the structured decision payload.
+New protocol fixtures are explicitly synthetic, not live compatibility evidence.
+
+Each modern controller owns private config/tmp/work directories outside evidence.
+Durable binding identities support recovery, and links are removed only after
+known writers stop; replaced links/files remain preserved for review. Native HOME,
+managed sources and host/network access are recorded limitations, not isolation
+guarantees. Only Claude's bounded tool policy is described as tool-disabled;
+Codex remains trusted-native.
+
+`conversation_policy: "facts-only"` permits factual clarification;
+`"design-approval"` additionally permits ordinary in-scope conversational design
+approval. Persona style and dialogue never grant authority for native permissions,
+authentication, trust, new scope or spending. Old recipes omit this additive field
+and retain their historical projection.
+
 Call time includes native controller startup. Commands, pipes, schema/output
 files, role-directory size/count/depth and known process cleanup are bounded.
 The subject's overall deadline covers all simulator time, with independent role
@@ -161,8 +204,11 @@ a stop, cancellation, budget exhaustion or unresolved delivery.
 
 `scoring` freezes `policy: "required-criteria-v1"`, optional `judge` controller
 recipe, and an optional version/date/currency price table with per-million-token
-rates. These are saved assessment inputs, interpreted only by the explicit `assess`
-command, and are not current market pricing. See [results.md](results.md).
+rates. These are saved assessment inputs, interpreted by explicit `assess` or
+`run --assess`, and are not current market pricing. The convenience flag rejects
+status-only requests, incomplete capture and unresolved cleanup. It preserves
+the run ID and evidence on failure or cancellation; normal `run` stays
+capture-only. See [results.md](results.md).
 
 ## Durable recovery and assessment integration
 

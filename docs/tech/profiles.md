@@ -33,6 +33,28 @@ files does not imply the subject can start successfully.
 
 ## Capture specification
 
+`profile create NAME --agent codex|claude --model MODEL` provides selected-file
+capture without a JSON spec. Codex defaults to 0.154.0, Terra low and an explicit
+disabled-plugin/bundled-skill policy. Claude requires an explicit model, pins
+2.1.278, uses settings.json/CLAUDE.md targets and adds only the named OAuth token
+reference. New Claude recipes reject Codex flags, alternate billing references,
+print/bare/bypass native arguments and unsupported effort. Only `--verbose` is
+accepted through its native-argument helper. Selected native config still needs
+permission and managed-discovery review.
+
+`profile derive BASE --model MODEL --effort LEVEL --name NAME` can change either
+or both settings. `--clear-effort` removes the override; Haiku requires this when
+deriving from an effort-enabled profile. Mixing these options with `--spec` is
+an error. New discovery fields serialize only when explicitly set, preserving
+historical payloads and object IDs. The old spec commands and recipe defaults
+retain their previous behavior.
+
+Codex 0.154.0 disabled-plugin mode emits `--disable plugins` and
+`skills.bundled.enabled=false`, without `--ignore-user-config` on subjects.
+Selected-plugin mode preserves selected bytes but cannot freeze local plugin
+discovery, startup sync or upgrades. HOME, project, managed and system influences
+remain unverified.
+
 Paths in `include_roots` resolve relative to the specification file. Individual
 asset paths are relative to their named root, and targets are relative to their
 native destination root. This example selects three specific inputs; it never

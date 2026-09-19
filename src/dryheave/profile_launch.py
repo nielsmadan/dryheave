@@ -80,6 +80,10 @@ def _disabled_paths(profile: FrozenProfile, roots: dict[str, str]) -> tuple[str,
 def _codex_args(profile: FrozenProfile, roots: dict[str, str]) -> list[str]:
     recipe = profile.recipe
     arguments: list[str] = []
+    if recipe.codex_discovery is not None:
+        if recipe.codex_discovery == "disabled-plugins":
+            arguments.extend(("--disable", "plugins"))
+        arguments.extend(("--config", "skills.bundled.enabled=false"))
     if recipe.workspace_trust != "prompt":
         arguments.extend(
             (
@@ -250,8 +254,10 @@ def _discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[DiscoveryR
         DiscoveryRoot(
             kind="plugin",
             path=str(config / "plugins"),
-            status="unverified",
-            mechanism="Selected plugin bytes are frozen; activation, fetched components and integration availability require native verification.",
+            status="disabled" if recipe.codex_discovery == "disabled-plugins" else "unverified",
+            mechanism="Codex 0.154.0 --disable plugins disables configured plugins and startup sync."
+            if recipe.codex_discovery == "disabled-plugins"
+            else "Selected plugin bytes are frozen; activation, fetched components and integration availability require native verification.",
         ),
     ]
     if recipe.agent == AgentKind.CODEX:
@@ -296,7 +302,7 @@ def _codex_discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[Disc
             kind="skill",
             path=str(home / ".agents/skills"),
             status="unverified" if recipe.home_policy == "native" else "frozen",
-            mechanism="Codex 0.153.4 discovers HOME/.agents/skills independently of CODEX_HOME; native home is not inventoried.",
+            mechanism="Codex discovers HOME/.agents/skills independently of CODEX_HOME; native home is not inventoried.",
         ),
         DiscoveryRoot(
             kind="skill",
@@ -307,8 +313,10 @@ def _codex_discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[Disc
         DiscoveryRoot(
             kind="skill",
             path=str(config / "skills/.system"),
-            status="unverified",
-            mechanism="Bundled system skills depend on the native executable and can be installed by the harness.",
+            status="disabled" if recipe.codex_discovery is not None else "unverified",
+            mechanism="Codex 0.154.0 skills.bundled.enabled=false disables bundled skills."
+            if recipe.codex_discovery is not None
+            else "Bundled system skills depend on the native executable and can be installed by the harness.",
         ),
         DiscoveryRoot(
             kind="config",

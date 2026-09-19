@@ -382,6 +382,101 @@ def test_json_credentials_and_external_references(store, tmp_path: Path) -> None
     }
 
 
+@pytest.mark.parametrize("layer", ["global", "project"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "ANTHROPIC_BASE_URL",
+        "AWS_PROFILE",
+        "GOOGLE_CLOUD_PROJECT",
+        "HOME",
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "TMPDIR",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+    ],
+)
+def test_selected_claude_settings_environment_obeys_recipe_policy(store, tmp_path, name, layer):
+    source = tmp_path / "selected"
+    source.mkdir()
+    (source / "settings.json").write_text(json.dumps({"env": {name: "1"}}))
+    native = NativeRecipe(
+        agent=AgentKind.CLAUDE,
+        executable="claude",
+        version="2.1.278",
+        model="claude-haiku-4-5-20251001",
+        claude_discovery="selected-2.1.278",
+        environment=(EnvironmentReference(name="CLAUDE_CODE_OAUTH_TOKEN"),),
+    )
+    with pytest.raises(InputError):
+        capture(
+            store,
+            source,
+            selection(
+                "settings.json",
+                kind="config",
+                layer=layer,
+                target="settings.json" if layer == "global" else ".claude/settings.json",
+            ),
+            native=native,
+        )
+    assert list(store.root.rglob("manifest.json")) == []
+
+
+def test_selected_claude_settings_policy_preserves_legacy_capture_and_blocks_upgrade(
+    store, tmp_path
+):
+    source = tmp_path / "selected"
+    source.mkdir()
+    content = b'{"env":{"CLAUDE_CODE_USE_BEDROCK":"1","AWS_PROFILE":"benchmark"}}'
+    (source / "settings.json").write_bytes(content)
+    native = NativeRecipe(agent=AgentKind.CLAUDE, executable="claude", version="2.1.263")
+    asset = selection("settings.json", kind="config")
+    identifier = capture(store, source, asset, native=native)
+    assert load_profile(store, identifier).recipe == native
+    assert store.read_blob(identifier, "global/config/settings.json") == content
+    assert capture(store, source, asset, native=native) == identifier
+    with pytest.raises(InputError):
+        derive_profile(
+            store,
+            identifier,
+            DeriveSpec(
+                recipe_changes={
+                    "version": "2.1.278",
+                    "model": "claude-haiku-4-5-20251001",
+                    "claude_discovery": "selected-2.1.278",
+                    "environment": [{"name": "CLAUDE_CODE_OAUTH_TOKEN"}],
+                }
+            ),
+        )
+    assert [path.parent.name for path in store.root.rglob("manifest.json")] == [identifier]
+
+
+def test_selected_claude_settings_preserve_safe_environment_bytes(store, tmp_path):
+    source = tmp_path / "selected"
+    source.mkdir()
+    content = b'{"env":{"LANG":"en_US.UTF-8"}}'
+    (source / "settings.json").write_bytes(content)
+    native = NativeRecipe(
+        agent=AgentKind.CLAUDE,
+        executable="claude",
+        version="2.1.278",
+        model="claude-haiku-4-5-20251001",
+        claude_discovery="selected-2.1.278",
+        environment=(EnvironmentReference(name="CLAUDE_CODE_OAUTH_TOKEN"),),
+    )
+    identifier = capture(store, source, selection("settings.json", kind="config"), native=native)
+    assert load_profile(store, identifier).recipe == native
+    assert store.read_blob(identifier, "global/config/settings.json") == content
+
+
 def test_imported_profile_cannot_redirect_expanded_asset(store, tmp_path: Path) -> None:
     from dryheave.models import ObjectKind
     from dryheave.serialization import parse_json

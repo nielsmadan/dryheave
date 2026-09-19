@@ -16,13 +16,13 @@ CODEX_TOKEN_FIELDS = (
 def codex_usage(
     raw: dict[str, JsonValue],
     *,
-    protocol: Literal["native-log", "exec-0.153.4"],
+    protocol: Literal["native-log", "exec-0.153.4", "exec-0.154.0"],
     provenance: str,
 ) -> TokenUsage | None:
     values = [raw.get(name) for name in CODEX_TOKEN_FIELDS]
     if any(value is not None and (type(value) is not int or value < 0) for value in values):
         return None
-    if protocol == "exec-0.153.4":
+    if protocol in {"exec-0.153.4", "exec-0.154.0"}:
         if not any(values):
             return None
         if "cache_write_input_tokens" not in raw:

@@ -120,6 +120,27 @@ can establish zero model spending; absent native telemetry cannot.
 
 ## Compatibility evidence
 
+Friendly setup also has a version-gated Claude 2.1.278 print-mode simulator and
+judge adapter. It uses `--tools ''`, `--strict-mcp-config` with an empty server
+set, empty setting sources, explicit disabled hooks/plugins and
+`--no-session-persistence`. It never uses `--bare` (which disables OAuth), a
+permission bypass, or an API-billing fallback. Only the
+`CLAUDE_CODE_OAUTH_TOKEN` environment reference is accepted for that controller;
+its value is neither inspected nor saved. Managed policy remains unverified.
+Runtime config/tmp/work directories are separate from evidence, and owned
+processes must stop before publication. Codex 0.154.0 separately uses its
+`codex-clean-0.154.0` policy with optional acknowledged opaque auth binding.
+
+The new `claude-print-2.1.278-synthetic.json` and lifecycle tests are synthetic
+offline protocol fixtures, not live recordings. They validate structured-result
+boundaries, provider usage on response/process failure, cancellation, version
+checks, owned cleanup and conservative native turn handling. They do not prove
+live composer/paste compatibility. The existing 2.1.263 source fixtures are
+unchanged. Claude usage counts uncached input, cache read/write and output
+separately; reasoning and effective effort stay unknown. `modelUsage` identifies
+an observed model only when exactly one model has measured tokens; requested
+identity is never substituted.
+
 Sanitized source-log fixtures derive from Codex 0.153.4 and Claude 2.1.263; their
 text/identifiers are synthetic and do not establish recovered private task intent.
 Codex's adapter recognizes its recorded composer, fresh acceptance and root-turn

@@ -3,8 +3,16 @@ import unicodedata
 from pathlib import PurePosixPath
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, StringConstraints, field_validator, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    StringConstraints,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
+from dryheave.claude_policy import validate_effort
 from dryheave.models import (
     AgentKind,
     EnvironmentReference,
@@ -76,9 +84,39 @@ class NativeRecipe(StrictModel):
     )
     environment: tuple[EnvironmentReference, ...] = ()
     runtime_files: tuple[RuntimeFileReference, ...] = ()
+    codex_discovery: Literal["disabled-plugins", "selected-plugins"] | None = None
+    claude_discovery: Literal["selected-2.1.278"] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        for name in ("codex_discovery", "claude_discovery"):
+            if getattr(self, name) is None:
+                value.pop(name, None)
+        return value
 
     @model_validator(mode="after")
     def environment_contract(self) -> Self:
+        if self.claude_discovery is not None:
+            if self.agent != AgentKind.CLAUDE or self.version != "2.1.278":
+                raise ValueError("Explicit Claude discovery policy requires version 2.1.278")
+            validate_effort(self.model, self.effort)
+            if self.launcher or any(argument != "--verbose" for argument in self.arguments):
+                raise ValueError(
+                    "Claude selected policy supports only --verbose native arguments; subjects must use the native TUI without permission bypasses"
+                )
+            names = [item.name for item in self.environment]
+            if "CLAUDE_CODE_OAUTH_TOKEN" not in names or any(
+                name.startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_", "AWS_", "GOOGLE_"))
+                for name in names
+            ):
+                raise ValueError(
+                    "Claude selected policy requires the OAuth token reference without alternate provider or API-billing references"
+                )
+        if self.codex_discovery is not None and (
+            self.agent != AgentKind.CODEX or self.version != "0.154.0"
+        ):
+            raise ValueError("explicit Codex discovery policy requires version 0.154.0")
         if self.agent != AgentKind.CODEX and self.workspace_trust != "prompt":
             raise ValueError("explicit workspace trust is currently verified only for Codex")
         names = [item.name for item in self.environment]

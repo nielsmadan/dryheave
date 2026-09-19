@@ -155,6 +155,7 @@ def _judge(
         cancelled=cancelled,
         inherited=os.environ,
         on_identity=own,
+        runtime_root=execution.attempt_root(state) / "role-runtime" / call_id,
     )
     call, results = invoke_judge(
         recipe,
@@ -378,9 +379,11 @@ def _assess_one(
     return identifier
 
 
-def assess_run(store: ObjectStore, run_id: str) -> tuple[str, ...]:
+def assess_run(
+    store: ObjectStore, run_id: str, *, cancelled: Event | None = None
+) -> tuple[str, ...]:
     identifiers = []
-    cancelled = Event()
+    cancelled = cancelled or Event()
     with (
         RunStore(store.root).open(run_id) as journal,
         store.native_lock(),

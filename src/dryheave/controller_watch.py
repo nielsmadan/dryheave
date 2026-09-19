@@ -1,6 +1,7 @@
 import os
 import stat
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 from dryheave.errors import DryheaveError
@@ -12,14 +13,17 @@ MAX_CONTROLLER_DEPTH = 16
 class ControllerWatch:
     def __init__(
         self,
-        root: Path,
+        root: Path | tuple[Path, ...],
         parent_cancelled: threading.Event,
         *,
         max_bytes: int,
         max_files: int = 256,
         output_bytes: int = 65536,
+        owned_symlinks: Mapping[Path, tuple[int, int, int]] | None = None,
     ) -> None:
-        self.root, self.parent_cancelled = root, parent_cancelled
+        self.roots = (root,) if isinstance(root, Path) else root
+        self.root, self.parent_cancelled = self.roots[0], parent_cancelled
+        self.owned_symlinks = dict(owned_symlinks or {})
         self.max_bytes, self.max_files = max_bytes, max_files
         self.output_bytes = output_bytes
         self.cancelled = threading.Event()
@@ -56,6 +60,12 @@ class ControllerWatch:
                         and info.st_size > self.output_bytes
                     ):
                         raise ValueError("controller_response_file_limit")
+                elif stat.S_ISLNK(info.st_mode) and self.owned_symlinks.get(root / entry.name) == (
+                    info.st_dev,
+                    info.st_ino,
+                    info.st_ctime_ns,
+                ):
+                    pass
                 else:
                     raise ValueError("controller_special_file")
                 if size > self.max_bytes or count > self.max_files:
@@ -66,7 +76,13 @@ class ControllerWatch:
         if self.parent_cancelled.is_set():
             self.cancelled.set()
         try:
-            self._measure(self.root)
+            size = count = 0
+            for root in self.roots:
+                root_size, root_count = self._measure(root)
+                size += root_size
+                count += root_count
+                if size > self.max_bytes or count > self.max_files:
+                    raise ValueError("controller_file_limit")
         except ValueError as error:
             self.error = str(error)
             self.cancelled.set()

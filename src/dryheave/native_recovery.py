@@ -3,6 +3,7 @@ import re
 import psutil
 
 from dryheave.calibration_recovery import reconcile_calibrations
+from dryheave.controller_runtime import reconcile_runtimes
 from dryheave.drivers.models import CleanupReport, ProcessIdentity
 from dryheave.errors import InputError
 from dryheave.filesystem import directory_names
@@ -42,6 +43,7 @@ def reconcile_attempt(
         and previous is not None
         and cleanup_resolved(previous)
     ):
+        reconcile_runtimes(execution.attempt_root(state) / "role-runtime")
         return previous
     owner = ProcessOwner()
     errors = []
@@ -84,6 +86,8 @@ def reconcile_attempt(
         }
     )
     execution.evidence(state, event, cleanup)
+    if cleanup_resolved(cleanup):
+        reconcile_runtimes(execution.attempt_root(state) / "role-runtime")
     return cleanup
 
 

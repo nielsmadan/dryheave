@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from dryheave.drivers.claude import ClaudeAdapter
 
 
@@ -98,3 +100,65 @@ def test_sidechain_tool_stop_and_hook_continuation_cannot_complete_human_turn():
     assert adapter.feed({"type": "system", "subtype": "turn_duration", "sessionId": "root"}) == ()
     adapter.feed(assistant(parentUuid="unrelated"))
     assert adapter.feed({"type": "system", "subtype": "turn_duration", "sessionId": "root"}) == ()
+
+
+@pytest.mark.parametrize("partial,hook", [(False, False), (True, False), (False, True)])
+def test_synthetic_278_composer_paste_and_linked_lifecycle(tmp_path, driver_plan, partial, hook):
+    from dryheave.drivers.artifacts import ArtifactWriter
+    from dryheave.drivers.fake import FakeEventSource, FakeTerminal
+    from dryheave.drivers.models import DriverLimits, Screen
+    from dryheave.drivers.session import DriverSession
+    from dryheave.models import AgentKind
+
+    class SyntheticClaudeTerminal(FakeTerminal):
+        def paste(self, text):
+            self.pastes.append(text)
+            self.current = Screen(
+                text="\u276f " + (text[:1] if partial else text.replace("\n", "\n  ")), exited=None
+            )
+
+        def enter(self):
+            self.enters += 1
+            self.current = Screen(text="Working\n\u276f", exited=None)
+
+    prompt = "Fix greeting.\nAsk which punctuation first."
+    adapter = ClaudeAdapter()
+    accepted = human(
+        version="2.1.278", cwd=driver_plan.cwd, message={"role": "user", "content": prompt}
+    )
+    response = assistant(
+        message={
+            "id": "synthetic-response",
+            "role": "assistant",
+            "model": "claude-haiku-4-5-20251001",
+            "content": [{"type": "text", "text": "Which punctuation?"}],
+            "stop_reason": "end_turn",
+        }
+    )
+    records = [accepted, response]
+    if hook:
+        records.append({"type": "system", "subtype": "hook_started", "sessionId": "root"})
+    records.append({"type": "system", "subtype": "turn_duration", "sessionId": "root"})
+    events = [event for record in records for event in adapter.feed(record)]
+    source = FakeEventSource([])
+    terminal = SyntheticClaudeTerminal([Screen(text="\u276f", exited=None)])
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    session = DriverSession(
+        terminal,
+        source,
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        agent=AgentKind.CLAUDE,
+        limits=DriverLimits(duration_seconds=2, max_polls=10, poll_seconds=0.01),
+    )
+    with session:
+        assert session.start(plan, {}).state == "ready"
+        intent = session.prepare(prompt)
+        source.batches.extend([[], events])
+        result = session.deliver(intent)
+        assert result.state == ("partial_input" if partial else "timeout" if hook else "question")
+        assert terminal.pastes == [prompt]
+        assert terminal.enters == (0 if partial else 1)
+        if not partial:
+            assert session.launch.observed_model == "claude-haiku-4-5-20251001"
+            assert session.launch.observed_effort is None
+    assert terminal.closed

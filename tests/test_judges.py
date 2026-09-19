@@ -170,6 +170,58 @@ def test_codex_schema_requires_nullable_nested_fields_without_model_launch():
     assert {"type": "null"} in judgment["properties"]["score"]["anyOf"]
 
 
+@pytest.mark.parametrize("invalid", [False, True])
+def test_claude_judge_uses_structured_protocol_and_provider_usage(
+    store, benchmark, tmp_path, invalid
+):
+    import threading
+    import time
+
+    from dryheave.controllers import CallContext
+    from dryheave.drivers.artifacts import ArtifactWriter
+    from dryheave.judges import JudgeInput, invoke_judge
+    from test_claude_controller import FIXTURE, fake_executable, recipe_for
+
+    payload = json.loads(FIXTURE.read_bytes())
+    payload["structured_output"] = {
+        "judgments": [
+            {
+                "criterion_id": "unknown" if invalid else "quality",
+                "outcome": "pass",
+                "score": 0.75,
+                "rationale": "Synthetic rubric fixture.",
+            },
+        ]
+    }
+    recipe = recipe_for(fake_executable(tmp_path, payload))
+    request = JudgeInput(
+        initial_prompt="Review the greeting.",
+        criteria=(
+            RubricCriterion(criterion_id="quality", rubric="Preserve the public interface."),
+        ),
+        files={"greet.py": "synthetic"},
+        omitted_binary_files=(),
+    )
+    context = CallContext(
+        call_id="judge-call",
+        index=0,
+        deadline=time.monotonic() + 3,
+        cancelled=threading.Event(),
+        inherited={"CLAUDE_CODE_OAUTH_TOKEN": "synthetic-offline-value"},
+        on_identity=lambda _identity: None,
+        runtime_root=tmp_path / "runtime",
+    )
+    call, results = invoke_judge(
+        recipe, request, ArtifactWriter(tmp_path / "evidence", 1000000), context
+    )
+    assert call.status == ("failed" if invalid else "completed")
+    assert call.usage.output == 12
+    assert call.observed_model == "claude-haiku-4-5-20251001"
+    assert call.observed_effort is None
+    assert call.cleanup.known_writers_stopped
+    assert results[0].outcome == ("error" if invalid else "pass")
+
+
 @pytest.mark.parametrize("completed,pending", [(False, True), (True, False), (True, True)])
 def test_unfinished_assessment_and_export_reconstruct_durable_judge_spend(
     store, graded_benchmark, tmp_path, monkeypatch, completed, pending

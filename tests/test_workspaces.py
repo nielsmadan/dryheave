@@ -62,6 +62,23 @@ def test_init_is_private_idempotent_and_preserves_authoring_data(tmp_path, short
     assert initialized_workspace(root) == first
 
 
+def test_init_transport_path_is_config_relative_private_and_idempotent(tmp_path, short_runtime):
+    root = tmp_path / "workspace"
+    first = initialize_workspace(root, runtime_root=short_runtime, tui_test=Path("tools/tui-test"))
+    assert first.transport() == root / "tools/tui-test"
+    assert 'tui_test = "tools/tui-test"' in (root / CONFIG_FILE).read_text()
+    assert initialize_workspace(root) == first
+    with pytest.raises(ConflictError, match="options differ"):
+        initialize_workspace(root, tui_test=Path("other"))
+    assert discover_workspace(root) == first
+
+
+@pytest.mark.parametrize("value", ["", "../tui-test", "~/tui-test", "bad\npath"])
+def test_transport_config_rejects_unsafe_paths(value):
+    with pytest.raises(ValidationError):
+        WorkspaceConfig(tui_test=value)
+
+
 def test_real_cli_nested_discovery_precedence_and_relocation(tmp_path, short_runtime, monkeypatch):
     root = tmp_path / "original"
     result = cli(tmp_path, "init", str(root), "--runtime-root", str(short_runtime))

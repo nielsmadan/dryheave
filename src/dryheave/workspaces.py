@@ -34,10 +34,13 @@ class WorkspaceConfig(StrictModel):
     store: str = ".dryheave/store"
     runtime: str = ".dryheave/rt"
     skills: str = ".agents/skills"
+    tui_test: str | None = None
 
-    @field_validator("authoring", "store", "runtime", "skills")
+    @field_validator("authoring", "store", "runtime", "skills", "tui_test")
     @classmethod
-    def valid_path(cls, value: str) -> str:
+    def valid_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if (
             not value.strip()
             or len(value) > MAX_RELATIVE_PATH_LENGTH
@@ -71,6 +74,18 @@ class Workspace:
     def path(self, role: Literal["authoring", "store", "runtime", "skills"]) -> Path:
         configured: str = getattr(self.config, role)
         return (self.root / configured).absolute()
+
+    def transport(self) -> Path | None:
+        return (self.root / self.config.tui_test).absolute() if self.config.tui_test else None
+
+
+def resolve_transport(explicit: Path | None, workspace: Workspace | None) -> Path | None:
+    if explicit is not None:
+        return explicit.absolute()
+    if workspace is not None and workspace.transport() is not None:
+        return workspace.transport()
+    installed = shutil.which("tui-test")
+    return Path(installed).absolute() if installed else None
 
 
 def _safe_directory(path: Path) -> Path:
@@ -145,7 +160,7 @@ def _validate_paths(workspace: Workspace) -> None:
 def _config_bytes(config: WorkspaceConfig) -> bytes:
     return "".join(
         f"{name} = {json.dumps(value, ensure_ascii=False)}\n"
-        for name, value in config.model_dump().items()
+        for name, value in config.model_dump(exclude_none=True).items()
     ).encode("utf-8")
 
 
@@ -191,7 +206,7 @@ def _create_directory(path: Path, ownership: WorkspaceDirectoryOwnership) -> Non
             shutil.rmtree(staged)
 
 
-def _initialize_locked(root: Path, runtime_root: Path | None) -> Workspace:
+def _initialize_locked(root: Path, runtime_root: Path | None, tui_test: Path | None) -> Workspace:
     owned = _ownership(root)
     try:
         existing = read_workspace(root)
@@ -206,6 +221,8 @@ def _initialize_locked(root: Path, runtime_root: Path | None) -> Workspace:
         config = WorkspaceConfig.model_validate(
             config.model_dump() | {"runtime": str(runtime_root)}
         )
+    if tui_test is not None:
+        config = WorkspaceConfig.model_validate(config.model_dump() | {"tui_test": str(tui_test)})
     if owned is not None and config != owned.config:
         raise ConflictError(
             "Init options differ from the owned workspace; preserve its existing configuration."
@@ -233,7 +250,9 @@ def _initialize_locked(root: Path, runtime_root: Path | None) -> Workspace:
     return workspace
 
 
-def initialize_workspace(path: Path, *, runtime_root: Path | None = None) -> Workspace:
+def initialize_workspace(
+    path: Path, *, runtime_root: Path | None = None, tui_test: Path | None = None
+) -> Workspace:
     root = _safe_directory(path)
     with directory_fd(root, create=True) as descriptor:
         try:
@@ -243,6 +262,6 @@ def initialize_workspace(path: Path, *, runtime_root: Path | None = None) -> Wor
                 f"Workspace initialization is running; retry when it finishes: {root}"
             ) from error
         try:
-            return _initialize_locked(root, runtime_root)
+            return _initialize_locked(root, runtime_root, tui_test)
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)

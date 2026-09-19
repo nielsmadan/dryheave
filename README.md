@@ -53,12 +53,15 @@ Setup creates private authoring/store/runtime directories without scanning agent
 homes or making model calls. Native runtime paths must fit a 70-byte limit;
 `init --runtime-root /short/new-directory` supplies a shorter location when needed.
 See [workspace setup](docs/user/workspaces.md) for config, ownership and resume behavior.
+Record transport once with `init --tui-test /path/to/tui-test`, or install
+`tui-test` on PATH. Claude operators install with
+`skills install --target .claude/skills`; the default target remains `.agents/skills`.
 
 For selected-log mining, use `collect select NAME FILE --agent codex`, then
 `problem request [DESCRIPTION] --selection NAME [--micro-bug]`. The packaged
 voice/problem/profile skills curate internal drafts and retain supported tasks,
 rejections and gaps. Follow [selected-log authoring](docs/user/selected-log-authoring.md)
-for the exact commands and Codex invocation sequence; no hand-authored JSON is
+for the exact commands and Codex/Claude invocation sequences; no hand-authored JSON is
 needed for this operator-guided workflow.
 
 Follow the packaged [real workflow](src/dryheave/resources/examples/real-workflow.md)
@@ -69,17 +72,29 @@ Follow the packaged [real workflow](src/dryheave/resources/examples/real-workflo
    then `case validate/freeze` and `case calibrate CASE_ID --json` before subject
    spend. Inspect the standalone record with `case calibration CALIBRATION_ID`;
    `demonstrated` requires observed baseline failure and reference success.
-2. `profile capture` freezes explicitly selected native config, instruction,
+2. `profile create NAME --agent codex|claude --model MODEL` freezes selected
+   inputs without a JSON spec; legacy `profile capture` remains supported.
+   Both freeze explicitly selected native config, instruction,
    skill and plugin bytes. `profile derive/diff` records one model, skill or
    workflow change while historical inputs remain immutable.
-3. `experiment validate/create` pins case/profile/simulator/scoring IDs and
-   repetitions. `run` executes fresh workspaces; `run --resume` reconciles durable
+3. `experiment setup NAME --case CASE --profile base=PROFILE --simulator
+   claude --simulator-model MODEL` pins a bounded adaptive controller without
+   a JSON draft. Legacy `experiment validate/create` retains scoring/spec control.
+   `run NAME --assess` captures and assesses fresh workspaces after owned cleanup;
+   `run --resume` reconciles durable
    progress, and explicit retries preserve all earlier attempts.
 4. `assess` audits stopped outputs and runs hidden verifiers and optional judges.
    `report` and `compare` show eligible performance alongside attrition and
    spending for subject, simulator and judge roles.
 5. `export/import` transports curated inputs and structured results. Raw captures,
    source sessions and grading artifacts require explicit sensitive-class flags.
+
+Haiku profiles omit effort. Derive Sonnet with `--model MODEL --effort low`;
+derive back to Haiku with `--clear-effort`. This is a configuration comparison,
+not effort-only. Claude 2.1.278 controllers use tool-disabled print mode and the
+named `CLAUDE_CODE_OAUTH_TOKEN` runtime reference; subjects remain native TUI.
+Codex 0.154.0 controllers remain trusted-native, not tool-free. Setup never
+inspects credentials or launches models; native prompts are never auto-approved.
 
 ```sh
 dryheave doctor --agent codex --tui-test /path/to/tui-test --runtime-root rt --json

@@ -28,6 +28,22 @@ def _recipe_issues(recipe: NativeRecipe) -> list[ProfileIssue]:
     validate_arguments(recipe.launcher)
     reject_secret_fields(recipe.model_dump(mode="json"), location="profile recipe")
     issues: list[ProfileIssue] = []
+    if recipe.claude_discovery is not None:
+        issues.append(
+            ProfileIssue(
+                code="claude-discovery-policy",
+                message="Claude 2.1.278 uses selected settings and instructions in an owned config root, historical project settings and explicit plugin directories. Managed settings, plugin discovery and effective effort remain unverified; native trust and permission prompts are never approved by the simulator.",
+            )
+        )
+    if recipe.codex_discovery is not None:
+        issues.append(
+            ProfileIssue(
+                code="codex-discovery-policy",
+                message="Plugins and startup plugin sync are disabled; bundled skills are disabled. Selected config still loads; inherited HOME skills, project and system/cloud sources remain unverified."
+                if recipe.codex_discovery == "disabled-plugins"
+                else "Selected plugin bytes are frozen, but Codex 0.154.0 cannot freeze only selected plugin discovery: configured local plugins, catalog sync and upgrades may change runtime inputs. Bundled skills are disabled; inherited HOME and project/system sources remain unverified.",
+            )
+        )
     if recipe.launcher:
         issues.append(
             ProfileIssue(
@@ -58,6 +74,26 @@ def _recipe_issues(recipe: NativeRecipe) -> list[ProfileIssue]:
     return issues
 
 
+def _validate_claude_settings(recipe: NativeRecipe, config: dict[str, object]) -> None:
+    if (
+        "apiKeyHelper" in config
+        or "awsAuthRefresh" in config
+        or "awsCredentialExport" in config
+        or config.get("forceLoginMethod") == "console"
+    ):
+        raise InputError(
+            "Selected Claude settings cannot enable alternate credential or API-billing providers."
+        )
+    environment = config.get("env", {})
+    if not isinstance(environment, dict) or any(
+        not isinstance(value, str) for value in environment.values()
+    ):
+        raise InputError("Selected Claude settings env must map environment names to strings.")
+    data = recipe.model_dump(mode="json")
+    data["environment"] += [{"name": name} for name in environment]
+    parse_model(json.dumps(data).encode(), NativeRecipe)
+
+
 def profile_issues(profile: FrozenProfile, files: dict[str, bytes]) -> tuple[ProfileIssue, ...]:
     issues = _recipe_issues(profile.recipe)
     for asset in profile.assets:
@@ -69,6 +105,8 @@ def profile_issues(profile: FrozenProfile, files: dict[str, bytes]) -> tuple[Pro
         reject_secret_bytes(content, location=f"selected asset {asset.blob}")
         if asset.selection.kind == "config":
             config = inspect_config(content, asset.target)
+            if profile.recipe.claude_discovery is not None:
+                _validate_claude_settings(profile.recipe, config)
             issues.extend(_config_issues(config, asset.blob))
         if asset.selection.kind in {"skill", "plugin"}:
             issues.append(
@@ -133,6 +171,10 @@ def capture_profile(store: ObjectStore, spec: CaptureSpec, *, base: Path | None 
     reader = SelectedReader(spec, base or Path.cwd())
     assets, files = reader.capture()
     profile = FrozenProfile(recipe=spec.recipe, assets=assets, limits=spec.limits)
+    if spec.recipe.codex_discovery == "disabled-plugins" and any(
+        asset.selection.kind == "plugin" for asset in assets
+    ):
+        raise InputError("Selected plugins require the selected-plugins discovery policy.")
     profile = profile.model_copy(update={"issues": profile_issues(profile, files)})
     return store.put(ObjectKind.PROFILE, profile, files=files)
 
@@ -243,7 +285,9 @@ def diff_profiles(store: ObjectStore, before: str, after: str) -> dict[str, obje
         "before": store.resolve(before),
         "after": store.resolve(after),
         "recipe_changes": {
-            key: {"before": a[key], "after": b[key]} for key in a if a[key] != b[key]
+            key: {"before": a.get(key), "after": b.get(key)}
+            for key in a.keys() | b.keys()
+            if a.get(key) != b.get(key)
         },
         "superseded_skill_paths": {
             "before": list(left.superseded_skill_paths),

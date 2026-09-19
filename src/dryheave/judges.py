@@ -4,6 +4,7 @@ from typing import Literal
 from pydantic import Field
 
 from dryheave.cases import FrozenCase, RubricCriterion
+from dryheave.claude_controller import claude_payload
 from dryheave.controller_models import ControllerRecipe, RoleCall, RoleObservation
 from dryheave.controller_schema import controller_schema
 from dryheave.controllers import (
@@ -29,6 +30,10 @@ class Judgment(StrictModel):
 
 
 class JudgeResponse(RoleObservation):
+    judgments: tuple[Judgment, ...]
+
+
+class StructuredJudgments(StrictModel):
     judgments: tuple[Judgment, ...]
 
 
@@ -76,10 +81,11 @@ def invoke_judge(
             raise InputError("Judge projection exceeds its frozen input bound.")
         if recipe.kind == "scripted":
             raise InputError(
-                "A model-quality rubric requires an explicit JSON-command or Codex judge."
+                "A model-quality rubric requires an explicit JSON-command, Codex or Claude judge."
             )
         artifacts.record("request", request)
-        schema = controller_schema(JudgeResponse)
+        modern = recipe.kind == "claude" or (recipe.kind == "codex" and recipe.version == "0.154.0")
+        schema = controller_schema(StructuredJudgments if modern else JudgeResponse)
         atomic_write(artifacts.root / "schema.json", canonical_json(schema), replace=False)
         command = controller_command(recipe, artifacts.root)
         artifacts.record("command", command)
@@ -92,8 +98,16 @@ def invoke_judge(
             if recipe.kind == "codex"
             else result.stdout
         )
-        response = parse_model(raw, JudgeResponse)
-        if recipe.kind == "codex":
+        if recipe.kind == "claude":
+            raw = claude_payload(raw)
+        response = (
+            JudgeResponse(judgments=parse_model(raw, StructuredJudgments).judgments)
+            if modern
+            else parse_model(raw, JudgeResponse)
+        )
+        if time.monotonic() > context.deadline or context.cancelled.is_set():
+            raise InputError("Judge cancelled or overall deadline exhausted.")
+        if recipe.kind == "codex" and not modern:
             observation = observation.model_copy(
                 update={
                     "observed_model": response.observed_model,

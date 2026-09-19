@@ -3,15 +3,23 @@ import stat
 from collections.abc import Mapping
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Protocol, Self
 
 from dryheave.errors import InputError
 from dryheave.filesystem import directory_fd
-from dryheave.profile_models import LaunchPlan
+from dryheave.profile_models import RuntimeFileReference
+
+
+class BindingPlan(Protocol):
+    @property
+    def config_roots(self) -> dict[str, str]: ...
+
+    @property
+    def runtime_files(self) -> tuple[RuntimeFileReference, ...]: ...
 
 
 class RuntimeBindings:
-    def __init__(self, plan: LaunchPlan, inherited: Mapping[str, str]) -> None:
+    def __init__(self, plan: BindingPlan, inherited: Mapping[str, str]) -> None:
         self.plan, self.inherited = plan, inherited
         self.owned: dict[str, tuple[int, int, int]] = {}
         self.errors: list[str] = []
