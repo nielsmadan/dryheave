@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dryheave results</title>
+    <link rel="stylesheet" href="/viewer.css">
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to results</a>
+    <header class="masthead">
+      <h1>Dryheave results</h1>
+      <p id="target" class="target">Loading target…</p>
+      <p class="live">
+        <label for="live-toggle">
+          <input id="live-toggle" type="checkbox" checked> Refresh while this tab is visible
+        </label>
+        <span id="poll" class="poll" role="status"></span>
+      </p>
+    </header>
+    <div class="layout">
+      <nav class="sidebar" aria-labelledby="runs-heading">
+        <h2 id="runs-heading">Runs</h2>
+        <label class="field" for="run-search">Filter runs</label>
+        <input id="run-search" type="search" autocomplete="off" spellcheck="false"
+               placeholder="run id, mode, experiment" aria-describedby="run-status">
+        <p id="run-status" class="run-status" role="status">Loading runs…</p>
+        <div id="run-list" class="run-list"></div>
+        <p class="pager">
+          <button id="run-previous" type="button">Previous</button>
+          <span id="run-range" class="run-range"></span>
+          <button id="run-next" type="button">Next</button>
+        </p>
+        <form id="report-lookup" class="filters">
+          <label class="field" for="report-id">Open a portable report</label>
+          <input id="report-id" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="64-character report object ID" aria-describedby="report-status">
+          <button id="report-open" type="submit">Open report</button>
+          <p id="report-status" class="run-status" role="status"></p>
+        </form>
+      </nav>
+      <main id="main" class="main" tabindex="-1">
+        <div class="tabs" id="tabs" role="tablist" aria-label="Result sections">
+          <button id="tab-overview" class="tab" type="button" role="tab"
+                  aria-controls="panel-overview" aria-selected="true">Overview</button>
+          <button id="tab-attempts" class="tab" type="button" role="tab"
+                  aria-controls="panel-attempts" aria-selected="false" tabindex="-1">Attempts</button>
+          <button id="tab-detail" class="tab" type="button" role="tab"
+                  aria-controls="panel-detail" aria-selected="false" tabindex="-1">Attempt detail</button>
+          <button id="tab-progress" class="tab" type="button" role="tab"
+                  aria-controls="panel-progress" aria-selected="false" tabindex="-1">Progress</button>
+          <button id="tab-calibration" class="tab" type="button" role="tab"
+                  aria-controls="panel-calibration" aria-selected="false" tabindex="-1">Calibration</button>
+          <button id="tab-compare" class="tab" type="button" role="tab"
+                  aria-controls="panel-compare" aria-selected="false" tabindex="-1">Compare</button>
+        </div>
+        <section id="panel-overview" class="panel" role="tabpanel" aria-labelledby="tab-overview"
+                 tabindex="0"></section>
+        <section id="panel-attempts" class="panel" role="tabpanel" aria-labelledby="tab-attempts"
+                 tabindex="0" hidden>
+          <form id="attempt-filters" class="filters">
+            <p class="field-row">
+              <label class="field" for="attempt-search">Search attempts</label>
+              <input id="attempt-search" type="search" autocomplete="off" spellcheck="false"
+                     placeholder="attempt, trial, case, exclusion">
+            </p>
+            <p class="field-row">
+              <label class="field" for="attempt-variant">Variant</label>
+              <select id="attempt-variant"></select>
+              <label class="field" for="attempt-stage">Stage</label>
+              <select id="attempt-stage"></select>
+              <label class="field" for="attempt-eligibility">Eligibility</label>
+              <select id="attempt-eligibility">
+                <option value="">All</option>
+                <option value="eligible">Eligible</option>
+                <option value="excluded">Excluded</option>
+                <option value="ungraded">Audited, not graded</option>
+                <option value="unassessed">Unassessed</option>
+              </select>
+            </p>
+          </form>
+          <p id="attempt-status" class="run-status" role="status"></p>
+          <div id="attempt-list"></div>
+        </section>
+        <section id="panel-detail" class="panel" role="tabpanel" aria-labelledby="tab-detail"
+                 tabindex="0" hidden></section>
+        <section id="panel-progress" class="panel" role="tabpanel" aria-labelledby="tab-progress"
+                 tabindex="0" hidden></section>
+        <section id="panel-calibration" class="panel" role="tabpanel"
+                 aria-labelledby="tab-calibration" tabindex="0" hidden>
+          <form id="calibration-filters" class="filters">
+            <p class="field-row">
+              <label class="field" for="calibration-search">Filter calibrations</label>
+              <input id="calibration-search" type="search" autocomplete="off" spellcheck="false"
+                     placeholder="calibration id, case id, status">
+            </p>
+            <p class="field-row">
+              <label class="field" for="case-id">Standalone case lookup</label>
+              <input id="case-id" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="64-character case object ID">
+              <button id="case-lookup" type="submit">Look up case</button>
+              <button id="case-clear" type="button">Back to run</button>
+            </p>
+          </form>
+          <div id="calibration-body"></div>
+        </section>
+        <section id="panel-compare" class="panel" role="tabpanel" aria-labelledby="tab-compare"
+                 tabindex="0" hidden>
+          <form id="compare-form" class="filters">
+            <p class="field-row">
+              <label class="field" for="compare-before">Before reference</label>
+              <input id="compare-before" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="run ID, report ID or alias">
+              <label class="field" for="compare-before-variant">Before variant</label>
+              <input id="compare-before-variant" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="optional">
+            </p>
+            <p class="field-row">
+              <label class="field" for="compare-after">After reference</label>
+              <input id="compare-after" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="run ID, report ID or alias">
+              <label class="field" for="compare-after-variant">After variant</label>
+              <input id="compare-after-variant" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="optional">
+            </p>
+            <p class="field-row">
+              <button id="compare-run" type="submit">Compare</button>
+            </p>
+          </form>
+          <div id="compare-body"></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/viewer.js"></script>
+  </body>
+</html>

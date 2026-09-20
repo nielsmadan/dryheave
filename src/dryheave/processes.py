@@ -120,6 +120,10 @@ def _drain(
     for stream, label in zip(streams, ("stdin", "stdout", "stderr"), strict=True):
         if label == "stdin" or not isinstance(stream, io.BufferedIOBase) or stream.closed:
             continue
+        try:
+            os.set_blocking(stream.fileno(), False)
+        except OSError:
+            continue
         while True:
             space = max_output_bytes - sum(map(len, output.values()))
             try:

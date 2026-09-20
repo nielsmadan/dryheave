@@ -133,11 +133,13 @@ def group_metrics(
     )
 
 
-def report_run(store: ObjectStore, reference: str) -> RunReport:
+def report_run(
+    store: ObjectStore, reference: str, *, journal_limit: int | None = None
+) -> RunReport:
     if not re.fullmatch(r"[0-9a-f]{32}", reference):
         report = store.load(reference, RunReport, kind=ObjectKind.PORTABLE_REPORT)
         return report
-    journal = RunStore(store.root).inspect(reference)
+    journal = RunStore(store.root).inspect(reference, limit=journal_limit)
     execution = ExecutionJournal(journal)
     experiment, input_error = inspect_experiment(store, journal.metadata.experiment_id)
     trials = {item.trial_id: item for item in experiment.trials} if experiment else {}
@@ -262,12 +264,14 @@ def compare_runs(
     *,
     before_variant: str | None = None,
     after_variant: str | None = None,
+    journal_limit: int | None = None,
 ) -> Comparison:
     if bool(before_variant) != bool(after_variant):
         raise InputError("Select both comparison variants, or neither.")
     before_reference = before if re.fullmatch(r"[0-9a-f]{32}", before) else store.resolve(before)
     after_reference = after if re.fullmatch(r"[0-9a-f]{32}", after) else store.resolve(after)
-    left, right = report_run(store, before_reference), report_run(store, after_reference)
+    left = report_run(store, before_reference, journal_limit=journal_limit)
+    right = report_run(store, after_reference, journal_limit=journal_limit)
     earlier, later = _pairs(left, before_variant), _pairs(right, after_variant)
     signatures_known = left.compatibility_id is not None and right.compatibility_id is not None
     incompatible = (

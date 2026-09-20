@@ -37,7 +37,21 @@ not cache verification across subject execution. `read_evidence` verifies an
 object’s own manifest/blob map and returns an explicit `dependency_error` if its
 closure cannot validate; only audit/report code consumes this evidence boundary.
 It does not authorize normal loading or grading of invalid dependencies. `verify(id)` checks the entire object closure.
-`resolve` only resolves a name; it does not itself prove integrity or existence.
+It streams blob content and retains only hashes, so a closure check never
+allocates blob bytes. `resolve` only resolves a name; it does not itself prove
+integrity or existence.
+
+`read_envelope(reference)` and `read_payload(reference, Model, kind=...)` read,
+hash-check and canonicality-check only that object's own manifest, then validate
+its payload. They deliberately do **not** verify the closure, so they prove
+nothing about referenced inputs; a caller that needs those inputs proven still
+calls `verify`, `get`, `load` or `read_blobs`. They exist for bounded catalogue
+scans and read-only views where pulling an entire closure would be
+disproportionate, and never for loading or grading decisions.
+`read_blob_bounded(reference, name, limit=...)` returns one hash-checked blob
+under an explicit caller limit without reading the object's other blobs or its
+closure; a blob over that limit is a limit error, and a missing or unreadable
+blob is an integrity error rather than an I/O failure.
 
 Every object is `objects/<id>/manifest.json` plus `blobs/<content-sha256>`. The ID
 is SHA-256 of canonical manifest bytes: UTF-8 JSON, sorted keys, no whitespace,
@@ -91,6 +105,18 @@ service. `runs/<run-id>/metadata.json` contains this ID and an aware creation ti
 `RunStore.inspect` returns a read-only, hash-validated complete event prefix without
 locking, repairing a tail or trusting a racing checkpoint. Its handle refuses
 writes. Status/report may inspect a run while its writer is active.
+`RunStore.list_runs` returns the sorted published run IDs under `runs/`, ignoring
+`.pending-*` staging directories and any other name, and an absent directory is an
+empty listing rather than an error. `RunStore.read_metadata` reads and validates
+only `runs/<run-id>/metadata.json`. `RunStore.summarize(run_id, limit=...)` adds a
+bounded, hash-chained prefix of `events.jsonl` without copying events: it stops at
+the last complete line inside the limit and reports `bytes_read` and `truncated`,
+so a truncated summary's event count is a lower bound and not the durable
+sequence. Cheap bounded listings use it; anything needing the complete durable
+prefix uses `inspect`, whose optional `limit=` lowers the read ceiling below
+`MAX_JOURNAL_BYTES` so a caller refuses an oversized journal with `limit_exceeded`
+before parsing it; `report_run(..., journal_limit=...)` passes the same ceiling
+down.
 
 `RunStore.open` holds an exclusive stable run lock for its entire context and
 rejects a conflicting supplied experiment. All writes use the yielded journal.

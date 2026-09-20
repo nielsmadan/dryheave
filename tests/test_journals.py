@@ -275,3 +275,26 @@ def test_read_only_inspection_does_not_lock_or_repair_active_tail(tmp_path):
         assert view.events[0].data == {"stage": "working"}
         assert path.read_bytes() == original + b'{"partial":'
         assert list(writer.path.glob("torn-*")) == []
+
+
+def test_inspect_refuses_a_journal_over_a_supplied_limit(tmp_path: Path) -> None:
+    runs = RunStore(tmp_path)
+    run_id = runs.create("a" * 64)
+    with runs.open(run_id) as writer:
+        writer.append("observed", {"stage": "working"})
+    size = (tmp_path / "runs" / run_id / "events.jsonl").stat().st_size
+    assert len(runs.inspect(run_id, limit=size).events) == 1
+    with pytest.raises(LimitError, match=f"{size - 1}-byte limit"):
+        runs.inspect(run_id, limit=size - 1)
+    assert len(runs.inspect(run_id).events) == 1
+
+
+def test_list_runs_returns_only_run_directories_sorted(tmp_path: Path) -> None:
+    runs = RunStore(tmp_path / "missing")
+    assert runs.list_runs() == ()
+    runs = RunStore(tmp_path)
+    first = runs.create("a" * 64)
+    second = runs.create("b" * 64)
+    (tmp_path / "runs" / ".pending-stray").mkdir()
+    (tmp_path / "runs" / "not-a-run").mkdir()
+    assert runs.list_runs() == tuple(sorted((first, second)))

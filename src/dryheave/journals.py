@@ -3,6 +3,7 @@ import re
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -13,10 +14,12 @@ from dryheave.constants import MAX_EVENT_BYTES, MAX_JOURNAL_BYTES, MAX_MANIFEST_
 from dryheave.errors import ConflictError, InputError, IntegrityError, LimitError, NotFoundError
 from dryheave.filesystem import (
     atomic_write,
+    directory_names,
     ensure_directory,
     file_lock,
     publish_directory,
     read_bytes,
+    read_prefix,
     regular_fd,
     write_all,
 )
@@ -30,8 +33,15 @@ def _run_id(value: str) -> str:
     return value
 
 
-def _read_events(path: Path) -> tuple[list[JournalEvent], bytes]:
-    content = read_bytes(path, limit=MAX_JOURNAL_BYTES)
+@dataclass(frozen=True)
+class JournalPrefix:
+    metadata: RunMetadata
+    events: tuple[JournalEvent, ...]
+    bytes_read: int
+    truncated: bool
+
+
+def _parse_events(content: bytes) -> tuple[list[JournalEvent], bytes]:
     lines = content.split(b"\n")
     tail = lines.pop()
     events: list[JournalEvent] = []
@@ -54,11 +64,32 @@ def _read_events(path: Path) -> tuple[list[JournalEvent], bytes]:
     return events, tail
 
 
+def _read_events(path: Path, *, limit: int | None = None) -> tuple[list[JournalEvent], bytes]:
+    ceiling = MAX_JOURNAL_BYTES if limit is None else min(limit, MAX_JOURNAL_BYTES)
+    return _parse_events(read_bytes(path, limit=ceiling))
+
+
+def _read_prefix(path: Path, *, limit: int) -> tuple[list[JournalEvent], int, bool]:
+    content, truncated = read_prefix(path, limit=limit)
+    consumed = len(content)
+    if truncated:
+        content = content[: content.rfind(b"\n") + 1]
+    events, _ = _parse_events(content)
+    return events, consumed, truncated
+
+
 class RunJournal:
-    def __init__(self, path: Path, metadata: RunMetadata, *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        path: Path,
+        metadata: RunMetadata,
+        *,
+        read_only: bool = False,
+        limit: int | None = None,
+    ) -> None:
         self.path = path
         self.metadata = metadata
-        self._events, self.recovered_tail = _read_events(path / "events.jsonl")
+        self._events, self.recovered_tail = _read_events(path / "events.jsonl", limit=limit)
         self._active = not read_only
         if read_only:
             return
@@ -187,6 +218,13 @@ class RunStore:
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().absolute()
 
+    def list_runs(self) -> tuple[str, ...]:
+        try:
+            names = directory_names(self.root / "runs")
+        except FileNotFoundError:
+            return ()
+        return tuple(sorted(name for name in names if re.fullmatch(r"[0-9a-f]{32}", name)))
+
     def create(self, experiment_id: str) -> str:
         identifier = uuid4().hex
         try:
@@ -207,11 +245,10 @@ class RunStore:
                 shutil.rmtree(staged)
         return identifier
 
-    def inspect(self, identifier: str) -> RunJournal:
+    def read_metadata(self, identifier: str, *, limit: int = MAX_MANIFEST_BYTES) -> RunMetadata:
         identifier = _run_id(identifier)
-        path = self.root / "runs" / identifier
         try:
-            content = read_bytes(path / "metadata.json", limit=MAX_MANIFEST_BYTES)
+            content = read_bytes(self.root / "runs" / identifier / "metadata.json", limit=limit)
         except FileNotFoundError as error:
             raise NotFoundError(f"Run does not exist: {identifier}") from error
         try:
@@ -220,23 +257,28 @@ class RunStore:
             raise IntegrityError(f"Run metadata is invalid. {error}") from error
         if metadata.run_id != identifier:
             raise IntegrityError("Run metadata has a mismatched run ID.")
-        return RunJournal(path, metadata, read_only=True)
+        return metadata
+
+    def summarize(self, identifier: str, *, limit: int) -> JournalPrefix:
+        metadata = self.read_metadata(identifier)
+        path = self.root / "runs" / metadata.run_id / "events.jsonl"
+        events, read, truncated = _read_prefix(path, limit=limit)
+        return JournalPrefix(
+            metadata=metadata, events=tuple(events), bytes_read=read, truncated=truncated
+        )
+
+    def inspect(self, identifier: str, *, limit: int | None = None) -> RunJournal:
+        metadata = self.read_metadata(identifier)
+        return RunJournal(
+            self.root / "runs" / metadata.run_id, metadata, read_only=True, limit=limit
+        )
 
     @contextmanager
     def open(self, identifier: str, *, experiment_id: str | None = None) -> Iterator[RunJournal]:
         identifier = _run_id(identifier)
         with file_lock(self.root / "locks" / f"run-{identifier}.lock"):
             path = self.root / "runs" / identifier
-            try:
-                content = read_bytes(path / "metadata.json", limit=MAX_MANIFEST_BYTES)
-            except FileNotFoundError as error:
-                raise NotFoundError(f"Run does not exist: {identifier}") from error
-            try:
-                metadata = parse_model(content, RunMetadata)
-            except InputError as error:
-                raise IntegrityError(f"Run metadata is invalid. {error}") from error
-            if metadata.run_id != identifier:
-                raise IntegrityError("Run metadata has a mismatched run ID.")
+            metadata = self.read_metadata(identifier)
             if experiment_id is not None and metadata.experiment_id != experiment_id:
                 raise ConflictError(
                     "Resume experiment differs from the run's pinned experiment ID."

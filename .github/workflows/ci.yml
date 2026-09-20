@@ -16,6 +16,10 @@ jobs:
         with:
           version: "0.8.10"
           python-version: "3.13"
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - name: Sync dependencies
         run: uv sync --locked
       - name: Lint
@@ -26,9 +30,13 @@ jobs:
         run: uv run pylint src/dryheave
       - name: Type check
         run: uv run mypy
+      - name: Test viewer modules
+        run: node --test tests/js/*.test.mjs
       - name: Test
         run: uv run pytest -q
       - name: Coverage
         run: uv run pytest -q --cov --cov-report=xml
       - name: Build package
         run: uv build
+      - name: Verify packaged wheel
+        run: uv run pytest -q -m packaging

@@ -4,10 +4,13 @@ from pathlib import Path
 import pytest
 
 from conftest import ExamplePayload
+from dryheave import storage
+from dryheave.constants import MAX_BLOB_BYTES
 from dryheave.errors import (
     ConflictError,
     InputError,
     IntegrityError,
+    LimitError,
     LockBusyError,
     NotFoundError,
     PathError,
@@ -265,3 +268,39 @@ def test_scoped_blob_read_traverses_closure_once_and_rechecks_returned_bytes(
     monkeypatch.setattr(store, "verify", mutate_after_verify)
     with pytest.raises(IntegrityError, match="hash mismatch"):
         store.read_blobs(identifier, ("file-0",))
+
+
+def test_bounded_reads_authenticate_served_bytes_without_blob_allocation(
+    store: ObjectStore, payload: ExamplePayload, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identifier = store.put(ObjectKind.CASE, payload, files={"notes.txt": b"evidence-bytes"})
+    blob_hash = store.get(identifier).files["notes.txt"]
+    blob = store.object_path(identifier) / "blobs" / blob_hash
+    original = blob.read_bytes()
+    blob.write_bytes(b"tampered-content")
+    assert store.read_payload(identifier, ExamplePayload) == payload
+    with pytest.raises(IntegrityError, match="hash mismatch"):
+        store.read_blob_bounded(identifier, "notes.txt", limit=1024)
+    blob.write_bytes(original)
+    assert store.read_blob_bounded(identifier, "notes.txt", limit=len(original)) == original
+    with pytest.raises(LimitError, match="limit"):
+        store.read_blob_bounded(identifier, "notes.txt", limit=len(original) - 1)
+    with pytest.raises(NotFoundError, match="no file named"):
+        store.read_blob_bounded(identifier, "missing.txt", limit=1024)
+    read_bytes = storage.read_bytes
+    limits: list[int] = []
+
+    def spy(path: Path, *, limit: int) -> bytes:
+        if path.parent.name == "blobs":
+            limits.append(limit)
+        return read_bytes(path, limit=limit)
+
+    monkeypatch.setattr(storage, "read_bytes", spy)
+    assert store.read_blob_bounded(identifier, "notes.txt", limit=32) == original
+    assert limits == [32]
+    limits.clear()
+    assert store.read_blobs(identifier)["notes.txt"] == original
+    assert limits == [MAX_BLOB_BYTES]
+    with pytest.raises(InputError, match="Expected persona object"):
+        store.read_payload(identifier, ExamplePayload, kind=ObjectKind.PERSONA)
+    assert store.read_envelope(identifier).kind == ObjectKind.CASE

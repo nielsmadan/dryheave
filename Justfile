@@ -15,7 +15,7 @@ doctor:
     #!/usr/bin/env bash
     set -uo pipefail
     fail=0
-    for tool in uv lefthook; do
+    for tool in uv lefthook node; do
         if command -v "$tool" >/dev/null 2>&1; then
             printf '  ok       %s\n' "$tool"
         else
@@ -38,6 +38,9 @@ test:
 test-verbose:
     @uv run pytest tests/ -v
 
+test-js:
+    @node --test tests/js/*.test.mjs
+
 coverage:
     @uv run pytest --cov --cov-report=term-missing --cov-report=html -q
 
@@ -58,10 +61,15 @@ check:
     @uv run ruff format --check
     @uv run pylint src/dryheave
     @uv run mypy
+    @node --test tests/js/*.test.mjs
     @uv run pytest -q
+    @just test-packaging
 
 build:
     @uv build
+
+test-packaging: build
+    @uv run pytest -q -m packaging
 
 install-local:
     @uv tool install .

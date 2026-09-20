@@ -89,6 +89,25 @@ def read_bytes(path: Path, *, limit: int) -> bytes:
         return content
 
 
+def read_prefix(path: Path, *, limit: int) -> tuple[bytes, bool]:
+    with regular_fd(path, os.O_RDONLY) as descriptor, os.fdopen(os.dup(descriptor), "rb") as stream:
+        content = stream.read(limit + 1)
+    return (content[:limit], True) if len(content) > limit else (content, False)
+
+
+def read_chunks(path: Path, *, limit: int, size: int = 1024 * 1024) -> Iterator[bytes]:
+    with regular_fd(path, os.O_RDONLY) as descriptor:
+        if os.fstat(descriptor).st_size > limit:
+            raise LimitError(f"File exceeds the {limit}-byte limit: {path}")
+        remaining = limit
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            while chunk := stream.read(min(size, remaining + 1)):
+                remaining -= len(chunk)
+                if remaining < 0:
+                    raise LimitError(f"File exceeds the {limit}-byte limit: {path}")
+                yield chunk
+
+
 def write_all(descriptor: int, content: bytes) -> None:
     remaining = memoryview(content)
     while remaining:

@@ -13,8 +13,14 @@ from dryheave.filesystem import (
     file_lock,
     publish_directory,
     read_bytes,
+    read_chunks,
+    read_prefix,
     write_all,
 )
+
+
+def _descriptors() -> int:
+    return len(os.listdir("/dev/fd"))
 
 
 def test_atomic_files_have_private_permissions_and_create_only_behavior(tmp_path: Path) -> None:
@@ -98,6 +104,70 @@ def test_read_limit_is_enforced(tmp_path: Path) -> None:
     with pytest.raises(LimitError):
         read_bytes(path, limit=4)
     assert read_bytes(path, limit=5) == b"12345"
+
+
+def test_read_prefix_reports_truncation_at_the_limit_boundary(tmp_path: Path) -> None:
+    path = tmp_path / "file"
+    path.write_bytes(b"12345")
+    assert read_prefix(path, limit=5) == (b"12345", False)
+    assert read_prefix(path, limit=6) == (b"12345", False)
+    assert read_prefix(path, limit=4) == (b"1234", True)
+    assert read_prefix(path, limit=0) == (b"", True)
+    empty = tmp_path / "empty"
+    empty.write_bytes(b"")
+    assert read_prefix(empty, limit=0) == (b"", False)
+
+
+def test_read_prefix_refuses_irregular_and_missing_files(tmp_path: Path) -> None:
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(PathError, match="regular"):
+        read_prefix(fifo, limit=100)
+    with pytest.raises(FileNotFoundError):
+        read_prefix(tmp_path / "absent", limit=100)
+
+
+def test_read_chunks_streams_exactly_up_to_its_limit(tmp_path: Path) -> None:
+    path = tmp_path / "file"
+    path.write_bytes(b"0123456789")
+    assert list(read_chunks(path, limit=10, size=4)) == [b"0123", b"4567", b"89"]
+    assert b"".join(read_chunks(path, limit=11, size=4)) == b"0123456789"
+    with pytest.raises(LimitError, match="9-byte limit"):
+        list(read_chunks(path, limit=9, size=4))
+    empty = tmp_path / "empty"
+    empty.write_bytes(b"")
+    assert list(read_chunks(empty, limit=0)) == []
+
+
+def test_read_chunks_refuses_a_file_that_grows_past_its_limit(tmp_path: Path) -> None:
+    path = tmp_path / "file"
+    path.write_bytes(b"a" * 8)
+    chunks = read_chunks(path, limit=8, size=4)
+    assert next(chunks) == b"aaaa"
+    with path.open("ab") as stream:
+        stream.write(b"b" * 8)
+    with pytest.raises(LimitError, match="8-byte limit"):
+        list(chunks)
+
+
+def test_read_chunks_refuses_irregular_and_missing_files(tmp_path: Path) -> None:
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(PathError, match="regular"):
+        list(read_chunks(fifo, limit=100))
+    with pytest.raises(FileNotFoundError):
+        list(read_chunks(tmp_path / "absent", limit=100))
+
+
+def test_partially_consumed_read_chunks_releases_its_descriptors(tmp_path: Path) -> None:
+    path = tmp_path / "file"
+    path.write_bytes(b"0123456789")
+    baseline = _descriptors()
+    chunks = read_chunks(path, limit=10, size=4)
+    assert next(chunks) == b"0123"
+    assert _descriptors() > baseline
+    chunks.close()
+    assert _descriptors() == baseline
 
 
 def test_locks_are_exclusive_and_released_on_error(tmp_path: Path) -> None:

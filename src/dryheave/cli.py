@@ -17,6 +17,7 @@ from dryheave.result_cli import register_results
 from dryheave.runner_cli import register_runner
 from dryheave.serialization import validation_message
 from dryheave.storage import ObjectStore, default_store_path
+from dryheave.viewer_cli import register_viewer
 from dryheave.workspace_cli import register_workspace
 from dryheave.workspaces import discover_workspace
 
@@ -91,6 +92,7 @@ def build_parser(registrars: Sequence[CommandRegistrar] = ()) -> ArgumentParser:
     register_results(registry)
     register_operators(registry)
     register_workspace(registry)
+    register_viewer(registry)
     for registrar in registrars:
         registrar(registry)
     return parser

@@ -25,11 +25,13 @@ from dryheave.filesystem import (
     file_lock,
     publish_directory,
     read_bytes,
+    read_chunks,
 )
 from dryheave.models import AliasIndex, Manifest, ObjectKind, StrictModel, object_id
 from dryheave.serialization import (
     canonical_json,
     digest,
+    digest_chunks,
     parse_json,
     parse_model,
     validation_message,
@@ -69,8 +71,18 @@ class ObjectEvidence:
 
 
 class ObjectStore:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, read_budget: int | None = None) -> None:
         self.root = root.expanduser().absolute()
+        self.read_budget = read_budget
+
+    def _blob_ceiling(self) -> int:
+        if self.read_budget is None:
+            return MAX_BLOB_BYTES
+        return min(self.read_budget, MAX_BLOB_BYTES)
+
+    def _charge(self, content: bytes) -> None:
+        if self.read_budget is not None:
+            self.read_budget -= len(content)
 
     def object_path(self, identifier: str) -> Path:
         return self.root / "objects" / validated_id(identifier)
@@ -172,23 +184,40 @@ class ObjectStore:
             raise IntegrityError(f"Object manifest is not canonical: {identifier}")
         return manifest
 
+    def _structure(self, identifier: str, manifest: Manifest) -> Path:
+        path = self.object_path(identifier)
+        if directory_names(path) != {"manifest.json", "blobs"}:
+            raise IntegrityError(f"Unexpected object entries: {identifier}")
+        if directory_names(path / "blobs") != set(manifest.files.values()):
+            raise IntegrityError(f"Object blob set mismatch: {identifier}")
+        return path
+
     def _local(self, identifier: str) -> tuple[Manifest, dict[str, bytes]]:
         manifest = self._manifest(identifier)
-        path = self.object_path(identifier)
         contents = {}
         try:
-            if directory_names(path) != {"manifest.json", "blobs"}:
-                raise IntegrityError(f"Unexpected object entries: {identifier}")
-            if directory_names(path / "blobs") != set(manifest.files.values()):
-                raise IntegrityError(f"Object blob set mismatch: {identifier}")
+            path = self._structure(identifier, manifest)
             for blob_hash in set(manifest.files.values()):
-                content = read_bytes(path / "blobs" / blob_hash, limit=MAX_BLOB_BYTES)
+                content = read_bytes(path / "blobs" / blob_hash, limit=self._blob_ceiling())
                 if digest(content) != blob_hash:
                     raise IntegrityError(f"Object blob hash mismatch: {identifier}/{blob_hash}")
+                self._charge(content)
                 contents[blob_hash] = content
         except FileNotFoundError as error:
             raise IntegrityError(f"Object content is missing: {identifier}") from error
         return manifest, {name: contents[sha] for name, sha in manifest.files.items()}
+
+    def _probe(self, identifier: str) -> Manifest:
+        manifest = self._manifest(identifier)
+        try:
+            path = self._structure(identifier, manifest)
+            for blob_hash in set(manifest.files.values()):
+                blob = path / "blobs" / blob_hash
+                if digest_chunks(read_chunks(blob, limit=MAX_BLOB_BYTES)) != blob_hash:
+                    raise IntegrityError(f"Object blob hash mismatch: {identifier}/{blob_hash}")
+        except FileNotFoundError as error:
+            raise IntegrityError(f"Object content is missing: {identifier}") from error
+        return manifest
 
     def verify(self, identifier: str) -> Manifest:
         pending = [validated_id(identifier)]
@@ -197,9 +226,8 @@ class ObjectStore:
             current = pending.pop()
             if current in verified:
                 continue
-            manifest, _ = self._local(current)
-            verified[current] = manifest
-            pending.extend(manifest.references)
+            verified[current] = self._probe(current)
+            pending.extend(verified[current].references)
         return verified[identifier]
 
     def read_evidence(self, reference: str) -> ObjectEvidence:
@@ -228,6 +256,34 @@ class ObjectStore:
         manifest = self.get(reference, kind=kind)
         return parse_model(canonical_json(manifest.payload), model)
 
+    def read_envelope(self, reference: str) -> Manifest:
+        return self._manifest(self.resolve(reference))
+
+    def read_payload[T: StrictModel](
+        self, reference: str, model: type[T], *, kind: ObjectKind | None = None
+    ) -> T:
+        identifier = self.resolve(reference)
+        manifest = self._manifest(identifier)
+        if kind is not None and manifest.kind != kind:
+            raise InputError(
+                f"Expected {kind.value} object, found {manifest.kind.value}: {identifier}"
+            )
+        return parse_model(canonical_json(manifest.payload), model)
+
+    def read_blob_bounded(self, reference: str, name: str, *, limit: int) -> bytes:
+        identifier = self.resolve(reference)
+        manifest = self._manifest(identifier)
+        if name not in manifest.files:
+            raise NotFoundError(f"Object has no file named {name!r}.")
+        blob_hash = manifest.files[name]
+        try:
+            content = read_bytes(self.object_path(identifier) / "blobs" / blob_hash, limit=limit)
+        except OSError as error:
+            raise IntegrityError(f"Object content is missing: {identifier}/{blob_hash}") from error
+        if digest(content) != blob_hash:
+            raise IntegrityError(f"Object blob hash mismatch: {identifier}/{blob_hash}")
+        return content
+
     def read_blobs(self, reference: str, names: tuple[str, ...] | None = None) -> dict[str, bytes]:
         identifier = self.resolve(reference)
         manifest = self.verify(identifier)
@@ -238,10 +294,11 @@ class ObjectStore:
                 raise NotFoundError(f"Object has no file named {name!r}.")
             blob_hash = manifest.files[name]
             content = read_bytes(
-                self.object_path(identifier) / "blobs" / blob_hash, limit=MAX_BLOB_BYTES
+                self.object_path(identifier) / "blobs" / blob_hash, limit=self._blob_ceiling()
             )
             if digest(content) != blob_hash:
                 raise IntegrityError(f"Object blob hash mismatch: {identifier}/{blob_hash}")
+            self._charge(content)
             contents[name] = content
         return contents
 

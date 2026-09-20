@@ -1,6 +1,7 @@
 import hashlib
 import json
 import math
+from collections.abc import Iterable
 from typing import cast
 
 from pydantic import JsonValue, ValidationError
@@ -23,6 +24,13 @@ def canonical_json(value: StrictModel | dict[str, JsonValue]) -> bytes:
 
 def digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def digest_chunks(chunks: Iterable[bytes]) -> str:
+    hasher = hashlib.sha256()
+    for chunk in chunks:
+        hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def _unique_keys(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:

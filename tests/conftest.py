@@ -274,3 +274,60 @@ def graded_benchmark(store, benchmark):
         references=(case.persona_id, case.repository_id),
     )
     return benchmark.model_copy(update={"cases": (changed,)})
+
+
+HOSTILE = (
+    "<script>alert(1)</script><img src=x onerror=alert(1)> javascript:alert(1) </script><!-- \"&'`"
+)
+
+
+@pytest.fixture
+def hostile_run(store, graded_benchmark):
+    from dryheave.assessments import assess_run
+    from dryheave.cases import load_frozen_case
+    from dryheave.experiments import create_experiment
+    from dryheave.models import ObjectKind
+    from dryheave.runner import run_experiment
+    from dryheave.runner_models import RunOptions
+
+    case_id = store.resolve(graded_benchmark.cases[0])
+    case = load_frozen_case(store, case_id)
+    files = store.read_blobs(case_id)
+    files["verifiers/hidden.py"] = (
+        b"import runpy\nimport sys\n"
+        b'greet = runpy.run_path("greet.py")["greet"]\n'
+        b'assert greet("Niels") == "Hello, Niels"\n'
+        + f"sys.stdout.buffer.write({HOSTILE!r}.encode())\n".encode()
+        + b'sys.stdout.buffer.write(b"\\xed\\xa0\\x80")\n'
+        b'sys.stdout.buffer.write(b"PRIVATE_VERIFIER_SENTINEL\\n")\n'
+    )
+    changed = store.put(
+        ObjectKind.CASE,
+        case.model_copy(update={"initial_prompt": HOSTILE}),
+        files=files,
+        references=(case.persona_id, case.repository_id),
+    )
+    script = graded_benchmark.simulator.script
+    draft = graded_benchmark.model_copy(
+        update={
+            "cases": (changed,),
+            "simulator": graded_benchmark.simulator.model_copy(
+                update={"script": (script[0].model_copy(update={"assistant": HOSTILE}), script[1])}
+            ),
+            "fixture": (
+                graded_benchmark.fixture[0].model_copy(
+                    update={"prompt": HOSTILE, "assistant": HOSTILE}
+                ),
+                graded_benchmark.fixture[1].model_copy(
+                    update={
+                        "files": {**graded_benchmark.fixture[1].files, "added.txt": HOSTILE + "\n"}
+                    }
+                ),
+            ),
+        }
+    )
+    summary = run_experiment(
+        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+    )
+    assess_run(store, summary.run_id)
+    return summary.run_id, summary.attempts[0].attempt_id

@@ -86,7 +86,13 @@ Follow the packaged [real workflow](src/dryheave/resources/examples/real-workflo
 4. `assess` audits stopped outputs and runs hidden verifiers and optional judges.
    `report` and `compare` show eligible performance alongside attrition and
    spending for subject, simulator and judge roles.
-5. `export/import` transports curated inputs and structured results. Raw captures,
+5. `view [RUN_OR_REPORT]` serves those results as a read-only local website. It
+   binds loopback on an OS-selected port, prints the URL before opening anything,
+   and runs in the foreground until Ctrl-C; `--open` also launches a browser.
+   The packaged page covers runs, variant groups, attempts and retries, attempt
+   detail with dialogue, patches, criteria, calibration and audits, plus role
+   usage and cost. Viewing never runs, assesses, grades or calls a model.
+6. `export/import` transports curated inputs and structured results. Raw captures,
    source sessions and grading artifacts require explicit sensitive-class flags.
 
 Haiku profiles omit effort. Derive Sonnet with `--model MODEL --effort low`;
@@ -103,7 +109,21 @@ dryheave --store bench-store run EXPERIMENT_ID --mode native \
 dryheave --store bench-store assess RUN_ID --json
 dryheave --store bench-store compare RUN_ID RUN_ID \
   --before-variant base --after-variant changed --json
+dryheave --store bench-store view RUN_ID --open
 ```
+
+`view` exposes no write, run or grade routes, no CORS, no LAN binding and no
+arbitrary filesystem paths. Requests need exactly the loopback `Host`, a supplied
+`Origin` must match the viewer origin, and responses use fixed MIME types with a
+restrictive CSP, `nosniff`, `no-store`, `no-referrer` and `frame-ancestors 'none'`.
+Transcripts, patches and verifier evidence are served as JSON text and never
+interpreted. Listings read a bounded journal prefix and mark a row `truncated`
+instead of reading whole journals; retained detail is bounded per response and
+reports `omitted`, `refused`, `unavailable` or `invalid` rather than guessing.
+Bytes that are not valid UTF-8 come back base64-encoded, not lossily decoded.
+Calibrations are reachable per run and per case, so an imported portable report
+with omitted captures stays a valid degraded view. Local processes that can
+already read the store are outside this boundary. See [viewer](docs/tech/viewer.md).
 
 `doctor` checks availability and the pinned transport version without downloading,
 launching agents, inspecting config/auth state or making model calls. Inspect
@@ -178,14 +198,18 @@ exported inputs can contain sensitive task text and should be reviewed before sh
 
 Read the contracts for [authoring](docs/tech/authoring.md),
 [profiles](docs/tech/profiles.md), [runner](docs/tech/runner.md),
-[results and bundles](docs/tech/results.md), [drivers](docs/tech/drivers.md) and
-[storage](docs/tech/storage.md).
+[results and bundles](docs/tech/results.md), [drivers](docs/tech/drivers.md),
+[viewer](docs/tech/viewer.md) and [storage](docs/tech/storage.md).
 
 ## Development
 
-Install uv, just and Lefthook, then run `just setup`. The checkout uses
+Install uv, just, Lefthook and Node, then run `just setup`; `just doctor` reports
+any of the four that is missing. Node runs the viewer's development-only module
+tests and is needed by `just check`, never at runtime. The checkout uses
 `src/dryheave`, argparse, Pydantic 2, uv/Hatchling, Ruff, cyclic-import checks and
-strict mypy. `just check` runs the full check/test gate; `just coverage` enforces
-the separate 80% branch-coverage gate. `uv build` packages resources and examples.
+strict mypy. `just check` runs the full check/test gate, including the viewer's
+Node built-in module tests (`just test-js`, no npm dependency) and, through
+`just test-packaging`, a built wheel; `just coverage`
+enforces the separate 80% branch-coverage gate. `uv build` packages resources and examples.
 CI and checkout-local Lefthook hooks use the same checks. Development stores,
 fixtures, downloads and caches belong in ignored checkout-local directories.

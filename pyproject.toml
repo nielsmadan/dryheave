@@ -80,7 +80,8 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--basetemp=.cache/pytest"
+addopts = "--basetemp=.cache/pytest -m 'not packaging'"
+markers = ["packaging: asserts against a wheel that `just build` has already produced"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dryheave"]
