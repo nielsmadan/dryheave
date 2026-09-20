@@ -165,14 +165,29 @@ def test_failed_or_timed_out_process_retains_usage_and_stops(
 
 def test_cancellation_stops_process_and_retains_completed_output(store, benchmark, tmp_path):
     cancelled = threading.Event()
-    recipe = recipe_for(fake_executable(tmp_path, extra="time.sleep(5)"))
-    timer = threading.Timer(0.5, cancelled.set)
-    timer.start()
+    ready = tmp_path / "runtime/work/ready"
+    recipe = recipe_for(
+        fake_executable(
+            tmp_path,
+            extra="pathlib.Path('ready').write_text('ready')\ntime.sleep(5)",
+        )
+    )
+
+    def cancel_after_output() -> None:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if ready.exists():
+                cancelled.set()
+                return
+            time.sleep(0.01)
+
+    canceller = threading.Thread(target=cancel_after_output)
+    canceller.start()
     try:
         call, _ = invoke(tmp_path, recipe, request_for(store), cancelled=cancelled)
     finally:
-        timer.cancel()
-        timer.join()
+        canceller.join()
+    assert ready.read_text() == "ready"
     assert call.status == "failed"
     assert call.usage.output == 12
     assert call.cleanup.known_writers_stopped
