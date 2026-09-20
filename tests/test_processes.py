@@ -1,6 +1,7 @@
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import pytest
 
 from dryheave.errors import InputError
 from dryheave.models import CommandSpec
-from dryheave.processes import run_command
+from dryheave.processes import CommandControl, run_command
 
 
 def test_full_duplex_and_nonzero(tmp_path: Path) -> None:
@@ -106,3 +107,63 @@ def test_parent_cancellation_interrupts_a_child_with_closed_pipes(tmp_path):
         timer.cancel()
     assert result.outcome == "timeout"
     assert time.monotonic() - started < 2
+
+
+def test_output_written_before_cancellation_is_retained(tmp_path: Path) -> None:
+    started = tmp_path / "started"
+    cancelled = threading.Event()
+
+    def cancel_after_child_writes() -> None:
+        if started.exists() and not cancelled.is_set():
+            time.sleep(1.0)
+            cancelled.set()
+
+    result = run_command(
+        CommandSpec(
+            argv=(
+                sys.executable,
+                "-c",
+                "import pathlib,sys,time\n"
+                f"pathlib.Path({str(started)!r}).write_text('1')\n"
+                "time.sleep(0.5)\n"
+                'sys.stdout.write("usage=12\\n")\n'
+                "sys.stdout.flush()\n"
+                "time.sleep(30)\n",
+            ),
+            max_output_bytes=100000,
+        ),
+        tmp_path,
+        control=CommandControl(cancelled=cancelled, on_poll=cancel_after_child_writes),
+    )
+    assert result.outcome == "timeout"
+    assert result.stdout == b"usage=12\n"
+
+
+def test_output_clipped_while_draining_reports_the_output_limit(tmp_path: Path) -> None:
+    started = tmp_path / "started"
+    cancelled = threading.Event()
+
+    def cancel_after_child_writes() -> None:
+        if started.exists() and not cancelled.is_set():
+            time.sleep(1.0)
+            cancelled.set()
+
+    result = run_command(
+        CommandSpec(
+            argv=(
+                sys.executable,
+                "-c",
+                "import pathlib,sys,time\n"
+                f"pathlib.Path({str(started)!r}).write_text('1')\n"
+                "time.sleep(0.5)\n"
+                'sys.stdout.write("x" * 100000)\n'
+                "sys.stdout.flush()\n"
+                "time.sleep(30)\n",
+            ),
+            max_output_bytes=100,
+        ),
+        tmp_path,
+        control=CommandControl(cancelled=cancelled, on_poll=cancel_after_child_writes),
+    )
+    assert result.outcome == "output_limit"
+    assert result.stdout == b"x" * 100

@@ -105,12 +105,33 @@ def run_command(
     finally:
         if process.returncode is None:
             _stop(process)
+        outcome = "output_limit" if _drain(streams, output, command.max_output_bytes) else outcome
         for stream in streams:
             if stream is not None:
                 stream.close()
     return CommandResult(
         command.argv, process.returncode, bytes(output["stdout"]), bytes(output["stderr"]), outcome
     )
+
+
+def _drain(
+    streams: tuple[object, ...], output: dict[str, bytearray], max_output_bytes: int
+) -> bool:
+    for stream, label in zip(streams, ("stdin", "stdout", "stderr"), strict=True):
+        if label == "stdin" or not isinstance(stream, io.BufferedIOBase) or stream.closed:
+            continue
+        while True:
+            space = max_output_bytes - sum(map(len, output.values()))
+            try:
+                chunk = os.read(stream.fileno(), max(1, min(65536, space)))
+            except OSError:
+                break
+            if not chunk:
+                break
+            output[label].extend(chunk[:space])
+            if len(chunk) > space:
+                return True
+    return False
 
 
 def _register(
