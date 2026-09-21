@@ -15,18 +15,24 @@ doctor:
     #!/usr/bin/env bash
     set -uo pipefail
     fail=0
-    for tool in uv lefthook node; do
-        if command -v "$tool" >/dev/null 2>&1; then
-            printf '  ok       %s\n' "$tool"
+    need() {
+        if command -v "$1" >/dev/null 2>&1; then
+            printf '  ok       %s\n' "$1"
         else
-            printf '  MISSING  %s\n' "$tool"; fail=1
+            printf '  MISSING  %-12s install: %s\n' "$1" "$2"
+            fail=1
         fi
-    done
+    }
+    need uv "https://docs.astral.sh/uv/getting-started/installation/"
+    need just "https://github.com/casey/just#installation"
+    need lefthook "brew install lefthook"
+    need node "https://nodejs.org/"
     for hook in pre-commit pre-push; do
-        if [ -f "$(git rev-parse --git-path "hooks/$hook")" ]; then
+        if [ -x "$(git rev-parse --git-path "hooks/$hook")" ]; then
             printf '  ok       %s hook\n' "$hook"
         else
-            printf '  MISSING  %s hook; run just setup\n' "$hook"; fail=1
+            printf '  MISSING  %-12s run: just setup\n' "$hook hook"
+            fail=1
         fi
     done
     [ "$fail" -eq 0 ] && printf 'Everything in place.\n'
@@ -71,13 +77,15 @@ build:
 test-packaging: build
     @uv run pytest -q -m packaging
 
-install-local:
-    @uv tool install .
+install:
+    @uv tool install --reinstall --force .
+    @echo "Installed: $(command -v dryheave)"
 
-refresh-local:
-    @uv tool install --reinstall --force --no-cache .
+install-editable:
+    @uv tool install --reinstall --force --editable .
+    @echo "Installed (editable): $(command -v dryheave)"
 
-reset-local:
+uninstall:
     @uv tool uninstall dryheave
 
 clean:

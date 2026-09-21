@@ -211,5 +211,8 @@ strict mypy. `just check` runs the full check/test gate, including the viewer's
 Node built-in module tests (`just test-js`, no npm dependency) and, through
 `just test-packaging`, a built wheel; `just coverage`
 enforces the separate 80% branch-coverage gate. `uv build` packages resources and examples.
-CI and checkout-local Lefthook hooks use the same checks. Development stores,
-fixtures, downloads and caches belong in ignored checkout-local directories.
+Use `just install` to install or replace a CLI snapshot from the checkout,
+`just install-editable` to link the installed command to source, and `just uninstall`
+to remove the tool installation. CI and checkout-local Lefthook hooks use the same
+checks. Development stores, fixtures, downloads and caches belong in ignored
+checkout-local directories.

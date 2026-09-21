@@ -98,9 +98,10 @@ fixtures for repeating those behaviors are in:
 - [role accounting tests](../../../tests/test_role_accounting.py): independently retained settings and native usage when simulator or judge responses fail validation.
 
 Run these through `uv run pytest PATH -q` as needed; use `just check` for the
-required complete check. Do not run suites concurrently: they share the configured
-pytest temporary directory. Automated fixture results remain separate from
-manual CLI and live terminal observations.
+required complete check. Just recipes keep pytest's unique temporary directories
+under the ignored `.cache/tmp`; run complete suites sequentially so their native
+process tests do not compete. Automated fixture results remain separate from manual
+CLI and live terminal observations.
 
 ## Native Codex trial
 

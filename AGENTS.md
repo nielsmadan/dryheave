@@ -11,6 +11,10 @@ declaring work complete, run `just check`. Run `just coverage` for the separate
 lint, formatting, cyclic-import, strict type and test checks. Tests align with
 source modules under tests/ and share fixtures in conftest.py.
 
+Use `just install` to install or replace the current-source CLI snapshot,
+`just install-editable` to link the CLI to this checkout, and `just uninstall`
+to remove the tool installation without touching benchmark data.
+
 ## Structure
 
 Use Python >=3.13, uv/Hatchling, src/dryheave and argparse. Internal modules never

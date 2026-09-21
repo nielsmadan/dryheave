@@ -10,9 +10,9 @@ pre-commit:
 
 pre-push:
   commands:
-    pylint:
-      run: UV_CACHE_DIR=.cache/uv uv run pylint src/dryheave
-    mypy:
-      run: UV_CACHE_DIR=.cache/uv uv run mypy
-    tests:
-      run: UV_CACHE_DIR=.cache/uv uv run pytest -q --cov
+    check:
+      run: just check
+      priority: 1
+    coverage:
+      run: just coverage
+      priority: 2
