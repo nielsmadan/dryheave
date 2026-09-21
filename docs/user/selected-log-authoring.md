@@ -8,10 +8,80 @@ These commands do not scan agent homes or make model calls.
 dryheave init ./bench
 cd bench
 dryheave skills install
-dryheave collect select work /explicit/session-one.jsonl /explicit/session-two.jsonl --agent codex --json
+dryheave collect scan --agent codex --root /explicit/log-directory --json
+dryheave collect select work /explicit/session-one.jsonl /explicit/session-two.jsonl /explicit/session-three.jsonl --agent codex --json
 dryheave collect selection work --json
 dryheave problem request "Find tasks involving CLI behavior" --selection work --name cli-tasks --json
 ```
+
+`collect scan` reads each log under the same bounds as import and reports, per
+session, how much of it is the user actually writing: `user_messages` counts
+`user_events`, how many are `genuine` conversation, how many are
+`harness_injected` wrapper blocks, how many stayed `unclassified`, and the
+`genuine_characters` total with the `median_genuine_characters` of those genuine
+messages. Sessions are returned richest first — by genuine count, then by total
+genuine characters — so a session of ten `continue` messages sorts below one
+carrying real paragraphs. Nothing is scored for you; the components are
+measurements and the choice stays yours.
+
+A voice built on one session describes that session. Select several, spanning
+different kinds of work, up to the 24 a selection holds. Selection membership is
+immutable, so widening one means creating a new selection with more files. Both
+`--agent codex` and `--agent claude` are accepted, for scanning and for selecting.
+
+## Collect, triage, derive
+
+Voice curation runs in three stages. **Collect** candidate sessions with
+`collect scan` and pin the ones you mean to examine with `collect select`; that
+selection is the examined frame, not yet the chosen one. **Triage** each pinned
+session — read it, judge what kind of session it is, and record whether it was
+chosen or rejected and why. **Derive** the voice from the chosen sessions with
+`voice draft` and `voice create`.
+
+```sh
+dryheave collect selection work --json
+dryheave collect triage work --session SESSION_ID \
+  --kind feature --grade medium --decision chosen \
+  --reason "A two-turn feature request in the parser repository" \
+  --expect-revision 1 --json
+```
+
+The vocabulary is exactly eight categories, expressed as a kind and, where the
+kind has one, a grade on that kind's own scale:
+
+| `--kind` | `--grade` | Category |
+| --- | --- | --- |
+| `config_change` | none | config change |
+| `feature` | `small` / `medium` / `large` | feature small/medium/large |
+| `bugfix` | `easy` / `medium` / `hard` | bugfix easy/medium/hard |
+| `extraneous` | none | extraneous |
+
+A feature or bugfix without its grade is rejected, and so is a grade from the
+other kind's scale or a grade on a kind that has none. Triage is a catalog
+mutation like any other: it requires `--expect-revision N`, and re-recording one
+session replaces that session's decision while preserving the rest.
+
+`collect triage`, `collect selection`, `voice draft`, `voice create` and
+`voice inspect` all return `triage`: each judged session with its `repository`
+(the session's recorded `cwd`, or null when the log recorded none), the
+`untriaged` list, and a `variety` summary. `variety` counts the examined
+`sessions`, how many are `triaged` and `untriaged`, how many were `chosen` and
+`rejected`, the `kinds` distribution of the chosen sessions, their
+`repositories` spread with `unknown_repositories` for chosen sessions with no
+recorded `cwd`, and a `varied` verdict that is true only when the chosen sessions
+span more than one kind *and* more than one repository. `triage_warnings` names
+sessions that still carry no decision, says when every triaged session was
+rejected, and says when the chosen set comes from one kind of work or one
+repository. Nothing is refused for thin or lopsided sampling; the warning travels
+with the voice instead. `collect selection` also reports each session's
+`repository` and its own triage decision, so the repository spread is visible
+before any reading starts.
+
+`voice create` recomputes the triage from the selection and stores it on the
+voice record beside the computed evidence, so `voice inspect` reports later what
+the sampling frame was: how many sessions were examined, what kinds they were and
+which were rejected. Voices created before triage existed keep parsing; their
+`triage` is null.
 
 In an operator agent that discovers `.agents/skills`, invoke the installed skills.
 For Codex, actual invocation syntax is:
@@ -60,18 +130,21 @@ their imported membership permanently, even if source files or store aliases mov
 
 | Command | Result |
 | --- | --- |
+| `collect scan --agent codex --root DIR` | List bounded candidate logs with per-session user-message signal, richest first. |
 | `collect select NAME [FILE ...] --agent codex` | Import 1–24 explicitly chosen files into a new immutable selection. |
 | `collect select NAME --session ID [--session ID ...]` | Pin existing imported sessions; files and IDs may be combined. |
 | `collect selections` | List names, IDs, session counts and catalog revision. |
-| `collect selection NAME_OR_ID` | Inspect immutable membership and bounded source warnings. |
+| `collect selection NAME_OR_ID` | Inspect immutable membership, each session's recorded repository and triage, and bounded source warnings. |
 | `collect evidence NAME_OR_ID --session ID` | Page actual messages and selected tool context. |
 | `collect metadata NAME_OR_ID --session ID [--key KEY]` | Page recorded session metadata, including `cwd` and `git.commit_hash`. |
+| `collect triage NAME_OR_ID --session ID --kind KIND [--grade GRADE] --decision chosen\|rejected --reason "REASON" --expect-revision N` | Record one examined session's judged kind and sampling decision. |
 | `problem request [DESCRIPTION] --selection NAME_OR_ID [--name NAME] [--micro-bug]` | Persist the request policy; omitted name is generated and returned. |
 | `problem list` / `problem inspect NAME_OR_ID` | Recover requests, decisions, gaps and validation references. |
 | `problem gap REQUEST "REASON" --expect-revision N` | Append missing-coverage reasoning. |
-| `voice draft --selection NAME_OR_ID [--name "DISPLAY NAME"] [--out PATH]` | Create an internal draft without overwriting an existing file. |
-| `voice create NAME PATH --expect-revision N` | Freeze a reviewed selected-log voice into a compatible Persona. |
-| `voice list` / `voice inspect NAME_OR_PERSONA_ID` | Inspect frozen voice names, provenance and policies. |
+| `voice draft --selection NAME_OR_ID [--name NAME] [--out PATH]` | Create an internal draft and report computed selection evidence, without overwriting an existing file. |
+| `voice create [NAME] PATH --expect-revision N` | Freeze a reviewed selected-log voice into a compatible Persona; an omitted name uses `default`. |
+| `voice list` / `voice inspect NAME_OR_PERSONA_ID` | Inspect frozen voice names, provenance, policies, recorded evidence and triage. |
+| `voice delete NAME --expect-revision N` | Discard a catalog voice entry; its frozen persona object is retained. |
 | `problem validate REQUEST CANDIDATE --expect-revision N` | Validate a drafted decision and content-bound hidden inputs. |
 | `problem freeze REQUEST CANDIDATE --expect-revision N` | Recheck the validation reference and freeze the existing case model. |
 
@@ -140,6 +213,40 @@ The selected-log problem validation flow requires an actual selected-log voice
 with nonempty user-role examples. Voice safety review must distinguish ordinary
 conversation from injected instruction/environment/skill blocks; the structural
 check cannot certify semantic safety. Writing style conveys no native authority.
+
+## Voice names and computed evidence
+
+An omitted voice name means `default`. `voice draft` and `voice create` use it
+while it is free and fail with an explicit error once a voice holds it, so a
+second voice must be named deliberately. Names stay immutable; there is no rename.
+
+A voice curated from the wrong draft or the wrong selection is discarded with
+`voice delete NAME --expect-revision N`, which removes the catalog entry and
+nothing else. An unknown name is an explicit error and a stale revision is a
+conflict, as with every other catalog mutation. The frozen persona object stays in
+the store: cases that reference its `persona_id` still load, and every experiment
+that froze it keeps its original behavior. The response repeats that persona ID so
+the retained object stays identifiable. Deleting frees the name, so a later voice
+may reuse it — a report must therefore say which voice it describes, since the
+name alone no longer identifies one persona.
+
+`voice draft` and `voice create` return an `evidence` object computed from the
+selection itself, not supplied by the caller. It counts `user_events`, reports
+which were `harness_injected` and the wrapper `reasons` that classified each one
+(AGENTS.md/`user_instructions` blocks, `environment_context`, `skill`, command
+wrappers and system reminders), which remain `genuine`, and which stayed
+`unclassified` because no recognized shape explains them. Each genuine candidate
+carries its `event_id`, `characters` and a short `preview`. `sessions` repeats the
+same counts per selected session, with that session's `genuine_characters` and
+`median_genuine_characters`, so coverage is visible: a selection of six sessions
+whose genuine messages all come from one of them is still a one-session voice.
+Sessions that contributed nothing are listed with zero counts rather than omitted.
+A selection is `sufficient` only at or above `threshold` genuine conversational
+messages; below it, both commands return a `warnings` entry naming both numbers,
+the genuine count of every selected session, and the `collect select` invocation
+for a wider selection. Creation is never refused for thin evidence. `voice create` recomputes these figures and
+persists them on the voice record, together with the triage, so `voice inspect`
+reports the same measured provenance and the same sampling frame later.
 
 Re-recording a nonfrozen candidate replaces that candidate's decision at a checked
 revision. Frozen decisions are retained; revise by making a new candidate or

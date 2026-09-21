@@ -8,10 +8,13 @@ from dryheave.authoring_catalog import (
     AuthoringCatalog,
     ProblemDecision,
     ProblemRequest,
+    TriageEvidence,
     VoiceDraft,
+    VoiceEvidence,
     read_catalog,
     request_for,
     selection_for,
+    voice_for,
 )
 from dryheave.commands import CommandRegistry
 from dryheave.filesystem import atomic_write, read_bytes
@@ -22,13 +25,20 @@ from dryheave.mining import (
     SelectionInputs,
     create_request,
     create_voice,
+    delete_voice,
     evidence_page,
     inspect_voice,
     metadata_page,
     record_decision,
     record_gap,
+    record_triage,
+    resolve_voice_name,
     select_logs,
+    session_repository,
+    triage_decision,
+    triage_evidence,
     validate_problem,
+    voice_evidence,
 )
 from dryheave.models import AgentKind, ObjectKind
 from dryheave.personas import Persona
@@ -84,15 +94,20 @@ def _selections(_args: argparse.Namespace, _store: ObjectStore) -> dict[str, Jso
 def _selection(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     catalog = read_catalog(_root())
     selection = selection_for(catalog, args.reference)
+    triage = triage_evidence(store, catalog, selection)
+    decided = {item.session_id: item for item in triage.entries}
     sessions: list[JsonValue] = []
     for identifier in selection.session_ids:
         session = store.load(identifier, Session, kind=ObjectKind.SESSION)
+        decision = decided.get(identifier)
         sessions.append(
             {
                 "id": identifier,
                 "agent": session.agent.value,
                 "events": len(session.events),
                 "source_id": session.source_id,
+                "repository": session_repository(session),
+                "triage": decision.model_dump(mode="json") if decision is not None else None,
                 "warnings": [item.model_dump(mode="json") for item in session.warnings[:20]],
                 "warning_count": len(session.warnings),
                 "metadata_command": f"dryheave collect metadata {selection.identifier} --session {identifier} --json",
@@ -103,6 +118,35 @@ def _selection(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonVa
         "id": selection.identifier,
         "selection": selection.model_dump(mode="json"),
         "sessions": sessions,
+        "triage": triage.model_dump(mode="json"),
+        "triage_warnings": _triage_warnings(triage),
+    }
+
+
+def _triage(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
+    root = _root()
+    catalog = record_triage(
+        store,
+        root,
+        args.reference,
+        triage_decision(
+            store.resolve(args.session),
+            args.kind,
+            args.grade,
+            chosen=args.decision == "chosen",
+            reason=args.reason,
+        ),
+        expected_revision=args.expect_revision,
+    )
+    selection = selection_for(catalog, args.reference)
+    triage = triage_evidence(store, catalog, selection)
+    return {
+        "revision": catalog.revision,
+        "id": selection.identifier,
+        "name": selection.name,
+        "triage": triage.model_dump(mode="json"),
+        "triage_warnings": _triage_warnings(triage),
+        "next": "Triage every examined session, then derive the voice from the chosen ones with dryheave-voice-profile.",
     }
 
 
@@ -255,34 +299,106 @@ def _validate_problem(args: argparse.Namespace, store: ObjectStore) -> dict[str,
     }
 
 
-def _voice_draft(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]:
+def _evidence_warnings(evidence: VoiceEvidence | None) -> list[JsonValue]:
+    if evidence is None or evidence.sufficient:
+        return []
+    coverage = "; ".join(f"{item.session_id}: {item.genuine}" for item in evidence.sessions)
+    return [
+        f"Evidence below threshold: {evidence.genuine} genuine user messages from "
+        f"{evidence.user_events} user-role events, against a threshold of {evidence.threshold}. "
+        f"Genuine messages per selected session ({len(evidence.sessions)} selected): {coverage}. "
+        "Name the sessions this voice was drawn from and add more varied sessions with "
+        "collect select NAME FILE [FILE ...] --agent AGENT. "
+        "Report the shortfall and do not assert voice traits the retained excerpts do not show."
+    ]
+
+
+def _triage_warnings(triage: TriageEvidence) -> list[JsonValue]:
+    variety = triage.variety
+    kinds = "; ".join(f"{name}: {count}" for name, count in sorted(variety.kinds.items())) or "none"
+    spread = (
+        "; ".join(f"{name}: {count}" for name, count in sorted(variety.repositories.items()))
+        or "none"
+    )
+    if variety.unknown_repositories:
+        spread = f"{spread}; no recorded cwd: {variety.unknown_repositories}"
+    messages: list[JsonValue] = []
+    if variety.untriaged:
+        messages.append(
+            f"Untriaged sessions: {variety.untriaged} of {variety.sessions} selected sessions "
+            f"carry no triage decision ({', '.join(triage.untriaged)}). Judge each examined "
+            "session with collect triage SELECTION --session ID --kind KIND [--grade GRADE] "
+            "--decision chosen|rejected --reason REASON --expect-revision N. "
+            "Until then the sampling frame is unrecorded and this voice's bias stays invisible."
+        )
+    if variety.triaged and not variety.chosen:
+        messages.append(
+            f"No chosen sessions: all {variety.triaged} triaged sessions were rejected, so no "
+            "chosen set backs this voice. Triage the sessions its excerpts come from, or build "
+            "the voice from a selection whose sessions were chosen."
+        )
+    elif variety.chosen and not variety.varied:
+        messages.append(
+            f"Chosen sessions lack variety: {variety.chosen} chosen, kinds ({kinds}) across "
+            f"repositories ({spread}). A voice drawn from one kind of work or one repository "
+            "describes that work, not the user. Triage further sessions of other kinds and from "
+            "other repositories, then build the voice from a wider selection."
+        )
+    return messages
+
+
+def _voice_draft(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     root = _root()
     catalog = read_catalog(root)
     selection = selection_for(catalog, args.selection)
+    name = resolve_voice_name(catalog, args.name)
     draft = VoiceDraft(
         selection_id=selection.identifier,
-        persona=Persona(
-            name=args.name, instructions="", disclosure_policy="", unknown_answer_policy=""
-        ),
+        persona=Persona(name=name, instructions="", disclosure_policy="", unknown_answer_policy=""),
     )
     path = args.out or root / f"voice-{uuid4().hex[:12]}.json"
     atomic_write(path.absolute(), draft.model_dump_json(indent=2).encode() + b"\n", replace=False)
+    evidence = voice_evidence(store, selection)
+    triage = triage_evidence(store, catalog, selection)
     return {
         "path": str(path),
+        "name": name,
         "revision": catalog.revision,
         "selection_id": selection.identifier,
-        "next": "Use dryheave-voice-profile to curate policies, exact user excerpts and safety_review, then voice create NAME PATH --expect-revision REVISION.",
+        "evidence": evidence.model_dump(mode="json"),
+        "warnings": _evidence_warnings(evidence),
+        "triage": triage.model_dump(mode="json"),
+        "triage_warnings": _triage_warnings(triage),
+        "next": "Use dryheave-voice-profile to curate policies, exact user excerpts and safety_review, then voice create [NAME] PATH --expect-revision REVISION; omit NAME for the default voice.",
     }
 
 
 def _voice_create(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     root = _root()
     draft = parse_model(read_bytes(args.path, limit=1024 * 1024), VoiceDraft)
-    catalog = create_voice(store, root, args.name, draft, expected_revision=args.expect_revision)
+    name = resolve_voice_name(read_catalog(root), args.name)
+    catalog = create_voice(store, root, name, draft, expected_revision=args.expect_revision)
+    record = catalog.voices[name]
     return {
         "revision": catalog.revision,
-        "voice": catalog.voices[args.name].model_dump(mode="json"),
-        "id": catalog.voices[args.name].persona_id,
+        "voice": record.model_dump(mode="json"),
+        "name": name,
+        "id": record.persona_id,
+        "evidence": record.evidence.model_dump(mode="json") if record.evidence else None,
+        "warnings": _evidence_warnings(record.evidence),
+        "triage": record.triage.model_dump(mode="json") if record.triage else None,
+        "triage_warnings": _triage_warnings(record.triage) if record.triage else [],
+    }
+
+
+def _voice_delete(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]:
+    catalog, record = delete_voice(_root(), args.name, expected_revision=args.expect_revision)
+    return {
+        "revision": catalog.revision,
+        "name": record.name,
+        "id": record.persona_id,
+        "deleted": True,
+        "next": f"Only the catalog entry was removed. The frozen persona object {record.persona_id} stays in the store, so every case and experiment that froze it keeps its original behavior. Curate a replacement with voice draft --selection NAME_OR_ID --name NEW_NAME.",
     }
 
 
@@ -295,7 +411,11 @@ def _voices(_args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonVal
 
 
 def _voice(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
-    return inspect_voice(store, read_catalog(_root()), args.reference)
+    catalog = read_catalog(_root())
+    result = inspect_voice(store, catalog, args.reference)
+    record = voice_for(catalog, args.reference)
+    result["triage_warnings"] = _triage_warnings(record.triage) if record.triage else []
+    return result
 
 
 def register_mining_collection(
@@ -343,6 +463,20 @@ def register_mining_collection(
     metadata.add_argument("--text-offset", type=int, default=0)
     metadata.add_argument("--text-limit", type=int, default=4000)
     registry.handler(metadata, _metadata)
+    triage = commands.add_parser(
+        "triage",
+        help="Record one selected session's judged kind and a chosen/rejected sampling decision.",
+    )
+    triage.add_argument("reference")
+    triage.add_argument("--session", required=True)
+    triage.add_argument(
+        "--kind", choices=["config_change", "feature", "bugfix", "extraneous"], required=True
+    )
+    triage.add_argument("--grade", choices=["small", "medium", "large", "easy", "hard"])
+    triage.add_argument("--decision", choices=["chosen", "rejected"], required=True)
+    triage.add_argument("--reason", required=True)
+    triage.add_argument("--expect-revision", type=int, required=True)
+    registry.handler(triage, _triage)
 
 
 def register_mining(registry: CommandRegistry) -> None:
@@ -407,14 +541,20 @@ def _register_voices(registry: CommandRegistry) -> None:
     commands = voice.add_subparsers(dest="voice_command", required=True)
     draft = commands.add_parser("draft")
     draft.add_argument("--selection", required=True)
-    draft.add_argument("--name", default="Curated user")
+    draft.add_argument("--name")
     draft.add_argument("--out", type=Path)
     registry.handler(draft, _voice_draft)
     create = commands.add_parser("create")
-    create.add_argument("name")
+    create.add_argument("name", nargs="?")
     create.add_argument("path", type=Path)
     create.add_argument("--expect-revision", type=int, required=True)
     registry.handler(create, _voice_create)
+    delete = commands.add_parser(
+        "delete", help="Discard a catalog voice entry; its frozen persona object is retained."
+    )
+    delete.add_argument("name")
+    delete.add_argument("--expect-revision", type=int, required=True)
+    registry.handler(delete, _voice_delete)
     listing = commands.add_parser("list")
     registry.handler(listing, _voices)
     inspect = commands.add_parser("inspect")

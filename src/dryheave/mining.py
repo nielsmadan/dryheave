@@ -1,29 +1,50 @@
 import json
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import median_low
 from tempfile import TemporaryDirectory
+from typing import Literal
 
 from pydantic import Field, JsonValue
 
 from dryheave.authoring_catalog import (
+    MAX_VOICE_EVIDENCE_EVENTS,
+    TRIAGE_GRADES,
+    VOICE_PREVIEW_LIMIT,
     AuthoringCatalog,
+    ExcludedUserEvent,
+    InjectionReason,
     ProblemDecision,
     ProblemRequest,
     Selection,
+    SelectionTriage,
+    SessionEvidence,
+    TriageCategory,
+    TriageDecision,
+    TriageEntry,
+    TriageEvidence,
+    TriageGrade,
+    TriageKind,
+    TriageVariety,
+    UserMessageProfile,
     ValidationReference,
+    VoiceCandidate,
     VoiceDraft,
+    VoiceEvidence,
     VoiceRecord,
     edit_catalog,
     request_for,
     save_catalog,
     selection_for,
+    voice_for,
 )
 from dryheave.cases import CaseDraft, freeze_case, read_draft, validate_case
 from dryheave.errors import ConflictError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
-from dryheave.logs.base import EvidenceExcerpt, ImportLimits, Session
+from dryheave.logs.base import EvidenceExcerpt, ImportLimits, LogEvent, Session
 from dryheave.logs.service import import_session, verify_evidence
 from dryheave.models import AgentKind, ObjectKind, StrictModel
 from dryheave.personas import freeze_persona, load_frozen_persona
@@ -33,6 +54,33 @@ from dryheave.storage import ObjectStore
 
 MAX_SELECTED_SESSIONS = 24
 MAX_VOICE_EXAMPLES = 32
+VOICE_EVIDENCE_THRESHOLD = 8
+DEFAULT_VOICE_NAME = "default"
+HARNESS_WRAPPERS: tuple[tuple[InjectionReason, re.Pattern[str]], ...] = (
+    ("system_reminder", re.compile(r"<system-reminder>.*?(?:</system-reminder>|\Z)", re.DOTALL)),
+    (
+        "agents_instructions",
+        re.compile(r"<user_instructions>.*?(?:</user_instructions>|\Z)", re.DOTALL),
+    ),
+    (
+        "environment_context",
+        re.compile(r"<environment_context>.*?(?:</environment_context>|\Z)", re.DOTALL),
+    ),
+    ("skill_wrapper", re.compile(r"<skill>.*?(?:</skill>|\Z)", re.DOTALL)),
+    (
+        "command_wrapper",
+        re.compile(
+            r"<(command-name|command-message|command-args|local-command-stdout"
+            r"|local-command-stderr)>.*?(?:</\1>|\Z)",
+            re.DOTALL,
+        ),
+    ),
+)
+INSTRUCTION_BLOCK = re.compile(
+    r"^(?:Contents of \S*(?:AGENTS|CLAUDE)\.md|# (?:AGENTS|CLAUDE)\.md)", re.MULTILINE
+)
+UNRECOGNIZED_WRAPPER = re.compile(r"<([a-zA-Z][\w.-]*)(?:\s[^>]*)?>.*</\1>", re.DOTALL)
+Classification = Literal["genuine", "harness_injected", "unclassified"]
 
 
 @dataclass(frozen=True)
@@ -432,6 +480,203 @@ def verify_voice(
     verify_evidence(store, examples)
 
 
+def classify_user_event(text: str) -> tuple[Classification, tuple[InjectionReason, ...], str]:
+    reasons: list[InjectionReason] = []
+    residue = text
+    for reason, pattern in HARNESS_WRAPPERS:
+        stripped, count = pattern.subn("", residue)
+        if count:
+            reasons.append(reason)
+            residue = stripped
+    instructions = INSTRUCTION_BLOCK.search(residue)
+    if instructions is not None:
+        residue = residue[: instructions.start()]
+        if "agents_instructions" not in reasons:
+            reasons.append("agents_instructions")
+    remainder = residue.strip()
+    if remainder and UNRECOGNIZED_WRAPPER.fullmatch(remainder):
+        return "unclassified", (*reasons, "unrecognized_wrapper"), ""
+    if remainder:
+        return "genuine", (), remainder
+    if reasons:
+        return "harness_injected", tuple(reasons), ""
+    return "unclassified", (), ""
+
+
+def classified_user_events(
+    session: Session,
+) -> Iterator[tuple[LogEvent, Classification, tuple[InjectionReason, ...], str]]:
+    for event in session.events:
+        if event.kind == "user":
+            classification, reasons, remainder = classify_user_event(event.text)
+            yield event, classification, reasons, remainder
+
+
+def _profile(counts: dict[str, int], lengths: list[int]) -> UserMessageProfile:
+    return UserMessageProfile(
+        user_events=sum(counts.values()),
+        genuine=counts["genuine"],
+        harness_injected=counts["harness_injected"],
+        unclassified=counts["unclassified"],
+        genuine_characters=sum(lengths),
+        median_genuine_characters=median_low(lengths) if lengths else 0,
+    )
+
+
+def user_message_profile(session: Session) -> UserMessageProfile:
+    counts = {"genuine": 0, "harness_injected": 0, "unclassified": 0}
+    lengths: list[int] = []
+    for _, classification, _, remainder in classified_user_events(session):
+        counts[classification] += 1
+        if classification == "genuine":
+            lengths.append(len(remainder))
+    return _profile(counts, lengths)
+
+
+def voice_evidence(store: ObjectStore, selection: Selection) -> VoiceEvidence:
+    candidates: list[VoiceCandidate] = []
+    excluded: list[ExcludedUserEvent] = []
+    sessions: list[SessionEvidence] = []
+    for identifier in selection.session_ids:
+        session = store.load(identifier, Session, kind=ObjectKind.SESSION)
+        counts = {"genuine": 0, "harness_injected": 0, "unclassified": 0}
+        lengths: list[int] = []
+        for event, classification, reasons, remainder in classified_user_events(session):
+            counts[classification] += 1
+            if classification == "genuine":
+                lengths.append(len(remainder))
+                if len(candidates) < MAX_VOICE_EVIDENCE_EVENTS:
+                    candidates.append(
+                        VoiceCandidate(
+                            session_id=identifier,
+                            event_id=event.event_id,
+                            characters=len(remainder),
+                            preview=" ".join(remainder.split())[:VOICE_PREVIEW_LIMIT],
+                        )
+                    )
+            elif len(excluded) < MAX_VOICE_EVIDENCE_EVENTS:
+                excluded.append(
+                    ExcludedUserEvent(
+                        session_id=identifier,
+                        event_id=event.event_id,
+                        classification=classification,
+                        reasons=reasons,
+                    )
+                )
+        sessions.append(
+            SessionEvidence(session_id=identifier, **_profile(counts, lengths).model_dump())
+        )
+    genuine = sum(item.genuine for item in sessions)
+    listed = sum(item.harness_injected + item.unclassified for item in sessions)
+    return VoiceEvidence(
+        threshold=VOICE_EVIDENCE_THRESHOLD,
+        user_events=genuine + listed,
+        genuine=genuine,
+        harness_injected=sum(item.harness_injected for item in sessions),
+        unclassified=sum(item.unclassified for item in sessions),
+        sufficient=genuine >= VOICE_EVIDENCE_THRESHOLD,
+        candidates=tuple(candidates),
+        excluded=tuple(excluded),
+        sessions=tuple(sessions),
+        truncated=len(candidates) < genuine or len(excluded) < listed,
+    )
+
+
+def session_repository(session: Session) -> str | None:
+    value = session.metadata.get("cwd")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def triage_decision(
+    session_id: str, kind: TriageKind, grade: TriageGrade | None, *, chosen: bool, reason: str
+) -> TriageDecision:
+    allowed = TRIAGE_GRADES.get(kind, ())
+    if allowed and grade not in allowed:
+        raise InputError(f"Triage kind {kind} needs --grade {'/'.join(allowed)}.")
+    if not allowed and grade is not None:
+        raise InputError(f"Triage kind {kind} carries no grade; drop --grade.")
+    return TriageDecision(
+        session_id=session_id, kind=kind, grade=grade, chosen=chosen, reason=reason
+    )
+
+
+def record_triage(
+    store: ObjectStore,
+    root: Path,
+    reference: str,
+    decision: TriageDecision,
+    *,
+    expected_revision: int,
+) -> AuthoringCatalog:
+    with edit_catalog(root, expected_revision) as catalog:
+        selection = selection_for(catalog, reference)
+        if decision.session_id not in selection.session_ids:
+            raise InputError("Triaged session is outside the selected imported membership.")
+        store.load(decision.session_id, Session, kind=ObjectKind.SESSION)
+        existing = catalog.triage.get(selection.name)
+        record = SelectionTriage(
+            name=selection.name,
+            selection_id=selection.identifier,
+            decisions=(existing.decisions if existing is not None else {})
+            | {decision.session_id: decision},
+        )
+        return save_catalog(
+            root, catalog.model_copy(update={"triage": catalog.triage | {selection.name: record}})
+        )
+
+
+def triage_evidence(
+    store: ObjectStore, catalog: AuthoringCatalog, selection: Selection
+) -> TriageEvidence:
+    record = catalog.triage.get(selection.name)
+    decisions = record.decisions if record is not None else {}
+    entries: list[TriageEntry] = []
+    untriaged: list[str] = []
+    kinds: dict[TriageCategory, int] = {}
+    repositories: dict[str, int] = {}
+    unknown = 0
+    for identifier in selection.session_ids:
+        decision = decisions.get(identifier)
+        if decision is None:
+            untriaged.append(identifier)
+            continue
+        repository = session_repository(store.load(identifier, Session, kind=ObjectKind.SESSION))
+        entries.append(TriageEntry(**decision.model_dump(), repository=repository))
+        if not decision.chosen:
+            continue
+        kinds[decision.category] = kinds.get(decision.category, 0) + 1
+        if repository is None:
+            unknown += 1
+        else:
+            repositories[repository] = repositories.get(repository, 0) + 1
+    chosen = sum(kinds.values())
+    return TriageEvidence(
+        entries=tuple(entries),
+        untriaged=tuple(untriaged),
+        variety=TriageVariety(
+            sessions=len(selection.session_ids),
+            triaged=len(entries),
+            untriaged=len(untriaged),
+            chosen=chosen,
+            rejected=len(entries) - chosen,
+            kinds=kinds,
+            repositories=repositories,
+            unknown_repositories=unknown,
+            varied=len(kinds) > 1 and len(repositories) + bool(unknown) > 1,
+        ),
+    )
+
+
+def resolve_voice_name(catalog: AuthoringCatalog, name: str | None) -> str:
+    if name is not None:
+        return name
+    if DEFAULT_VOICE_NAME in catalog.voices:
+        raise InputError(
+            f"A voice named {DEFAULT_VOICE_NAME} already exists; name this voice explicitly."
+        )
+    return DEFAULT_VOICE_NAME
+
+
 def create_voice(
     store: ObjectStore, root: Path, name: str, draft: VoiceDraft, *, expected_revision: int
 ) -> AuthoringCatalog:
@@ -442,30 +687,41 @@ def create_voice(
             raise InputError(
                 "Record a safety review excluding solutions, secrets and injected instruction blocks."
             )
-        verify_voice(store, selection_for(catalog, draft.selection_id), draft.persona.examples)
+        selection = selection_for(catalog, draft.selection_id)
+        verify_voice(store, selection, draft.persona.examples)
         identifier = freeze_persona(store, draft.persona)
         record = VoiceRecord(
             name=name,
             selection_id=draft.selection_id,
             persona_id=identifier,
             safety_review=draft.safety_review,
+            evidence=voice_evidence(store, selection),
+            triage=triage_evidence(store, catalog, selection),
         )
         return save_catalog(
             root, catalog.model_copy(update={"voices": catalog.voices | {name: record}})
         )
 
 
+def delete_voice(
+    root: Path, name: str, *, expected_revision: int
+) -> tuple[AuthoringCatalog, VoiceRecord]:
+    with edit_catalog(root, expected_revision) as catalog:
+        record = catalog.voices.get(name)
+        if record is None:
+            raise InputError("Unknown voice; inspect voice list.")
+        remaining = {key: item for key, item in catalog.voices.items() if key != name}
+        return save_catalog(root, catalog.model_copy(update={"voices": remaining})), record
+
+
 def inspect_voice(
     store: ObjectStore, catalog: AuthoringCatalog, reference: str
 ) -> dict[str, JsonValue]:
-    voice = next(
-        (item for item in catalog.voices.values() if reference in {item.name, item.persona_id}),
-        None,
-    )
-    if voice is None:
-        raise InputError("Unknown voice; inspect voice list.")
+    voice = voice_for(catalog, reference)
     return {
         "voice": voice.model_dump(mode="json"),
         "persona": load_frozen_persona(store, voice.persona_id).model_dump(mode="json"),
+        "evidence": voice.evidence.model_dump(mode="json") if voice.evidence else None,
+        "triage": voice.triage.model_dump(mode="json") if voice.triage else None,
         "revision": catalog.revision,
     }

@@ -216,6 +216,81 @@ def test_cli_errors_preserve_catalog_and_existing_files(authoring_workspace, cap
     assert "safety review" in json.loads(capsys.readouterr().err)["error"]["message"]
 
 
+def test_voice_defaults_to_one_default_name_and_reports_computed_evidence(
+    authoring_workspace, capsys
+):
+    _, fixture = authoring_workspace
+    selected = invoke(capsys, "collect", "select", "chosen", str(fixture), "--agent", "codex")
+    session_id = selected["selection"]["session_ids"][0]
+    page = invoke(
+        capsys, "collect", "evidence", "chosen", "--session", session_id, "--kind", "user"
+    )
+    user = page["events"][0]
+    drafted = invoke(capsys, "voice", "draft", "--selection", "chosen")
+    assert drafted["name"] == "default"
+    evidence = drafted["evidence"]
+    assert evidence["threshold"] == 8
+    assert evidence["user_events"] == 3
+    assert evidence["genuine"] == 3
+    assert evidence["harness_injected"] == 0
+    assert evidence["unclassified"] == 0
+    assert evidence["sufficient"] is False
+    assert evidence["candidates"][0] == {
+        "session_id": session_id,
+        "event_id": user["event_id"],
+        "characters": len(user["text"]),
+        "preview": user["text"],
+    }
+    assert len(drafted["warnings"]) == 1
+    assert "below threshold" in drafted["warnings"][0]
+    assert "threshold of 8" in drafted["warnings"][0]
+    path = Path(drafted["path"])
+    payload = json.loads(path.read_text())
+    assert payload["persona"]["name"] == "default"
+    payload["safety_review"] = "Reviewed direct user wording without injected blocks."
+    payload["persona"].update(
+        instructions="Use concise factual replies.",
+        disclosure_policy="Disclose approved case facts only.",
+        unknown_answer_policy="Say when unknown.",
+        reviewed_subject_safe=True,
+        examples=[
+            {
+                "session_id": session_id,
+                "event_id": user["event_id"],
+                "visibility": "subject",
+                "excerpt": user["text"],
+            }
+        ],
+    )
+    path.write_text(json.dumps(payload))
+    created = invoke(capsys, "voice", "create", str(path), "--expect-revision", "1")
+    assert created["name"] == "default"
+    assert created["voice"]["name"] == "default"
+    assert created["evidence"] == evidence
+    assert created["warnings"] == drafted["warnings"]
+    inspected = invoke(capsys, "voice", "inspect", "default")
+    assert inspected["evidence"] == evidence
+    assert inspected["voice"]["evidence"] == evidence
+    assert invoke(capsys, "voice", "list")["voices"][0]["name"] == "default"
+    assert main(["voice", "draft", "--selection", "chosen", "--json"]) == 2
+    assert "name this voice explicitly" in json.loads(capsys.readouterr().err)["error"]["message"]
+    assert main(["voice", "create", str(path), "--expect-revision", "2", "--json"]) == 2
+    assert "name this voice explicitly" in json.loads(capsys.readouterr().err)["error"]["message"]
+    named = invoke(capsys, "voice", "draft", "--selection", "chosen", "--name", "second")
+    assert named["name"] == "second"
+    assert named["evidence"] == evidence
+    path = Path(named["path"])
+    payload["persona"]["name"] = "second"
+    path.write_text(json.dumps(payload))
+    again = invoke(capsys, "voice", "create", "second", str(path), "--expect-revision", "2")
+    assert again["name"] == "second"
+    assert again["evidence"]["sufficient"] is False
+    assert {item["name"] for item in invoke(capsys, "voice", "list")["voices"]} == {
+        "default",
+        "second",
+    }
+
+
 def test_selection_commands_require_initialized_workspace(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert main(["collect", "selections", "--json"]) == 2
@@ -331,3 +406,284 @@ def test_cli_refuses_symlink_draft_paths_without_changing_request(
     assert main(arguments) == 2
     assert "symlink" in json.loads(capsys.readouterr().err)["error"]["message"]
     assert invoke(capsys, "problem", "inspect", "mine") == request
+
+
+def write_codex_log(path: Path, texts: tuple[str, ...], cwd: str | None = None) -> None:
+    header = (
+        json.dumps({"type": "session_meta", "payload": {"id": path.stem, "cwd": cwd}}) + "\n"
+        if cwd is not None
+        else ""
+    )
+    path.write_text(
+        header
+        + "".join(
+            json.dumps({"type": "event_msg", "payload": {"type": "user_message", "message": text}})
+            + "\n"
+            for text in texts
+        )
+    )
+
+
+def test_voice_draft_reports_per_session_coverage_and_asks_for_more_sessions(
+    authoring_workspace, tmp_path, capsys
+):
+    rich = tmp_path / "rich.jsonl"
+    filler = tmp_path / "filler.jsonl"
+    write_codex_log(
+        rich,
+        (
+            "Can you add a greeting command that takes a name and prints it back?",
+            "I want the empty name case handled too, and a test for it.",
+        ),
+    )
+    write_codex_log(filler, ("continue", "<system-reminder>noise</system-reminder>"))
+    selected = invoke(
+        capsys, "collect", "select", "varied", str(rich), str(filler), "--agent", "codex"
+    )
+    assert len(selected["selection"]["session_ids"]) == 2
+    drafted = invoke(capsys, "voice", "draft", "--selection", "varied")
+    evidence = drafted["evidence"]
+    assert evidence["genuine"] == 3
+    assert [item["session_id"] for item in evidence["sessions"]] == selected["selection"][
+        "session_ids"
+    ]
+    breakdown = {item["session_id"]: item for item in evidence["sessions"]}
+    assert sorted(item["genuine"] for item in breakdown.values()) == [1, 2]
+    assert sorted(item["genuine_characters"] for item in breakdown.values()) == [8, 126]
+    assert sum(item["harness_injected"] for item in breakdown.values()) == 1
+    assert len(drafted["warnings"]) == 1
+    warning = drafted["warnings"][0]
+    assert "Genuine messages per selected session (2 selected)" in warning
+    assert all(f"{identifier}: " in warning for identifier in breakdown)
+    assert "collect select NAME FILE [FILE ...] --agent AGENT" in warning
+
+
+FEATURE_TEXTS = (
+    "Can you add a greeting command that takes a name and prints it back?",
+    "I want the empty name case handled too, and a test for it.",
+)
+BUGFIX_TEXTS = (
+    "The parser drops the trailing flag; can you work out why?",
+    "Yes, the second one, and keep the fix small.",
+)
+
+
+def curate_voice(capsys, selection: str, name: str, revision: int) -> dict:
+    drafted = invoke(capsys, "voice", "draft", "--selection", selection, "--name", name)
+    candidate = drafted["evidence"]["candidates"][0]
+    page = invoke(
+        capsys,
+        "collect",
+        "evidence",
+        selection,
+        "--session",
+        candidate["session_id"],
+        "--event",
+        candidate["event_id"],
+    )
+    path = Path(drafted["path"])
+    payload = json.loads(path.read_text())
+    payload["safety_review"] = "Reviewed direct user wording without injected blocks."
+    payload["persona"].update(
+        instructions="Use concise factual replies.",
+        disclosure_policy="Disclose approved case facts only.",
+        unknown_answer_policy="Say when unknown.",
+        reviewed_subject_safe=True,
+        examples=[
+            {
+                "session_id": candidate["session_id"],
+                "event_id": candidate["event_id"],
+                "visibility": "subject",
+                "excerpt": page["events"][0]["text"],
+            }
+        ],
+    )
+    path.write_text(json.dumps(payload))
+    return invoke(capsys, "voice", "create", name, str(path), "--expect-revision", str(revision))
+
+
+def test_collect_triage_records_the_sampling_frame_against_a_checked_revision(
+    authoring_workspace, tmp_path, capsys
+):
+    feature = tmp_path / "feature.jsonl"
+    bug = tmp_path / "bug.jsonl"
+    write_codex_log(feature, FEATURE_TEXTS, cwd="/repos/alpha")
+    write_codex_log(bug, BUGFIX_TEXTS, cwd="/repos/beta")
+    selected = invoke(
+        capsys, "collect", "select", "varied", str(feature), str(bug), "--agent", "codex"
+    )
+    first, second = selected["selection"]["session_ids"]
+    summary = invoke(capsys, "collect", "selection", "varied")
+    assert sorted(item["repository"] for item in summary["sessions"]) == [
+        "/repos/alpha",
+        "/repos/beta",
+    ]
+    assert all(item["triage"] is None for item in summary["sessions"])
+    assert summary["triage"]["variety"] == {
+        "sessions": 2,
+        "triaged": 0,
+        "untriaged": 2,
+        "chosen": 0,
+        "rejected": 0,
+        "kinds": {},
+        "repositories": {},
+        "unknown_repositories": 0,
+        "varied": False,
+    }
+    assert len(summary["triage_warnings"]) == 1
+    assert "Untriaged sessions: 2 of 2" in summary["triage_warnings"][0]
+    assert all(identifier in summary["triage_warnings"][0] for identifier in (first, second))
+    partial = invoke(
+        capsys,
+        "collect",
+        "triage",
+        "varied",
+        "--session",
+        first,
+        "--kind",
+        "feature",
+        "--grade",
+        "medium",
+        "--decision",
+        "chosen",
+        "--reason",
+        "Two turns of feature conversation.",
+        "--expect-revision",
+        "1",
+    )
+    assert partial["revision"] == 2
+    assert partial["triage"]["untriaged"] == [second]
+    assert len(partial["triage_warnings"]) == 2
+    assert "Untriaged sessions: 1 of 2" in partial["triage_warnings"][0]
+    assert "lack variety" in partial["triage_warnings"][1]
+    complete = invoke(
+        capsys,
+        "collect",
+        "triage",
+        "varied",
+        "--session",
+        second,
+        "--kind",
+        "bugfix",
+        "--grade",
+        "easy",
+        "--decision",
+        "chosen",
+        "--reason",
+        "A short bug hunt in another repository.",
+        "--expect-revision",
+        "2",
+    )
+    assert complete["revision"] == 3
+    assert complete["triage"]["variety"]["kinds"] == {"feature_medium": 1, "bugfix_easy": 1}
+    assert complete["triage"]["variety"]["repositories"] == {"/repos/alpha": 1, "/repos/beta": 1}
+    assert complete["triage"]["variety"]["varied"] is True
+    assert complete["triage_warnings"] == []
+    arguments = [
+        "collect",
+        "triage",
+        "varied",
+        "--session",
+        second,
+        "--kind",
+        "bugfix",
+        "--grade",
+        "hard",
+        "--decision",
+        "rejected",
+        "--reason",
+        "Reconsidered after rereading.",
+        "--expect-revision",
+        "1",
+        "--json",
+    ]
+    assert main(arguments) == 1
+    assert json.loads(capsys.readouterr().err)["error"]["code"] == "conflict"
+    created = curate_voice(capsys, "varied", "balanced", 3)
+    assert created["triage"]["variety"]["varied"] is True
+    assert created["triage_warnings"] == []
+    assert invoke(capsys, "voice", "inspect", "balanced")["triage"] == created["triage"]
+
+
+def test_voice_create_warns_about_untriaged_sessions_and_a_narrow_chosen_set(
+    authoring_workspace, tmp_path, capsys
+):
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    write_codex_log(first, FEATURE_TEXTS, cwd="/repos/alpha")
+    write_codex_log(second, BUGFIX_TEXTS, cwd="/repos/alpha")
+    invoke(capsys, "collect", "select", "narrow", str(first), str(second), "--agent", "codex")
+    untriaged = curate_voice(capsys, "narrow", "untriaged", 1)
+    assert untriaged["triage"]["variety"]["untriaged"] == 2
+    assert len(untriaged["triage_warnings"]) == 1
+    assert "Untriaged sessions: 2 of 2" in untriaged["triage_warnings"][0]
+    assert "collect triage SELECTION" in untriaged["triage_warnings"][0]
+    assert (
+        invoke(capsys, "voice", "inspect", "untriaged")["triage_warnings"]
+        == (untriaged["triage_warnings"])
+    )
+    revision = untriaged["revision"]
+    for identifier in invoke(capsys, "collect", "selection", "narrow")["selection"]["session_ids"]:
+        revision = invoke(
+            capsys,
+            "collect",
+            "triage",
+            "narrow",
+            "--session",
+            identifier,
+            "--kind",
+            "bugfix",
+            "--grade",
+            "easy",
+            "--decision",
+            "chosen",
+            "--reason",
+            "A short bug hunt in the same repository.",
+            "--expect-revision",
+            str(revision),
+        )["revision"]
+    narrow = curate_voice(capsys, "narrow", "one-kind", revision)
+    assert narrow["triage"]["variety"]["kinds"] == {"bugfix_easy": 2}
+    assert narrow["triage"]["variety"]["repositories"] == {"/repos/alpha": 2}
+    assert narrow["triage"]["variety"]["varied"] is False
+    assert len(narrow["triage_warnings"]) == 1
+    warning = narrow["triage_warnings"][0]
+    assert "Chosen sessions lack variety: 2 chosen" in warning
+    assert "bugfix_easy: 2" in warning and "/repos/alpha: 2" in warning
+    assert len(narrow["warnings"]) == 1
+    assert "below threshold" in narrow["warnings"][0]
+    assert (
+        invoke(capsys, "voice", "inspect", "one-kind")["triage_warnings"]
+        == narrow["triage_warnings"]
+    )
+
+
+def test_voice_delete_frees_the_name_and_keeps_the_frozen_persona(
+    authoring_workspace, tmp_path, capsys
+):
+    source = tmp_path / "source.jsonl"
+    write_codex_log(source, FEATURE_TEXTS, cwd="/repos/alpha")
+    invoke(capsys, "collect", "select", "chosen", str(source), "--agent", "codex")
+    created = curate_voice(capsys, "chosen", "mistake", 1)
+    assert main(["voice", "delete", "absent", "--expect-revision", "2", "--json"]) == 2
+    assert "Unknown voice" in json.loads(capsys.readouterr().err)["error"]["message"]
+    assert main(["voice", "delete", "mistake", "--expect-revision", "1", "--json"]) == 1
+    assert json.loads(capsys.readouterr().err)["error"]["code"] == "conflict"
+    assert invoke(capsys, "voice", "list")["voices"][0]["name"] == "mistake"
+    removed = invoke(capsys, "voice", "delete", "mistake", "--expect-revision", "2")
+    assert removed == {
+        "revision": 3,
+        "name": "mistake",
+        "id": created["id"],
+        "deleted": True,
+        "next": removed["next"],
+    }
+    assert created["id"] in removed["next"]
+    assert "frozen persona object" in removed["next"]
+    assert invoke(capsys, "voice", "list")["voices"] == []
+    assert main(["voice", "inspect", "mistake", "--json"]) == 2
+    assert "Unknown voice" in json.loads(capsys.readouterr().err)["error"]["message"]
+    assert invoke(capsys, "persona", "inspect", created["id"])["persona"]["name"] == "mistake"
+    again = curate_voice(capsys, "chosen", "mistake", 3)
+    assert again["id"] == created["id"]
+    assert invoke(capsys, "voice", "list")["voices"][0]["name"] == "mistake"

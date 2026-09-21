@@ -16,6 +16,103 @@ user-role excerpts, safe policies and a curator safety review. Legacy Personas
 remain compatible. Source session membership is curator provenance, not a new
 runtime dependency for portable cases/personas.
 
+Voice names default to `default`, which `resolve_voice_name` hands out only while
+it is free; afterwards an explicit name is required. `voice_evidence` classifies
+every user-role event in the selection by stripping the harness wrapper shapes the
+curation flow already recognizes — `user_instructions`/AGENTS.md instruction
+blocks, `environment_context`, `skill`, command wrappers and system reminders.
+An event whose remainder is conversational is genuine; one that is entirely
+wrapper is harness-injected with its reasons recorded; an empty remainder or an
+unrecognized markup block is unclassified rather than guessed. The resulting
+`VoiceEvidence` counts every class, lists bounded genuine candidates with lengths
+and previews, breaks the same counts down per selected session in `sessions`, and
+states sufficiency against `VOICE_EVIDENCE_THRESHOLD` genuine messages.
+
+`classified_user_events` yields each user-role event with its classification, its
+wrapper reasons and its conversational remainder; `user_message_profile` folds one
+session's events into a `UserMessageProfile` of the three counts plus
+`genuine_characters` and the lower-median `median_genuine_characters` of the
+genuine remainders. `voice_evidence` accumulates the same profile per session and
+publishes it as a `SessionEvidence` carrying its `session_id`, so the aggregate
+counts are sums of the per-session measurements rather than a separate tally. The
+per-session tuple stays optional on `VoiceEvidence` so version-1 voice records
+written before it still parse; when present, its counts must total the aggregate
+ones and name each session once. A `UserMessageProfile` cannot report characters
+without a genuine message, and its median cannot exceed its total.
+
+`create_voice` recomputes the evidence from the selection instead of trusting the
+draft and stores it on the immutable voice record, so counts are measurements the
+catalog can contradict rather than model prose. It recomputes `triage_evidence`
+the same way and stores it beside the evidence, so a voice carries its sampling
+frame as well as its surviving excerpts.
+
+`delete_voice` removes one catalog voice entry under the same revision discipline
+as every other mutation and returns the removed record. An unknown name is an
+`InputError`; a stale revision is the usual `ConflictError` from `edit_catalog`.
+Nothing else changes: the frozen persona object is immutable and stays in the
+store, so cases holding its `persona_id` still load and experiments that froze it
+keep their behavior. Deletion frees the name for reuse, which is why the response
+returns the retained `persona_id` — a name no longer identifies one persona across
+time, an object ID still does. Voice records are catalog metadata; immutable
+objects are never deleted by this command.
+
+## Session triage as voice provenance
+
+A voice used to record only the excerpts that survived, which made sampling bias
+invisible: three bugfix sessions from one repository looked like a balanced base.
+Triage records the frame. `TriageDecision` carries `session_id`, `kind`, an
+optional `grade`, `chosen` and a `reason`; its `category` property collapses the
+pair into one of the eight vocabulary labels (`config_change`, `feature_small`,
+`feature_medium`, `feature_large`, `bugfix_easy`, `bugfix_medium`, `bugfix_hard`,
+`extraneous`). Kind plus graded scale is the persisted shape rather than one flat
+enum of eight, because the size/difficulty axis belongs to the kind: a validator
+requires a grade exactly when the kind has a scale and rejects a grade from the
+other kind's scale, so the eight valid pairs are exactly the vocabulary and no
+invalid pair can be written. `category` keeps the flat label available for
+distributions without parsing names back apart. `mining.triage_decision` raises the
+same rules as an `InputError` before the model sees them, because the CLI
+validation message deliberately omits model-validator text.
+
+`SelectionTriage` holds one decision per session, keyed by session ID under the
+selection's name, so the catalog's existing key-matches-name and known-selection
+checks cover it. Triage attaches to a selection because a selection is the only
+thing that pins an immutable examined membership; `record_triage` refuses a session
+outside it and replaces one decision at a checked revision while preserving the
+rest. Selection membership stays immutable: triage records a judgement about the
+sessions, never a change to them.
+
+`triage_evidence` folds the recorded decisions against the selection into a
+`TriageEvidence`: `entries` in selection order, each with the session's
+`repository` — its recorded `cwd`, the same metadata `collect metadata --key cwd`
+pages, with no resolution to a repository root — the `untriaged` remainder, and a
+`TriageVariety`. Variety is computed over the **chosen** sessions only: the `kinds`
+distribution, the `repositories` spread with `unknown_repositories` for chosen
+sessions whose log recorded no `cwd`, and a `varied` flag that is true only when
+the chosen sessions span more than one kind *and* more than one repository, since
+either axis alone still describes one slice of work. Both models check their own
+arithmetic the way `VoiceEvidence` does: the counts must total the selection, the
+distributions must total the chosen sessions, `varied` must follow the spread, and
+each session may appear once. `TriageEvidence` stays optional on `VoiceRecord`, so
+version-1 records written before triage still parse.
+
+Sampling warnings are CLI presentation, next to the existing below-threshold one:
+`mining_cli._triage_warnings` reports untriaged sessions, a triaged set with
+nothing chosen, and a chosen set that is not varied. They travel in a separate
+`triage_warnings` response field rather than in `warnings`, which keeps the
+existing evidence-warning contract unchanged. Neither `voice create` nor
+`collect triage` refuses for thin or lopsided sampling; a curator may proceed
+knowingly, and the persisted triage keeps the frame readable afterwards.
+
+`collect scan` reports the same `UserMessageProfile` per discovered log under
+`user_messages`, computed from the session it already parsed, and orders the
+scanned sessions by descending genuine count and then descending genuine
+characters. Classification adds regex passes over user-event text only, inside
+the existing `ImportLimits` bounds, so a scan still reads each file once and
+gains no new filesystem work. No composite score is published: the curator reads
+the measured components and chooses. A selection normally spans several sessions;
+the per-session evidence exists so thin coverage is visible instead of averaged
+away.
+
 `collect metadata SELECTION --session ID` reads bounded serialized session metadata
 with selected-membership checks. `--key` targets a top-level value such as `cwd` or
 `git`; a missing key is an error. Character offsets, total length, next offset and

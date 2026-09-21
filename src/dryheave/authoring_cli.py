@@ -13,6 +13,7 @@ from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.logs import claude, codex
 from dryheave.logs.base import ImportLimits, Session, candidates, discover
 from dryheave.logs.service import import_session
+from dryheave.mining import user_message_profile
 from dryheave.mining_cli import register_mining, register_mining_collection
 from dryheave.models import AgentKind, ObjectKind, StrictModel
 from dryheave.personas import Persona, freeze_persona, load_frozen_persona
@@ -38,22 +39,28 @@ def _limits(args: argparse.Namespace) -> ImportLimits:
 def _scan(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]:
     limits = _limits(args)
     parser = codex.parse if args.agent == "codex" else claude.parse
-    found: list[JsonValue] = []
+    ranked: list[tuple[tuple[int, int, str], JsonValue]] = []
     for path in discover(args.root, limits):
         session = parser(path, limits)
-        found.append(
-            {
-                "path": str(path),
-                "source_id": session.source_id,
-                "source_version": session.source_version,
-                "events": len(session.events),
-                "warnings": [item.model_dump(mode="json") for item in session.warnings],
-                "candidates": [item.model_dump(mode="json") for item in candidates(session)],
-            }
+        profile = user_message_profile(session)
+        ranked.append(
+            (
+                (-profile.genuine, -profile.genuine_characters, str(path)),
+                {
+                    "path": str(path),
+                    "source_id": session.source_id,
+                    "source_version": session.source_version,
+                    "events": len(session.events),
+                    "user_messages": profile.model_dump(mode="json"),
+                    "warnings": [item.model_dump(mode="json") for item in session.warnings],
+                    "candidates": [item.model_dump(mode="json") for item in candidates(session)],
+                },
+            )
         )
     return {
-        "sessions": found,
-        "next": "Import a selected log with collect import PATH --agent AGENT.",
+        "sessions": [session for _, session in sorted(ranked, key=lambda item: item[0])],
+        "ranking": "Sessions are ordered by genuine user messages, then by their total genuine characters; short filler such as continue leaves a session near the bottom.",
+        "next": "Select several varied sessions with collect select NAME FILE [FILE ...] --agent AGENT; one session rarely holds enough genuine user writing for a voice. A single log can still be imported with collect import PATH --agent AGENT.",
     }
 
 

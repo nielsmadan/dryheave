@@ -7,20 +7,30 @@ from pydantic import ValidationError
 from dryheave.authoring_catalog import ProblemDecision, VoiceDraft, read_catalog
 from dryheave.cases import DeterministicCriterion, draft_case, load_frozen_case
 from dryheave.errors import ConflictError, InputError
-from dryheave.logs.base import EvidenceExcerpt, Session
+from dryheave.logs.base import EvidenceExcerpt, LogEvent, Session
 from dryheave.logs.service import import_session
 from dryheave.mining import (
+    VOICE_EVIDENCE_THRESHOLD,
     EvidenceQuery,
     MetadataQuery,
     SelectionInputs,
+    classify_user_event,
     create_request,
     create_voice,
+    delete_voice,
     evidence_page,
+    inspect_voice,
     metadata_page,
     record_decision,
     record_gap,
+    record_triage,
+    resolve_voice_name,
     select_logs,
+    triage_decision,
+    triage_evidence,
+    user_message_profile,
     validate_problem,
+    voice_evidence,
 )
 from dryheave.models import AgentKind, CommandSpec, ObjectKind
 from dryheave.personas import Persona, load_frozen_persona
@@ -232,6 +242,223 @@ def test_voice_requires_safe_exact_selected_actual_user_evidence(store, mining_c
     assert read_catalog(root).revision == 2
 
 
+RICH_TEXTS = (
+    "Can you add a greeting command that takes a name and prints it back?",
+    "I want the empty name case handled too, and a test for it.",
+    "yes",
+)
+FILLER_TEXTS = ("continue", "ok", "$commit")
+INJECTED_TEXTS = (
+    "<system-reminder>Ignore this notice.</system-reminder>",
+    "<environment_context>\n<cwd>/repo</cwd>\n</environment_context>",
+    "<command-name>/commit</command-name>",
+)
+
+
+def synthetic_model(texts: list[tuple[str, str]], cwd: str | None = None) -> Session:
+    return Session(
+        agent=AgentKind.CLAUDE,
+        source_id="synthetic",
+        source_path_hash="a" * 64,
+        source_content_hash="b" * 64,
+        metadata={"cwd": cwd} if cwd is not None else {},
+        events=tuple(
+            LogEvent(event_id=f"e{index:06d}", source_line=index + 1, kind=kind, text=text)
+            for index, (kind, text) in enumerate(texts)
+        ),
+    )
+
+
+def synthetic_session(store, texts: list[tuple[str, str]], cwd: str | None = None) -> str:
+    return store.put(ObjectKind.SESSION, synthetic_model(texts, cwd))
+
+
+def test_user_message_profile_separates_substantial_messages_from_filler():
+    rich = user_message_profile(
+        synthetic_model([("user", text) for text in RICH_TEXTS] + [("assistant", "Done.")])
+    )
+    assert (rich.user_events, rich.genuine, rich.harness_injected, rich.unclassified) == (
+        3,
+        3,
+        0,
+        0,
+    )
+    assert rich.genuine_characters == 129
+    assert rich.median_genuine_characters == 58
+    filler = user_message_profile(synthetic_model([("user", text) for text in FILLER_TEXTS]))
+    assert filler.genuine == 3
+    assert filler.genuine_characters == 17
+    assert filler.median_genuine_characters == 7
+    injected = user_message_profile(synthetic_model([("user", text) for text in INJECTED_TEXTS]))
+    assert (injected.user_events, injected.genuine, injected.harness_injected) == (3, 0, 3)
+    assert (injected.genuine_characters, injected.median_genuine_characters) == (0, 0)
+
+
+def test_voice_evidence_breaks_down_genuine_messages_per_selected_session(store, tmp_path):
+    root = tmp_path / "authoring"
+    root.mkdir()
+    rich = synthetic_session(store, [("user", text) for text in RICH_TEXTS])
+    thin = synthetic_session(
+        store,
+        [
+            ("user", "continue"),
+            ("user", "<system-reminder>noise</system-reminder>"),
+            ("user", "<mystery-block>unknown harness shape</mystery-block>"),
+        ],
+    )
+    silent = synthetic_session(store, [("assistant", "Nothing was asked.")])
+    catalog = select_logs(
+        store,
+        root,
+        "varied",
+        SelectionInputs(sessions=(rich, thin, silent)),
+        expected_revision=0,
+    )
+    selection = catalog.selections["varied"]
+    evidence = voice_evidence(store, selection)
+    assert [item.session_id for item in evidence.sessions] == list(selection.session_ids)
+    breakdown = {item.session_id: item for item in evidence.sessions}
+    assert (breakdown[rich].genuine, breakdown[rich].genuine_characters) == (3, 129)
+    assert breakdown[rich].median_genuine_characters == 58
+    assert (breakdown[thin].genuine, breakdown[thin].harness_injected) == (1, 1)
+    assert (breakdown[thin].unclassified, breakdown[thin].genuine_characters) == (1, 8)
+    assert (breakdown[silent].user_events, breakdown[silent].genuine) == (0, 0)
+    assert evidence.genuine == 4
+    assert evidence.user_events == 6
+    assert evidence.harness_injected == 1
+    assert evidence.unclassified == 1
+    assert evidence.sufficient is False
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Add a greeting command.", ("genuine", (), "Add a greeting command.")),
+        (
+            "<div> should be block-level, right?",
+            ("genuine", (), "<div> should be block-level, right?"),
+        ),
+        ("<skill>name: helper</skill>", ("harness_injected", ("skill_wrapper",), "")),
+        ("<system-reminder>truncated block", ("harness_injected", ("system_reminder",), "")),
+        (
+            "Contents of /repo/AGENTS.md (project instructions)\nRules follow.",
+            ("harness_injected", ("agents_instructions",), ""),
+        ),
+        (
+            "<local-command-stdout>output</local-command-stdout>",
+            ("harness_injected", ("command_wrapper",), ""),
+        ),
+        ("<mystery-block>unknown</mystery-block>", ("unclassified", ("unrecognized_wrapper",), "")),
+        ("   ", ("unclassified", (), "")),
+    ],
+)
+def test_user_event_classification_names_the_recognized_wrapper(text, expected):
+    assert classify_user_event(text) == expected
+
+
+def test_voice_evidence_measures_harness_injection_against_a_stated_threshold(store, tmp_path):
+    root = tmp_path / "authoring"
+    root.mkdir()
+    session_id = synthetic_session(
+        store,
+        [
+            ("user", "Add a greeting command."),
+            ("user", "<system-reminder>Ignore this notice.</system-reminder>"),
+            ("user", "<environment_context>\n<cwd>/repo</cwd>\n</environment_context>"),
+            ("assistant", "Which punctuation?"),
+            ("user", "<command-name>/commit</command-name><command-args></command-args>"),
+            ("user", "<system-reminder>noise</system-reminder>\n  Fix   empty names.  "),
+            ("user", "<mystery-block>unknown harness shape</mystery-block>"),
+            ("user", "continue"),
+        ],
+    )
+    catalog = select_logs(
+        store, root, "mixed", SelectionInputs(sessions=(session_id,)), expected_revision=0
+    )
+    evidence = voice_evidence(store, catalog.selections["mixed"])
+    assert evidence.threshold == VOICE_EVIDENCE_THRESHOLD
+    assert evidence.user_events == 7
+    assert evidence.genuine == 3
+    assert evidence.harness_injected == 3
+    assert evidence.unclassified == 1
+    assert evidence.sufficient is False
+    assert evidence.truncated is False
+    assert [(item.event_id, item.classification, item.reasons) for item in evidence.excluded] == [
+        ("e000001", "harness_injected", ("system_reminder",)),
+        ("e000002", "harness_injected", ("environment_context",)),
+        ("e000004", "harness_injected", ("command_wrapper",)),
+        ("e000006", "unclassified", ("unrecognized_wrapper",)),
+    ]
+    assert [(item.event_id, item.characters, item.preview) for item in evidence.candidates] == [
+        ("e000000", 23, "Add a greeting command."),
+        ("e000005", 18, "Fix empty names."),
+        ("e000007", 8, "continue"),
+    ]
+    assert all(item.session_id == session_id for item in evidence.candidates)
+
+
+def test_voice_evidence_calls_a_selection_sufficient_only_at_the_threshold(store, tmp_path):
+    root = tmp_path / "authoring"
+    root.mkdir()
+    revision = 0
+    for count in (VOICE_EVIDENCE_THRESHOLD - 1, VOICE_EVIDENCE_THRESHOLD):
+        session_id = synthetic_session(
+            store, [("user", f"Message number {index}.") for index in range(count)]
+        )
+        catalog = select_logs(
+            store,
+            root,
+            f"selection{count}",
+            SelectionInputs(sessions=(session_id,)),
+            expected_revision=revision,
+        )
+        revision = catalog.revision
+        evidence = voice_evidence(store, catalog.selections[f"selection{count}"])
+        assert evidence.genuine == count
+        assert evidence.sufficient is (count >= VOICE_EVIDENCE_THRESHOLD)
+
+
+def test_voice_record_persists_computed_evidence_for_later_inspection(store, mining_context):
+    root, selection, _, persona, _ = mining_context
+    draft = VoiceDraft(
+        selection_id=selection.identifier,
+        persona=persona,
+        safety_review="Reviewed exact user wording for safe style only.",
+    )
+    catalog = create_voice(store, root, "voice", draft, expected_revision=2)
+    evidence = catalog.voices["voice"].evidence
+    assert evidence == voice_evidence(store, selection)
+    assert evidence is not None
+    assert evidence.user_events == 3
+    assert evidence.genuine == 3
+    assert evidence.sufficient is False
+    assert read_catalog(root).voices["voice"].evidence == evidence
+    reported = inspect_voice(store, read_catalog(root), "voice")["evidence"]
+    assert reported == evidence.model_dump(mode="json")
+
+
+def test_default_voice_name_is_used_once_and_then_demands_an_explicit_name(store, mining_context):
+    root, selection, _, persona, _ = mining_context
+    assert resolve_voice_name(read_catalog(root), None) == "default"
+    assert resolve_voice_name(read_catalog(root), "chosen-name") == "chosen-name"
+    create_voice(
+        store,
+        root,
+        resolve_voice_name(read_catalog(root), None),
+        VoiceDraft(
+            selection_id=selection.identifier,
+            persona=persona,
+            safety_review="Reviewed exact user wording for safe style only.",
+        ),
+        expected_revision=2,
+    )
+    catalog = read_catalog(root)
+    assert "default" in catalog.voices
+    with pytest.raises(InputError, match="name this voice explicitly"):
+        resolve_voice_name(catalog, None)
+    assert resolve_voice_name(catalog, "second") == "second"
+
+
 def test_voice_freezes_compatible_persona_and_preserves_names(store, mining_context):
     root, selection, _, persona, _ = mining_context
     draft = VoiceDraft(
@@ -439,3 +666,248 @@ def test_micro_request_accepts_only_one_supported_candidate(store, drafted_probl
             expected_revision=5,
         )
     assert list(read_catalog(root).requests["micro"].decisions) == [decision.name]
+
+
+TRIAGED_TEXTS = (
+    ("user", "Please add a greeting command that takes a name."),
+    ("user", "Handle the empty name case too, with a test."),
+)
+
+
+def triaged_selection(store, root, name, sessions, *, expected_revision):
+    return select_logs(
+        store,
+        root,
+        name,
+        SelectionInputs(sessions=tuple(sessions)),
+        expected_revision=expected_revision,
+    ).selections[name]
+
+
+def test_voice_delete_removes_only_the_catalog_entry_and_frees_its_name(store, mining_context):
+    root, selection, _, persona, _ = mining_context
+    draft = VoiceDraft(
+        selection_id=selection.identifier,
+        persona=persona,
+        safety_review="Reviewed exact user wording for safe style only.",
+    )
+    catalog = create_voice(store, root, "voice", draft, expected_revision=2)
+    persona_id = catalog.voices["voice"].persona_id
+    catalog, removed = delete_voice(root, "voice", expected_revision=3)
+    assert removed.persona_id == persona_id
+    assert catalog.voices == {}
+    assert read_catalog(root).voices == {}
+    assert read_catalog(root).revision == 4
+    assert load_frozen_persona(store, persona_id) == persona
+    again = create_voice(store, root, "voice", draft, expected_revision=4)
+    assert again.voices["voice"].persona_id == persona_id
+
+
+def test_voice_delete_refuses_an_unknown_name_and_a_stale_revision(store, mining_context):
+    root, selection, _, persona, _ = mining_context
+    create_voice(
+        store,
+        root,
+        "voice",
+        VoiceDraft(
+            selection_id=selection.identifier,
+            persona=persona,
+            safety_review="Reviewed exact user wording for safe style only.",
+        ),
+        expected_revision=2,
+    )
+    with pytest.raises(InputError, match="Unknown voice"):
+        delete_voice(root, "absent", expected_revision=3)
+    with pytest.raises(ConflictError, match="expected 2"):
+        delete_voice(root, "voice", expected_revision=2)
+    assert list(read_catalog(root).voices) == ["voice"]
+    assert read_catalog(root).revision == 3
+
+
+def test_triage_decision_requires_the_grade_scale_of_its_own_kind():
+    decision = triage_decision(
+        "a" * 64, "bugfix", "hard", chosen=True, reason="A long debugging session."
+    )
+    assert decision.category == "bugfix_hard"
+    assert triage_decision(
+        "a" * 64, "config_change", None, chosen=False, reason="Config"
+    ).category == ("config_change")
+    with pytest.raises(InputError, match="easy/medium/hard"):
+        triage_decision("a" * 64, "bugfix", "large", chosen=True, reason="Wrong scale.")
+    with pytest.raises(InputError, match="needs --grade"):
+        triage_decision("a" * 64, "feature", None, chosen=True, reason="No grade.")
+    with pytest.raises(InputError, match="carries no grade"):
+        triage_decision("a" * 64, "extraneous", "small", chosen=False, reason="Graded nothing.")
+
+
+def test_triage_records_one_decision_per_session_at_a_checked_revision(store, tmp_path):
+    root = tmp_path / "authoring"
+    root.mkdir()
+    first = synthetic_session(store, list(TRIAGED_TEXTS), "/repos/alpha")
+    second = synthetic_session(
+        store, [("user", "Why does the parser drop the flag?")], "/repos/beta"
+    )
+    selection = triaged_selection(store, root, "work", (first, second), expected_revision=0)
+    outside = synthetic_session(store, [("user", "Unrelated work.")])
+    catalog = record_triage(
+        store,
+        root,
+        "work",
+        triage_decision(first, "feature", "medium", chosen=True, reason="A two-turn feature."),
+        expected_revision=1,
+    )
+    assert catalog.triage["work"].selection_id == selection.identifier
+    assert catalog.triage["work"].decisions[first].category == "feature_medium"
+    catalog = record_triage(
+        store,
+        root,
+        "work",
+        triage_decision(first, "feature", "large", chosen=False, reason="Reread: far too broad."),
+        expected_revision=2,
+    )
+    assert catalog.triage["work"].decisions[first].chosen is False
+    assert catalog.triage["work"].decisions[first].grade == "large"
+    with pytest.raises(ConflictError, match="expected 1"):
+        record_triage(
+            store,
+            root,
+            "work",
+            triage_decision(second, "bugfix", "easy", chosen=True, reason="Short bug hunt."),
+            expected_revision=1,
+        )
+    with pytest.raises(InputError, match="outside the selected"):
+        record_triage(
+            store,
+            root,
+            "work",
+            triage_decision(outside, "bugfix", "easy", chosen=True, reason="Not selected."),
+            expected_revision=3,
+        )
+    assert list(read_catalog(root).triage["work"].decisions) == [first]
+    assert read_catalog(root).revision == 3
+
+
+def test_triage_evidence_reports_chosen_kinds_and_repository_spread(store, tmp_path):
+    root = tmp_path / "authoring"
+    root.mkdir()
+    feature = synthetic_session(store, list(TRIAGED_TEXTS), "/repos/alpha")
+    bug = synthetic_session(store, [("user", "The parser drops the trailing flag.")])
+    config = synthetic_session(store, [("user", "Bump the linter settings.")], "/repos/beta")
+    untriaged = synthetic_session(
+        store, [("user", "Anything else worth doing here?")], "/repos/beta"
+    )
+    selection = triaged_selection(
+        store, root, "work", (feature, bug, config, untriaged), expected_revision=0
+    )
+    revision = 1
+    for session_id, kind, grade, chosen, reason in (
+        (feature, "feature", "medium", True, "A two-turn feature request."),
+        (bug, "bugfix", "easy", True, "A short bug hunt with no recorded cwd."),
+        (config, "config_change", None, False, "Only a settings edit; no conversation."),
+    ):
+        revision = record_triage(
+            store,
+            root,
+            "work",
+            triage_decision(session_id, kind, grade, chosen=chosen, reason=reason),
+            expected_revision=revision,
+        ).revision
+    triage = triage_evidence(store, read_catalog(root), selection)
+    assert [item.session_id for item in triage.entries] == [
+        item for item in selection.session_ids if item != untriaged
+    ]
+    assert triage.untriaged == (untriaged,)
+    assert {item.session_id: item.repository for item in triage.entries} == {
+        feature: "/repos/alpha",
+        bug: None,
+        config: "/repos/beta",
+    }
+    variety = triage.variety
+    assert (variety.sessions, variety.triaged, variety.untriaged) == (4, 3, 1)
+    assert (variety.chosen, variety.rejected) == (2, 1)
+    assert variety.kinds == {"feature_medium": 1, "bugfix_easy": 1}
+    assert variety.repositories == {"/repos/alpha": 1}
+    assert variety.unknown_repositories == 1
+    assert variety.varied is True
+
+
+def test_triage_evidence_calls_one_kind_or_one_repository_unvaried(store, tmp_path):
+    root = tmp_path / "authoring"
+    root.mkdir()
+    first = synthetic_session(store, list(TRIAGED_TEXTS), "/repos/alpha")
+    second = synthetic_session(
+        store, [("user", "Another bug in the same repository.")], "/repos/alpha"
+    )
+    selection = triaged_selection(store, root, "narrow", (first, second), expected_revision=0)
+    revision = 1
+    for session_id, kind in ((first, "bugfix"), (second, "bugfix")):
+        revision = record_triage(
+            store,
+            root,
+            "narrow",
+            triage_decision(session_id, kind, "easy", chosen=True, reason="A short bug hunt."),
+            expected_revision=revision,
+        ).revision
+    variety = triage_evidence(store, read_catalog(root), selection).variety
+    assert variety.kinds == {"bugfix_easy": 2}
+    assert variety.repositories == {"/repos/alpha": 2}
+    assert variety.varied is False
+    revision = record_triage(
+        store,
+        root,
+        "narrow",
+        triage_decision(second, "feature", "small", chosen=True, reason="A small feature."),
+        expected_revision=revision,
+    ).revision
+    variety = triage_evidence(store, read_catalog(root), selection).variety
+    assert variety.kinds == {"bugfix_easy": 1, "feature_small": 1}
+    assert variety.repositories == {"/repos/alpha": 2}
+    assert variety.varied is False
+
+
+def test_voice_record_persists_the_triage_folded_from_its_selection(store, tmp_path):
+    root = tmp_path / "authoring"
+    root.mkdir()
+    session_id = synthetic_session(store, list(TRIAGED_TEXTS), "/repos/alpha")
+    selection = triaged_selection(store, root, "work", (session_id,), expected_revision=0)
+    session = store.load(session_id, Session, kind=ObjectKind.SESSION)
+    excerpt = EvidenceExcerpt(
+        session_id=session_id,
+        event_id=session.events[0].event_id,
+        visibility="subject",
+        excerpt=session.events[0].text,
+    )
+    persona = Persona(
+        name="Triaged voice",
+        instructions="Answer directly.",
+        disclosure_policy="Use approved case facts only.",
+        unknown_answer_policy="Say when unknown.",
+        examples=(excerpt,),
+        reviewed_subject_safe=True,
+    )
+    draft = VoiceDraft(
+        selection_id=selection.identifier,
+        persona=persona,
+        safety_review="Reviewed exact user wording for safe style only.",
+    )
+    untriaged = create_voice(store, root, "before", draft, expected_revision=1)
+    assert untriaged.voices["before"].triage is not None
+    assert untriaged.voices["before"].triage.untriaged == (session_id,)
+    record_triage(
+        store,
+        root,
+        "work",
+        triage_decision(session_id, "feature", "medium", chosen=True, reason="A two-turn feature."),
+        expected_revision=2,
+    )
+    catalog = create_voice(store, root, "after", draft, expected_revision=3)
+    triage = catalog.voices["after"].triage
+    assert triage is not None
+    assert triage == triage_evidence(store, catalog, selection)
+    assert triage.entries[0].repository == "/repos/alpha"
+    assert triage.variety.kinds == {"feature_medium": 1}
+    assert triage.variety.varied is False
+    assert read_catalog(root).voices["after"].triage == triage
+    assert inspect_voice(store, read_catalog(root), "after")["triage"] == triage.model_dump(
+        mode="json"
+    )

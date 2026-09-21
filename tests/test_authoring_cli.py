@@ -121,3 +121,71 @@ def test_case_cli_freeze_and_inspect(
     identifier = json.loads(capsys.readouterr().out)["data"]["id"]
     assert main([*common, "case", "inspect", identifier]) == 0
     assert json.loads(capsys.readouterr().out)["data"]["case"]["intent_confirmed"] is True
+
+
+RICH_TEXTS = (
+    "Can you add a greeting command that takes a name and prints it back?",
+    "I want the empty name case handled too, and a test for it.",
+    "yes",
+)
+FILLER_TEXTS = ("continue", "ok", "$commit")
+INJECTED_TEXTS = (
+    "<system-reminder>Ignore this notice.</system-reminder>",
+    "<environment_context>\n<cwd>/repo</cwd>\n</environment_context>",
+    "<command-name>/commit</command-name>",
+)
+
+
+def write_codex_log(path: Path, texts: tuple[str, ...]) -> None:
+    path.write_text(
+        "".join(
+            json.dumps({"type": "event_msg", "payload": {"type": "user_message", "message": text}})
+            + "\n"
+            for text in texts
+        )
+    )
+
+
+def test_scan_reports_conversational_signal_and_ranks_richer_sessions(tmp_path, capsys) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_codex_log(logs / "a-filler.jsonl", FILLER_TEXTS)
+    write_codex_log(logs / "b-injected.jsonl", INJECTED_TEXTS)
+    write_codex_log(logs / "c-rich.jsonl", RICH_TEXTS)
+    assert (
+        main(
+            [
+                "--store",
+                str(tmp_path / "store"),
+                "--json",
+                "collect",
+                "scan",
+                "--agent",
+                "codex",
+                "--root",
+                str(logs),
+            ]
+        )
+        == 0
+    )
+    scanned = json.loads(capsys.readouterr().out)["data"]
+    assert [Path(item["path"]).name for item in scanned["sessions"]] == [
+        "c-rich.jsonl",
+        "a-filler.jsonl",
+        "b-injected.jsonl",
+    ]
+    rich, filler, injected = (item["user_messages"] for item in scanned["sessions"])
+    assert rich == {
+        "user_events": 3,
+        "genuine": 3,
+        "harness_injected": 0,
+        "unclassified": 0,
+        "genuine_characters": 129,
+        "median_genuine_characters": 58,
+    }
+    assert (filler["genuine"], filler["genuine_characters"]) == (3, 17)
+    assert filler["median_genuine_characters"] == 7
+    assert (injected["genuine"], injected["harness_injected"]) == (0, 3)
+    assert injected["genuine_characters"] == 0
+    assert "genuine user messages" in scanned["ranking"]
+    assert "collect select NAME FILE [FILE ...]" in scanned["next"]

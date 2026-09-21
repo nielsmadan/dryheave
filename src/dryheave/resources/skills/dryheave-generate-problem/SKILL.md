@@ -53,7 +53,13 @@ description: Mine and curate supported Dryheave benchmark problems from explicit
    candidate. Record missing coverage with `problem gap REQUEST "REASON" --expect-revision REVISION`.
    Return no result when sources do not support a task. Never fill gaps with
    fabricated provenance, prompts or baselines.
-5. Use `dryheave-voice-profile` for a reviewed selected-log voice. Create a case
+5. Use `dryheave-voice-profile` for a reviewed selected-log voice. Resolve the
+   voice by name, never by a pasted ID: run `dryheave voice inspect default --json`
+   when the user names no voice, or `voice inspect NAME --json` when they name one.
+   Take `data.id` as the `persona_id`. `voice list --json` recovers existing names
+   if `default` is absent. Read `data.evidence`: when `sufficient` is false, report
+   `genuine` against `threshold` alongside the case rather than presenting the
+   voice as characterized. Create a case
    draft through `case draft SESSION_ID --repo SOURCE_REPO --commit FULL_SHA --start START --end END --out PATH`.
    Add `--initial-patch PATH` only for verified historical dirty state. Store
    curator drafts and hidden files under the workspace authoring directory.
@@ -61,7 +67,7 @@ description: Mine and curate supported Dryheave benchmark problems from explicit
    `real-workflow.md` (`example write --target FRESH_DIRECTORY`). Ordinary users
    describe preferences and review the result; they need no hand-authored JSON.
 6. Curate title, prompt, safe facts and substantive hidden criteria. Set
-   `persona: null` and the selected voice `persona_id`. Keep all case/fact excerpts
+   `persona: null` and the resolved voice's `persona_id`. Keep all case/fact excerpts
    inside this candidate's source range. Hide future solution, tests, reference
    fixes and grading internals. Resolve issues before setting review flags.
    Deterministic checks need trusted hidden entrypoints, bounded argv, success and
