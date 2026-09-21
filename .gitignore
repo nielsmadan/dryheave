@@ -1,5 +1,6 @@
 .venv/
-.cache/
+.cache/*
+!.cache/.gitkeep
 .tools/
 .dryheave/
 __pycache__/
