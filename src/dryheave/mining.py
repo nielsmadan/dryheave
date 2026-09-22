@@ -79,6 +79,7 @@ HARNESS_WRAPPERS: tuple[tuple[InjectionReason, re.Pattern[str]], ...] = (
 INSTRUCTION_BLOCK = re.compile(
     r"^(?:Contents of \S*(?:AGENTS|CLAUDE)\.md|# (?:AGENTS|CLAUDE)\.md)", re.MULTILINE
 )
+SKILL_BODY = re.compile(r"^Base directory for this skill: \S", re.MULTILINE)
 UNRECOGNIZED_WRAPPER = re.compile(r"<([a-zA-Z][\w.-]*)(?:\s[^>]*)?>.*</\1>", re.DOTALL)
 Classification = Literal["genuine", "harness_injected", "unclassified"]
 
@@ -493,6 +494,11 @@ def classify_user_event(text: str) -> tuple[Classification, tuple[InjectionReaso
         residue = residue[: instructions.start()]
         if "agents_instructions" not in reasons:
             reasons.append("agents_instructions")
+    skill_body = SKILL_BODY.search(residue)
+    if skill_body is not None:
+        residue = residue[: skill_body.start()]
+        if "skill_wrapper" not in reasons:
+            reasons.append("skill_wrapper")
     remainder = residue.strip()
     if remainder and UNRECOGNIZED_WRAPPER.fullmatch(remainder):
         return "unclassified", (*reasons, "unrecognized_wrapper"), ""
