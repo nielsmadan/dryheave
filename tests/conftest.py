@@ -90,6 +90,54 @@ def driver_plan(tmp_path: Path):
     )
 
 
+def survey_repo(root: Path, name: str = "source"):
+    from dryheave.repositories import Git, SnapshotLimits
+
+    repo = root / name
+    repo.mkdir()
+    git = Git(repo, SnapshotLimits())
+    git.environment.update(
+        {
+            "GIT_AUTHOR_NAME": "Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+        }
+    )
+    git.run("init", "--quiet", "--template=", "--initial-branch=main", ".")
+    return git
+
+
+def survey_commit(git, subject: str, files: dict[str, str], body: str = "") -> str:
+    for name, content in files.items():
+        target = git.root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    git.run("add", "-A")
+    git.run("commit", "--quiet", "-m", f"{subject}\n\n{body}" if body else subject)
+    return git.run("rev-parse", "HEAD").stdout.decode().strip()
+
+
+def write_baseline_log(
+    path: Path, baseline: str | None, cwd: str, session_id: str, parent: str | None = None
+) -> None:
+    import json
+
+    payload: dict[str, object] = {"id": session_id, "cwd": cwd, "cli_version": "0.153.4"}
+    if baseline is not None:
+        payload["git"] = {"commit_hash": baseline, "branch": "main"}
+    if parent is not None:
+        payload["parent_thread_id"] = parent
+    path.write_text(
+        json.dumps({"type": "session_meta", "payload": payload})
+        + "\n"
+        + json.dumps(
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "Fix the parser."}}
+        )
+        + "\n"
+    )
+
+
 def build_historical_repo(root: Path) -> tuple[Path, str, str, str]:
     from dryheave.repositories import Git, SnapshotLimits
 

@@ -8,6 +8,8 @@ from pydantic import JsonValue
 from dryheave.calibrations import calibrate_case, load_calibration
 from dryheave.cases import draft_case, freeze_case, load_frozen_case, read_draft, validate_case
 from dryheave.commands import CommandRegistry
+from dryheave.commits import session_baseline
+from dryheave.commits_cli import register_commit_survey
 from dryheave.errors import CancelledError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.logs import claude, codex
@@ -43,6 +45,7 @@ def _scan(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]
     for path in discover(args.root, limits):
         session = parser(path, limits)
         profile = user_message_profile(session)
+        baseline = session_baseline(path, session)
         ranked.append(
             (
                 (-profile.genuine, -profile.genuine_characters, str(path)),
@@ -51,6 +54,8 @@ def _scan(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]
                     "source_id": session.source_id,
                     "source_version": session.source_version,
                     "events": len(session.events),
+                    "cwd": baseline.cwd,
+                    "baseline_commit": baseline.baseline_commit,
                     "user_messages": profile.model_dump(mode="json"),
                     "warnings": [item.model_dump(mode="json") for item in session.warnings],
                     "candidates": [item.model_dump(mode="json") for item in candidates(session)],
@@ -60,6 +65,7 @@ def _scan(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]
     return {
         "sessions": [session for _, session in sorted(ranked, key=lambda item: item[0])],
         "ranking": "Sessions are ordered by genuine user messages, then by their total genuine characters; short filler such as continue leaves a session near the bottom.",
+        "baselines": "Each session reports the working directory and starting commit its log recorded; both are null when the log records neither, and neither is inferred. A commit whose parent equals a recorded baseline_commit was produced from that session's starting state; collect survey --repo PATH joins that way.",
         "next": "Select several varied sessions with collect select NAME FILE [FILE ...] --agent AGENT; one session rarely holds enough genuine user writing for a voice. A single log can still be imported with collect import PATH --agent AGENT.",
     }
 
@@ -203,6 +209,7 @@ def register_authoring(registry: CommandRegistry) -> None:
         else:
             parser.add_argument("path", type=Path)
         registry.handler(parser, handler)
+    register_commit_survey(registry, commands)
     show = commands.add_parser("show")
     show.add_argument("reference")
     registry.handler(show, _show)

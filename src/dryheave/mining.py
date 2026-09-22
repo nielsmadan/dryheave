@@ -44,7 +44,7 @@ from dryheave.authoring_catalog import (
 from dryheave.cases import CaseDraft, freeze_case, read_draft, validate_case
 from dryheave.errors import ConflictError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
-from dryheave.logs.base import EvidenceExcerpt, ImportLimits, LogEvent, Session
+from dryheave.logs.base import EvidenceExcerpt, ImportLimits, LogEvent, Session, recorded_cwd
 from dryheave.logs.service import import_session, verify_evidence
 from dryheave.models import AgentKind, ObjectKind, StrictModel
 from dryheave.personas import freeze_persona, load_frozen_persona
@@ -589,8 +589,7 @@ def voice_evidence(store: ObjectStore, selection: Selection) -> VoiceEvidence:
 
 
 def session_repository(session: Session) -> str | None:
-    value = session.metadata.get("cwd")
-    return value.strip() if isinstance(value, str) and value.strip() else None
+    return recorded_cwd(session)
 
 
 def triage_decision(

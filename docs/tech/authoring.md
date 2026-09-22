@@ -56,6 +56,88 @@ returns the retained `persona_id` — a name no longer identifies one persona ac
 time, an object ID still does. Voice records are catalog metadata; immutable
 objects are never deleted by this command.
 
+## Commit survey and the parent join
+
+`commits.py` surveys a read-only repository and joins its commits back to the sessions
+that produced them; `commits_cli.py` registers `collect survey` and `collect commit`
+under the existing `collect` group, so no domain service registers itself. The join key
+is one recorded fact, not an inference: a Codex `session_meta` carries
+`git.commit_hash`, the repository state when the session started, so for a commit `C`
+produced during that session, `C`'s parent equals the session's recorded baseline.
+`logs.base.recorded_cwd` and `logs.base.recorded_baseline` read those two values and
+return `None` when the log holds neither; `mining.session_repository` now delegates to
+`recorded_cwd` so triage and the survey read one definition. A Claude log records no
+commit hash, so its baseline is always absent rather than guessed. `collect scan`
+reports both values per scanned session, which is what makes a commit matchable without
+a second parse.
+
+Git access is read-only and bounded. The survey reuses `repositories.Git`, so it
+inherits the hardened environment (no system/global config, no hooks, no replace refs,
+`GIT_OPTIONAL_LOCKS=0`) and the `SnapshotLimits` time budget, and it issues only
+`rev-parse` and `log`. One `git log --numstat` call with an `\x1e`/`\x1f` record format
+yields subjects, bodies, parents and per-commit file and line counts together, so
+history costs one process. `--max-commits` bounds it to 1-2,000 commits from HEAD
+(default 200) and `--max-candidates` to 1-50 reported candidates (default 10); both
+bounds are echoed in the response and exceeded bounds raise `LimitError`.
+
+Tier 1 derives the vocabulary instead of assuming `feat|fix|chore`. `_prefix_token`
+takes the token before a `:` delimiter, allowing a conventional-commit scope and `!`,
+lowercases it and folds digit runs to `#`, so `TICKET-123:` and `TICKET-124:` are one
+`ticket-#` member rather than two singletons. `_convention` then requires three things
+together: at least 20 sampled non-merge commits, at least 60% of subjects carrying such
+a token, and the smallest token set covering at least 90% of the prefixed subjects being
+at most 12 tokens. The share threshold is deliberately not near 100%: real histories
+that keep a convention still contain reverts, initial commits and imports, so demanding
+near-total compliance would report "no convention" for repositories that plainly have
+one, while 60% cannot be reached by accidental colons because a token may not contain
+spaces. The 90%-in-12-tokens test is what separates a classifying vocabulary from free
+text: a maintained prefix set is small and closed, so if a long tail is needed to cover
+the prefixed subjects, the token is a subject fragment and no convention is declared.
+`ConventionReport` publishes the measurements, the thresholds and a `reason` naming the
+one that decided the outcome, so the inference can be contradicted rather than trusted.
+
+`_select` applies the tiers in order and stops at the first that yields candidates:
+bug-indicating members of the detected vocabulary, then bug-indicating words anywhere in
+subject or body, then change shape alone. A detected convention with no bug-indicating
+member therefore falls through to tier 2 rather than returning nothing. Every candidate
+carries its `tier` and a `signal` naming what selected it, and the tier 3 note and
+signal both state that ranking by size is no evidence of a bug fix, because that tier
+exists to offer something to read, not to claim a finding.
+
+Merge commits are excluded: a merge records no single starting state, so the parent join
+has no defined key, and `collect commit` refuses one outright. Commits touching only
+documentation or only configuration are excluded as well. That is a deliberate decision,
+not an oversight: a benchmark case needs a behavior change a hidden deterministic
+verifier can execute and a calibration can show failing at the baseline, and a commit
+that only edits Markdown or a settings file leaves nothing to verify. Exclusions are
+counted and listed with their reason in `excluded`, so a documentation-heavy window
+reads as excluded work rather than as an empty repository. Classification is by path
+suffix, filename and documentation directory, and any path outside those classes makes
+the whole commit code.
+
+The join reports rather than asserts. `_matches` returns `unique`, `ambiguous`, `none`,
+`no_parent` or `not_scanned` with a note explaining it, and each match carries the
+session's recorded `cwd`, its `source_id` and `parent_session_id` as the log states
+them, and a lexical `repository_match` of `same`, `inside`, `different` or `unknown`.
+Ambiguity is common and is reported rather than resolved: against a real Codex corpus
+one commit's parent matched three rollout files that were one user session and its two
+subagent threads. Those subagent files repeat the parent thread's `session_meta` last,
+so the existing parser surfaces the parent identity for all three and records its
+`ambiguous_session` warning; the join reports three matches and says the commit cannot
+be attributed to one, instead of picking the newest. The cwd is never a filter: the same repository is routinely
+checked out in several directories, and the verified splashdown case joins a `dev1`
+survey to sessions recorded in `dev2`. Even `unique` is stated as partial, because a
+session records only its starting baseline, so the join identifies that session's first
+task and not the later commits of the same session. Log scanning tolerates individual
+logs that exceed the import bounds or fail to parse: they are skipped, counted in
+`sessions_skipped` and reported with bounded reasons instead of failing a whole corpus
+scan. `collect commit` accepts only an explicit lowercase hexadecimal SHA of at least
+seven characters, so no branch name or `HEAD` can enter, and it hands the resolved
+parent to the unchanged `collect select` / `problem request` pipeline. That parent is
+recorded evidence, not a verified baseline: the existing rule that a case's starting SHA
+is verified against the read-only source repository, and that today's HEAD is never a
+substitute, is unchanged by this path.
+
 ## Session triage as voice provenance
 
 A voice used to record only the excerpts that survived, which made sampling bias

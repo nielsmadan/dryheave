@@ -175,5 +175,15 @@ def candidates(session: Session) -> tuple[Candidate, ...]:
     return tuple(result)
 
 
+def recorded_cwd(session: Session) -> str | None:
+    value = session.metadata.get("cwd")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def recorded_baseline(session: Session) -> str | None:
+    value = mapping(session.metadata.get("git")).get("commit_hash")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def source_hash(path: Path) -> str:
     return digest(str(path.absolute()).encode())

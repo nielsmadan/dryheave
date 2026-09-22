@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import write_baseline_log
 from dryheave.cli import main
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -192,3 +193,40 @@ def test_scan_reports_conversational_signal_and_ranks_richer_sessions(tmp_path, 
     assert injected["genuine_characters"] == 0
     assert "genuine user messages" in scanned["ranking"]
     assert "collect select NAME FILE [FILE ...]" in scanned["next"]
+
+
+def test_scan_reports_the_recorded_cwd_and_baseline_commit_or_marks_them_absent(
+    tmp_path, capsys
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_baseline_log(
+        logs / "a-with-baseline.jsonl", "b" * 40, "/fixture/checkout", "session-with"
+    )
+    write_baseline_log(logs / "b-without-baseline.jsonl", None, "/fixture/other", "session-without")
+    assert (
+        main(
+            [
+                "--store",
+                str(tmp_path / "store"),
+                "--json",
+                "collect",
+                "scan",
+                "--agent",
+                "codex",
+                "--root",
+                str(logs),
+            ]
+        )
+        == 0
+    )
+    scanned = json.loads(capsys.readouterr().out)["data"]
+    recorded = {
+        Path(item["path"]).name: (item["cwd"], item["baseline_commit"])
+        for item in scanned["sessions"]
+    }
+    assert recorded == {
+        "a-with-baseline.jsonl": ("/fixture/checkout", "b" * 40),
+        "b-without-baseline.jsonl": ("/fixture/other", None),
+    }
+    assert "collect survey --repo PATH" in scanned["baselines"]

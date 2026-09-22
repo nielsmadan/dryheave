@@ -24,10 +24,99 @@ genuine characters — so a session of ten `continue` messages sorts below one
 carrying real paragraphs. Nothing is scored for you; the components are
 measurements and the choice stays yours.
 
+Each scanned session also reports the `cwd` and `baseline_commit` its log recorded:
+the working directory Codex wrote into `session_meta`, and the `git.commit_hash` of the
+repository when the session started. Both are `null` when the log records neither.
+Neither is inferred or substituted, and a Claude log records no commit hash at all, so
+its `baseline_commit` is always `null`. That recorded baseline is the join key the
+commit survey below uses.
+
 A voice built on one session describes that session. Select several, spanning
 different kinds of work, up to the 24 a selection holds. Selection membership is
 immutable, so widening one means creating a new selection with more files. Both
 `--agent codex` and `--agent claude` are accepted, for scanning and for selecting.
+
+## Start from Git history
+
+Choosing which session to mine by reading conversations is guesswork. Commit messages
+are curated summaries and the diff shows whether anything verifiable changed, so survey
+the repository first and let the commit lead back to its session:
+
+```sh
+dryheave collect survey --repo /explicit/source-repo --root /explicit/log-directory \
+  --agent codex --max-commits 200 --max-candidates 10 --json
+dryheave collect commit feb4d909 --repo /explicit/source-repo \
+  --root /explicit/log-directory --agent codex --json
+```
+
+Both commands read the repository read-only through `git log` and `git rev-parse`; they
+write nothing and create no objects. `--max-commits` bounds the survey to the newest N
+commits reachable from HEAD (default 200, maximum 2,000) and `--max-candidates` bounds
+the reported candidates (default 10, maximum 50). The response repeats both bounds.
+`--root` and `--agent` go together: `--root` without `--agent` and `--agent` without
+`--root` are both refused, and omitting them surveys commits with every candidate's
+`join` reported as `not_scanned`.
+
+`collect survey` assumes no commit convention. It first measures the repository's own
+subjects: the token before a `:` delimiter, with digit runs folded to `#` so
+`TICKET-123:` and `TICKET-124:` count as one `ticket-#` scheme. A convention is declared
+only when at least 20 commits were sampled, at least 60% of them carry such a token, and
+at most 12 tokens cover at least 90% of the prefixed subjects. `convention` reports
+`detected`, the measured `prefixed_share`, the inferred `vocabulary` with each token's
+count and whether it is bug-indicating, `vocabulary_coverage` and a `reason` naming the
+threshold that decided it, so the inference is visible rather than assumed.
+
+Candidate selection then uses the first tier that produces anything, and every candidate
+carries the `tier` and the `signal` that selected it:
+
+| Tier | Selection | What the signal shows |
+| --- | --- | --- |
+| 1 | Bug-indicating members of the detected vocabulary (`fix`, `bugfix`, `hotfix`, and similar) | Which token matched, and the vocabulary it belongs to |
+| 2 | Bug-indicating words anywhere in the subject or body, case-insensitive | Which words matched |
+| 3 | Change shape alone: fewest files first, then fewest changed lines, at most five files | The file and line counts, and an explicit statement that this is no evidence of a bug fix |
+
+Merge commits are excluded. So are commits touching only documentation or only
+configuration: a benchmark case needs a behavior change a hidden verifier can execute,
+and a commit that only edits Markdown or a settings file leaves nothing to verify. They
+are not dropped silently — `merges_excluded`, `change_class_excluded` and a bounded
+`excluded` list report each one with its reason, so a docs-heavy window is visible
+instead of looking like an empty repository.
+
+The join uses one fact: a session records the commit hash of the repository when it
+started, so for a commit `C` produced in that session, `C`'s parent is the baseline the
+session recorded. Each candidate reports its `parent` and every scanned session whose
+recorded baseline equals it, with that session's `cwd` so the repository can be
+confirmed — the cwd is reported, never used to filter, because the same repository is
+often checked out in several directories. `join` is one of:
+
+| `join` | Meaning |
+| --- | --- |
+| `unique` | Exactly one scanned session records that parent as its baseline. |
+| `ambiguous` | Several scanned logs record that parent; the commit cannot be attributed to one of them. Each match repeats the `source_id` and `parent_session_id` its log states, which is how a subagent or resumed rollout shows up where the log records one. |
+| `none` | No scanned log records that parent. The commit may be hand-written, or its session deleted, or outside the scanned root. |
+| `no_parent` | A root commit, which has no prior state for any session to record. |
+| `not_scanned` | No log root was given, so no join was attempted. |
+
+Even a `unique` match is partial: a session records only the baseline it *started* from,
+so the join finds that session's first task, not every commit it produced. The
+`join_note` says so on every candidate. Sessions that could not be parsed within the
+import bounds are skipped rather than failing the scan, and are counted in
+`sessions_skipped` with bounded `skipped` reasons.
+
+`collect commit SHA` resolves one remembered commit the same way and hands over to the
+unchanged pipeline. It accepts a lowercase hexadecimal SHA of at least seven characters;
+branch names and `HEAD` are refused, and a merge commit is refused because it records no
+single starting baseline. The response reports the full commit, its `parent` and the
+matching sessions, and its `next` names the ordinary commands:
+
+```sh
+dryheave collect select from-commit /explicit/session.jsonl --agent codex --json
+dryheave problem request "Fix detected in commit feb4d909" --selection from-commit --json
+```
+
+The reported parent is a claim from the log, not a verified baseline. It still has to be
+checked against the read-only source repository before `case draft --commit FULL_SHA`,
+and today's HEAD is never a substitute.
 
 ## Collect, triage, derive
 
@@ -130,7 +219,9 @@ their imported membership permanently, even if source files or store aliases mov
 
 | Command | Result |
 | --- | --- |
-| `collect scan --agent codex --root DIR` | List bounded candidate logs with per-session user-message signal, richest first. |
+| `collect scan --agent codex --root DIR` | List bounded candidate logs with per-session user-message signal, recorded `cwd` and `baseline_commit`, richest first. |
+| `collect survey --repo PATH [--root LOG_DIR --agent AGENT]` | Survey bounded read-only history for candidate commits with their tier, signal and session join. |
+| `collect commit SHA --repo PATH [--root LOG_DIR --agent AGENT]` | Resolve one remembered commit to its baseline parent and the sessions recording it. |
 | `collect select NAME [FILE ...] --agent codex` | Import 1–24 explicitly chosen files into a new immutable selection. |
 | `collect select NAME --session ID [--session ID ...]` | Pin existing imported sessions; files and IDs may be combined. |
 | `collect selections` | List names, IDs, session counts and catalog revision. |
