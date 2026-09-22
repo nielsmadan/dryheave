@@ -97,6 +97,7 @@ def invoke(tmp_path, recipe, request, *, cancelled=None, duration=3, **options):
     return invoke_controller(recipe, request, writer, context), identities
 
 
+@pytest.mark.integration
 def test_synthetic_print_protocol_and_owned_runtime(store, benchmark, tmp_path):
     recipe = recipe_for(fake_executable(tmp_path))
     call, identities = invoke(tmp_path, recipe, request_for(store))
@@ -126,6 +127,7 @@ def test_synthetic_print_protocol_and_owned_runtime(store, benchmark, tmp_path):
     )
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "change",
     [
@@ -147,6 +149,7 @@ def test_invalid_response_preserves_provider_usage(store, benchmark, tmp_path, c
     assert call.cleanup.known_writers_stopped
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("exit_code,extra", [(7, ""), (0, "time.sleep(5)")])
 def test_failed_or_timed_out_process_retains_usage_and_stops(
     store, benchmark, tmp_path, exit_code, extra
@@ -163,6 +166,7 @@ def test_failed_or_timed_out_process_retains_usage_and_stops(
     assert time.monotonic() - start < 3
 
 
+@pytest.mark.integration
 def test_cancellation_stops_process_and_retains_completed_output(store, benchmark, tmp_path):
     cancelled = threading.Event()
     ready = tmp_path / "runtime/work/ready"
@@ -212,6 +216,7 @@ def test_prelaunch_failure_does_not_spawn_or_create_runtime(store, benchmark, tm
     assert not (tmp_path / "runtime").exists()
 
 
+@pytest.mark.integration
 def test_exact_version_mismatch_stops_before_model_call(store, benchmark, tmp_path):
     call, identities = invoke(
         tmp_path,
@@ -225,6 +230,7 @@ def test_exact_version_mismatch_stops_before_model_call(store, benchmark, tmp_pa
     assert not (tmp_path / "evidence/stdout.bin").exists()
 
 
+@pytest.mark.integration
 def test_owned_child_is_stopped_before_return(store, benchmark, tmp_path):
     extra = (
         "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
@@ -291,6 +297,7 @@ def test_claude_runtime_serializes_only_agent_specific_policy():
     }
 
 
+@pytest.mark.integration
 def test_sonnet_effort_is_requested_but_not_reported_as_observed(store, benchmark, tmp_path):
     recipe = recipe_for(fake_executable(tmp_path), model="claude-sonnet-4-6", effort="low")
     call, _ = invoke(tmp_path, recipe, request_for(store))

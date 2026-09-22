@@ -12,6 +12,7 @@ from dryheave.runner_models import RunOptions
 from dryheave.runner_state import ExecutionJournal
 
 
+@pytest.mark.integration
 def test_fixture_clarification_capture_and_resume_without_paid_launch(store, benchmark):
     identifier = create_experiment(store, benchmark)
     result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
@@ -46,6 +47,7 @@ def test_fixture_clarification_capture_and_resume_without_paid_launch(store, ben
     assert len({state.workspace for state in retry.attempts}) == 2
 
 
+@pytest.mark.integration
 def test_journal_ahead_of_checkpoint_recovery_preserves_launch_intent(
     store, benchmark, monkeypatch
 ):
@@ -69,6 +71,7 @@ def test_journal_ahead_of_checkpoint_recovery_preserves_launch_intent(
     assert not capture.workspace.complete
 
 
+@pytest.mark.integration
 def test_conflicting_resume_and_tampered_capture_map_rejected(store, benchmark):
     identifier = create_experiment(store, benchmark)
     result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
@@ -93,6 +96,7 @@ def test_cancellation_preserves_unstarted_trials_and_no_launch(store, benchmark)
     assert run_status(store, result.run_id) == result
 
 
+@pytest.mark.integration
 def test_cli_experiment_to_capture_and_status(store, benchmark, tmp_path, capsys):
     import json
 
@@ -126,6 +130,7 @@ def test_native_requires_explicit_short_runtime(store, benchmark):
         )
 
 
+@pytest.mark.integration
 def test_real_cli_resume_and_status_ignore_changed_workspace_runtime(store, benchmark, tmp_path):
     import json
     import subprocess
@@ -153,6 +158,7 @@ def test_real_cli_resume_and_status_ignore_changed_workspace_runtime(store, benc
         assert data["attempts"] == result.model_dump(mode="json")["attempts"]
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("mode", ["native", "offline-fixture"])
 def test_new_cli_run_uses_workspace_runtime_only_for_native(
     store, benchmark, tmp_path, monkeypatch, capsys, mode
@@ -189,6 +195,7 @@ def test_new_cli_run_uses_workspace_runtime_only_for_native(
         assert observed[-1].runtime_root == str(override)
 
 
+@pytest.mark.integration
 def test_turn_and_controller_budgets_stop_further_submission(store, benchmark):
     from dryheave.controller_models import RoleBudget
 
@@ -203,6 +210,7 @@ def test_turn_and_controller_budgets_stop_further_submission(store, benchmark):
     )
 
 
+@pytest.mark.integration
 def test_stop_writers_then_capture_reads_their_final_bytes(store, benchmark, monkeypatch):
     from pathlib import Path
 
@@ -225,6 +233,7 @@ def test_stop_writers_then_capture_reads_their_final_bytes(store, benchmark, mon
     )
 
 
+@pytest.mark.integration
 def test_controller_intent_is_interrupted_on_recovery_without_reexecution(store, benchmark):
     from dryheave.controller_models import RoleCall
 
@@ -254,6 +263,7 @@ def test_controller_intent_is_interrupted_on_recovery_without_reexecution(store,
     )
 
 
+@pytest.mark.integration
 def test_permission_dialog_stops_without_a_simulator_call(store, benchmark):
     turn = benchmark.fixture[0].model_copy(update={"state": "approval"})
     result = run_experiment(
@@ -266,6 +276,7 @@ def test_permission_dialog_stops_without_a_simulator_call(store, benchmark):
     assert capture.controller_calls == ()
 
 
+@pytest.mark.integration
 def test_native_and_run_locks_prevent_duplicate_work(store, benchmark):
     from dryheave.errors import LockBusyError
 
@@ -278,6 +289,7 @@ def test_native_and_run_locks_prevent_duplicate_work(store, benchmark):
     assert run_status(store, result.run_id).attempts == result.attempts
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("interrupted", [False, True])
 def test_controller_cleanup_failure_preserves_capture_after_fresh_reconciliation(
     store, benchmark, monkeypatch, interrupted
@@ -358,6 +370,7 @@ def test_controller_cleanup_failure_preserves_capture_after_fresh_reconciliation
     assert "cleanup_unresolved" in historical.exclusion_reasons
 
 
+@pytest.mark.integration
 def test_load_capture_batch_traversal_does_not_grow_per_file(store, benchmark, monkeypatch):
     additions = {f"file-{index}.txt": str(index) for index in range(30)}
     turn = benchmark.fixture[-1].model_copy(

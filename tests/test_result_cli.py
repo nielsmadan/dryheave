@@ -11,6 +11,7 @@ from dryheave.experiments import create_experiment
 from dryheave.models import CommandSpec
 
 
+@pytest.mark.integration
 def test_public_loop_and_portable_result_comparison(store, graded_benchmark, tmp_path, capsys):
     identifier = create_experiment(store, graded_benchmark)
     prefix = ["--store", str(store.root), "--json"]
@@ -37,6 +38,7 @@ def test_public_loop_and_portable_result_comparison(store, graded_benchmark, tmp
     assert json.loads(capsys.readouterr().out)["data"]["paired_count"] == 1
 
 
+@pytest.mark.integration
 def test_real_second_cli_status_reads_progress_while_writer_is_active(
     store, graded_benchmark, tmp_path
 ):

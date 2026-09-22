@@ -41,6 +41,9 @@ doctor:
 test:
     @uv run pytest tests/ -q
 
+test-integration:
+    @uv run pytest tests/ -q -m integration
+
 test-verbose:
     @uv run pytest tests/ -v
 
@@ -48,7 +51,7 @@ test-js:
     @node --test tests/js/*.test.mjs
 
 coverage:
-    @uv run pytest --cov --cov-report=term-missing --cov-report=html -q
+    @uv run pytest -q -m 'not packaging' --cov --cov-report=term-missing --cov-report=html
 
 lint:
     @uv run ruff check
@@ -62,6 +65,13 @@ format:
 typecheck:
     @uv run mypy
 
+check-fast:
+    @uv run ruff check
+    @uv run ruff format --check
+    @uv run pylint src/dryheave
+    @uv run mypy
+    @uv run pytest -q
+
 check:
     @uv run ruff check
     @uv run ruff format --check
@@ -69,6 +79,7 @@ check:
     @uv run mypy
     @node --test tests/js/*.test.mjs
     @uv run pytest -q
+    @just test-integration
     @just test-packaging
 
 build:

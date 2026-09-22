@@ -139,6 +139,7 @@ def test_legacy_agent_setup_and_explicit_no_reply_policy(store, benchmark, capsy
         assert recipe["command"]["argv"] == ["codex"]
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "agent_selection",
     [

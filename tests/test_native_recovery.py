@@ -98,6 +98,7 @@ def _record_subject(execution, attempt_id, identity):
         execution.save(state)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("operation", ["resume", "assess"])
 def test_corrupt_inputs_do_not_prevent_recorded_writer_cleanup(
     store, benchmark, tmp_path, monkeypatch, operation
@@ -138,6 +139,7 @@ def test_corrupt_inputs_do_not_prevent_recorded_writer_cleanup(
         assert len(run_status(store, run_id).attempts) == 1
 
 
+@pytest.mark.integration
 def test_new_run_reconciles_older_recorded_writer_before_execution(
     store, benchmark, tmp_path, monkeypatch
 ):
@@ -200,6 +202,7 @@ def test_other_unknown_native_launch_remains_a_blocker(store, benchmark, monkeyp
     assert cleanup.terminal_closed is False
 
 
+@pytest.mark.integration
 def test_new_owned_process_invalidates_successful_cleanup_in_memory_and_replay(
     store, benchmark, tmp_path
 ):
@@ -225,6 +228,7 @@ def test_new_owned_process_invalidates_successful_cleanup_in_memory_and_replay(
         writer.wait(timeout=3)
 
 
+@pytest.mark.integration
 def test_setup_descendant_is_durable_before_cleanup_and_survives_parent_exit(
     store, benchmark, tmp_path
 ):

@@ -28,6 +28,7 @@ def invoke(capsys, *arguments):
     return json.loads(captured.out)["data"]
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("draft_directory", [".dryheave/authoring", "drafts"])
 def test_selected_log_public_cli_voice_decision_validate_freeze(
     authoring_workspace, historical_repo, capsys, draft_directory

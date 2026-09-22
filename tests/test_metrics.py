@@ -1,3 +1,5 @@
+import pytest
+
 from dryheave.controller_models import ControllerRecipe, RoleCall
 from dryheave.drivers.models import NativeEvent, NativeUsage, UsageObservation
 from dryheave.experiment_models import PriceRate, PriceTable
@@ -48,6 +50,7 @@ def native(identity, number, *, accounting="cumulative", session="root", line=1)
     )
 
 
+@pytest.mark.integration
 def test_cumulative_deltas_resets_and_descendant_model_attribution(store, benchmark):
     summary = run_experiment(
         store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
@@ -89,6 +92,7 @@ def test_cumulative_deltas_resets_and_descendant_model_attribution(store, benchm
     assert priced.records[0].price_version == "fixture-2026-v1"
 
 
+@pytest.mark.integration
 def test_response_dedupe_supersedes_cumulative_and_does_not_invent_unknown_cost(store, benchmark):
     summary = run_experiment(
         store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")

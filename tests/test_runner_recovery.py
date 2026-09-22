@@ -3,6 +3,7 @@ import sys
 import time
 
 import psutil
+import pytest
 
 from dryheave.cases import load_frozen_case
 from dryheave.drivers.models import ProcessIdentity
@@ -15,6 +16,7 @@ from dryheave.runner_models import RunOptions
 from dryheave.runner_state import ExecutionJournal
 
 
+@pytest.mark.integration
 def test_recovery_stops_only_recorded_process_identity_before_capture(store, benchmark):
     identifier = create_experiment(store, benchmark)
     experiment = load_experiment(store, identifier)

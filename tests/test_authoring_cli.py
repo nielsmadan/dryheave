@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from dryheave.cli import main
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -54,6 +56,7 @@ def test_collect_and_unresolved_draft_cli(tmp_path: Path, capsys) -> None:
     assert json.loads(capsys.readouterr().out)["data"]["persona"]["name"] == "Curated user"
 
 
+@pytest.mark.integration
 def test_case_cli_freeze_and_inspect(
     historical_repo: tuple[Path, str, str, str], tmp_path: Path, capsys
 ) -> None:

@@ -19,6 +19,7 @@ from dryheave.runner_models import RunOptions
 from dryheave.runner_state import ExecutionJournal
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("requested", [None, "different-requested-model"])
 @pytest.mark.parametrize("invalid", ["decision", "fact", "judge-ids"])
 def test_failed_roles_retain_observed_metadata_through_durable_report_pricing(
@@ -166,6 +167,7 @@ def test_invalid_json_cannot_supply_accounting_metadata(tmp_path):
     }
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("invalid", ["judgments", "usage"])
 def test_codex_judge_failure_retains_response_settings_and_prices_native_usage(
     store, benchmark, tmp_path, invalid

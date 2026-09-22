@@ -83,6 +83,7 @@ def test_example_copy_uses_packaged_bytes_and_refuses_overwrite_or_symlink(tmp_p
     assert {entry.name for entry in tmp_path.iterdir()} == {"examples", "linked"}
 
 
+@pytest.mark.integration
 def test_packaged_offline_example_runs_only_public_cli_and_preserves_source(tmp_path, capsys):
     copied = tmp_path / "examples"
     assert main(["example", "write", "--target", str(copied), "--json"]) == 0

@@ -51,6 +51,7 @@ def test_owned_workspace_nested_in_source_and_mentions_are_not_reads():
     )
 
 
+@pytest.mark.integration
 def test_suspicion_review_retains_original_finding_and_cannot_override_corruption(
     store, graded_benchmark, historical_repo, monkeypatch
 ):

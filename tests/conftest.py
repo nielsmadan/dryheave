@@ -1,8 +1,15 @@
+import shutil
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from dryheave.models import StrictModel
+from dryheave.experiment_models import ExperimentDraft
+from dryheave.models import AgentKind, StrictModel
+from dryheave.profile_models import AssetSelection, CaptureLimits, CaptureSpec, NativeRecipe
+from dryheave.profiles import capture_profile
+from dryheave.runner_models import RunSummary
 from dryheave.storage import ObjectStore
 
 
@@ -14,60 +21,6 @@ class ExamplePayload(StrictModel):
 @pytest.fixture
 def payload() -> ExamplePayload:
     return ExamplePayload(title="Historical task")
-
-
-@pytest.fixture
-def store(tmp_path: Path) -> ObjectStore:
-    return ObjectStore(tmp_path / "store")
-
-
-@pytest.fixture
-def historical_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
-    from dryheave.repositories import Git, SnapshotLimits
-
-    repo = tmp_path / "source"
-    repo.mkdir()
-    git = Git(repo, SnapshotLimits())
-    git.environment.update(
-        {
-            "GIT_AUTHOR_NAME": "Fixture",
-            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
-            "GIT_COMMITTER_NAME": "Fixture",
-            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
-        }
-    )
-    git.run("init", "--quiet", "--template=", "--initial-branch=main", ".")
-    (repo / "greet.py").write_text('def greet(name):\n    return "Hello " + name\n')
-    git.run("add", "greet.py")
-    git.run("commit", "--quiet", "-m", "initial")
-    (repo / "history.txt").write_text("Historical context\n")
-    (repo / ".gitattributes").write_text(
-        "history.txt export-ignore\nsubst.txt export-subst\ngreet.py filter=hostile text\n"
-    )
-    (repo / "subst.txt").write_bytes(b"$Format:%H$\r\n")
-    git.run("add", ".")
-    git.run("commit", "--quiet", "-m", "baseline")
-    baseline = git.run("rev-parse", "HEAD").stdout.decode().strip()
-    (repo / "greet.py").write_text(
-        'def greet(name):\n    return "Secret future solution, " + name\n'
-    )
-    git.run("add", "greet.py")
-    git.run("commit", "--quiet", "-m", "secret future solution")
-    future = git.run("rev-parse", "HEAD").stdout.decode().strip()
-    tree = git.run("rev-parse", "HEAD^{tree}").stdout.decode().strip()
-    unreachable = (
-        git.run("commit-tree", tree, "-p", baseline, input_bytes=b"Unreachable solution\n")
-        .stdout.decode()
-        .strip()
-    )
-    return repo, baseline, future, unreachable
-
-
-import sys
-
-from dryheave.models import AgentKind
-from dryheave.profile_models import AssetSelection, CaptureLimits, CaptureSpec, NativeRecipe
-from dryheave.profiles import capture_profile
 
 
 def profile_recipe(**changes) -> NativeRecipe:
@@ -137,11 +90,51 @@ def driver_plan(tmp_path: Path):
     )
 
 
-@pytest.fixture
-def benchmark(store, historical_repo, tmp_path):
+def build_historical_repo(root: Path) -> tuple[Path, str, str, str]:
+    from dryheave.repositories import Git, SnapshotLimits
+
+    repo = root / "source"
+    repo.mkdir()
+    git = Git(repo, SnapshotLimits())
+    git.environment.update(
+        {
+            "GIT_AUTHOR_NAME": "Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+        }
+    )
+    git.run("init", "--quiet", "--template=", "--initial-branch=main", ".")
+    (repo / "greet.py").write_text('def greet(name):\n    return "Hello " + name\n')
+    git.run("add", "greet.py")
+    git.run("commit", "--quiet", "-m", "initial")
+    (repo / "history.txt").write_text("Historical context\n")
+    (repo / ".gitattributes").write_text(
+        "history.txt export-ignore\nsubst.txt export-subst\ngreet.py filter=hostile text\n"
+    )
+    (repo / "subst.txt").write_bytes(b"$Format:%H$\r\n")
+    git.run("add", ".")
+    git.run("commit", "--quiet", "-m", "baseline")
+    baseline = git.run("rev-parse", "HEAD").stdout.decode().strip()
+    (repo / "greet.py").write_text(
+        'def greet(name):\n    return "Secret future solution, " + name\n'
+    )
+    git.run("add", "greet.py")
+    git.run("commit", "--quiet", "-m", "secret future solution")
+    future = git.run("rev-parse", "HEAD").stdout.decode().strip()
+    tree = git.run("rev-parse", "HEAD^{tree}").stdout.decode().strip()
+    unreachable = (
+        git.run("commit-tree", tree, "-p", baseline, input_bytes=b"Unreachable solution\n")
+        .stdout.decode()
+        .strip()
+    )
+    return repo, baseline, future, unreachable
+
+
+def build_benchmark(store, historical_repo, root: Path) -> ExperimentDraft:
     from dryheave.cases import DeterministicCriterion, TaskFact, draft_case, freeze_case
     from dryheave.controller_models import ControllerRecipe, ScriptStep, SimulatorDecision
-    from dryheave.experiment_models import ExperimentDraft, FixtureTurn, VariantSpec
+    from dryheave.experiment_models import FixtureTurn, VariantSpec
     from dryheave.logs.service import import_session
     from dryheave.models import CommandSpec
     from dryheave.personas import Persona
@@ -151,7 +144,7 @@ def benchmark(store, historical_repo, tmp_path):
     repository = capture_repository(store, source, baseline)
     session = import_session(store, Path("tests/fixtures/codex-recorded.jsonl"), AgentKind.CODEX)
     draft = draft_case(store, session, repository_id=repository)
-    verifier = tmp_path / "hidden.py"
+    verifier = root / "hidden.py"
     verifier.write_text('print("PRIVATE_VERIFIER_SENTINEL")\n')
     case = freeze_case(
         store,
@@ -187,7 +180,7 @@ def benchmark(store, historical_repo, tmp_path):
                 ),
             }
         ),
-        tmp_path,
+        root,
     )
     profile = capture_profile(store, CaptureSpec(recipe=profile_recipe()))
     store.set_alias("task", case)
@@ -231,8 +224,7 @@ def benchmark(store, historical_repo, tmp_path):
     )
 
 
-@pytest.fixture
-def graded_benchmark(store, benchmark):
+def build_graded_benchmark(store, benchmark) -> ExperimentDraft:
     from dryheave.cases import load_frozen_case
     from dryheave.models import ObjectKind
 
@@ -281,8 +273,22 @@ HOSTILE = (
 )
 
 
-@pytest.fixture
-def hostile_run(store, graded_benchmark):
+def build_assessed(store, graded_benchmark) -> RunSummary:
+    from dryheave.assessments import assess_run
+    from dryheave.experiments import create_experiment
+    from dryheave.runner import run_experiment
+    from dryheave.runner_models import RunOptions
+
+    summary = run_experiment(
+        store,
+        create_experiment(store, graded_benchmark),
+        options=RunOptions(mode="offline-fixture"),
+    )
+    assess_run(store, summary.run_id)
+    return summary
+
+
+def build_hostile_run(store, graded_benchmark) -> tuple[str, str]:
     from dryheave.assessments import assess_run
     from dryheave.cases import load_frozen_case
     from dryheave.experiments import create_experiment
@@ -331,3 +337,140 @@ def hostile_run(store, graded_benchmark):
     )
     assess_run(store, summary.run_id)
     return summary.run_id, summary.attempts[0].attempt_id
+
+
+def build_calibrated(store, graded_benchmark) -> str:
+    from dryheave.calibrations import calibrate_case
+
+    return calibrate_case(store, graded_benchmark.cases[0])
+
+
+@dataclass(frozen=True)
+class Baseline:
+    source: Path
+    commits: tuple[str, str, str]
+    stores: dict[str, Path]
+    benchmark: ExperimentDraft
+    graded_benchmark: ExperimentDraft
+    assessed: RunSummary
+    calibrated: str
+    hostile_run: tuple[str, str]
+
+
+STAGES = ("benchmark", "graded_benchmark", "assessed", "calibrated", "hostile_run")
+DERIVED = ("assessed", "calibrated", "hostile_run")
+
+
+def requested_stage(request) -> str | None:
+    names = set(request.fixturenames)
+    stages = [stage for stage in STAGES if stage in names]
+    if len([stage for stage in stages if stage in DERIVED]) > 1:
+        raise RuntimeError("A test cannot share one baseline store with two prebuilt artefacts.")
+    return stages[-1] if stages else None
+
+
+def rebuilds_repository(request) -> bool:
+    return "historical_repo" in request.fixturenames
+
+
+@pytest.fixture(scope="session")
+def baseline(tmp_path_factory) -> Baseline:
+    root = tmp_path_factory.mktemp("baseline")
+    repo_root = root / "repo"
+    repo_root.mkdir()
+    source, first, future, unreachable = build_historical_repo(repo_root)
+    stores: dict[str, Path] = {}
+
+    benchmark_root = root / "benchmark"
+    shutil.copytree(repo_root, benchmark_root)
+    benchmark_store = ObjectStore(benchmark_root / "store")
+    benchmark = build_benchmark(
+        benchmark_store,
+        (benchmark_root / "source", first, future, unreachable),
+        benchmark_root,
+    )
+    stores["benchmark"] = benchmark_store.root
+
+    graded_root = root / "graded"
+    shutil.copytree(benchmark_root, graded_root)
+    graded = build_graded_benchmark(ObjectStore(graded_root / "store"), benchmark)
+    stores["graded_benchmark"] = graded_root / "store"
+
+    assessed_root = root / "assessed"
+    shutil.copytree(graded_root, assessed_root)
+    assessed = build_assessed(ObjectStore(assessed_root / "store"), graded)
+    stores["assessed"] = assessed_root / "store"
+
+    calibrated_root = root / "calibrated"
+    shutil.copytree(graded_root, calibrated_root)
+    calibrated = build_calibrated(ObjectStore(calibrated_root / "store"), graded)
+    stores["calibrated"] = calibrated_root / "store"
+
+    hostile_root = root / "hostile"
+    shutil.copytree(graded_root, hostile_root)
+    hostile = build_hostile_run(ObjectStore(hostile_root / "store"), graded)
+    stores["hostile_run"] = hostile_root / "store"
+
+    return Baseline(
+        source=source,
+        commits=(first, future, unreachable),
+        stores=stores,
+        benchmark=benchmark,
+        graded_benchmark=graded,
+        assessed=assessed,
+        calibrated=calibrated,
+        hostile_run=hostile,
+    )
+
+
+@pytest.fixture
+def store(tmp_path: Path, request) -> ObjectStore:
+    root = tmp_path / "store"
+    stage = requested_stage(request)
+    if stage is not None and not rebuilds_repository(request):
+        shutil.copytree(request.getfixturevalue("baseline").stores[stage], root)
+    return ObjectStore(root)
+
+
+@pytest.fixture
+def historical_repo(tmp_path: Path, request) -> tuple[Path, str, str, str]:
+    if requested_stage(request) is not None:
+        return build_historical_repo(tmp_path)
+    prebuilt = request.getfixturevalue("baseline")
+    shutil.copytree(prebuilt.source, tmp_path / "source")
+    return (tmp_path / "source", *prebuilt.commits)
+
+
+@pytest.fixture
+def benchmark(store, tmp_path: Path, request) -> ExperimentDraft:
+    if rebuilds_repository(request):
+        return build_benchmark(store, request.getfixturevalue("historical_repo"), tmp_path)
+    return request.getfixturevalue("baseline").benchmark
+
+
+@pytest.fixture
+def graded_benchmark(store, benchmark, request) -> ExperimentDraft:
+    if rebuilds_repository(request):
+        return build_graded_benchmark(store, benchmark)
+    return request.getfixturevalue("baseline").graded_benchmark
+
+
+@pytest.fixture
+def assessed(store, graded_benchmark, request) -> RunSummary:
+    if rebuilds_repository(request):
+        return build_assessed(store, graded_benchmark)
+    return request.getfixturevalue("baseline").assessed
+
+
+@pytest.fixture
+def calibrated(store, graded_benchmark, request) -> str:
+    if rebuilds_repository(request):
+        return build_calibrated(store, graded_benchmark)
+    return request.getfixturevalue("baseline").calibrated
+
+
+@pytest.fixture
+def hostile_run(store, graded_benchmark, request) -> tuple[str, str]:
+    if rebuilds_repository(request):
+        return build_hostile_run(store, graded_benchmark)
+    return request.getfixturevalue("baseline").hostile_run

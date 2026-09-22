@@ -80,8 +80,11 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not packaging'"
-markers = ["packaging: asserts against a wheel that `just build` has already produced"]
+addopts = "-m 'not packaging and not integration'"
+markers = [
+    "packaging: asserts against a wheel that `just build` has already produced",
+    "integration: drives a real process, socket or packaged CLI end to end",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dryheave"]

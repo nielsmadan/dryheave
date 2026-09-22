@@ -12,6 +12,7 @@ from dryheave.models import CommandSpec
 from dryheave.processes import CommandControl, run_command
 
 
+@pytest.mark.integration
 def test_full_duplex_and_nonzero(tmp_path: Path) -> None:
     result = run_command(
         CommandSpec(
@@ -30,6 +31,7 @@ def test_full_duplex_and_nonzero(tmp_path: Path) -> None:
     assert result.stderr == b"failure"
 
 
+@pytest.mark.integration
 def test_output_and_deadline_limits(tmp_path: Path) -> None:
     result = run_command(
         CommandSpec(
@@ -46,6 +48,7 @@ def test_output_and_deadline_limits(tmp_path: Path) -> None:
     assert timed.returncode == -signal.SIGKILL
 
 
+@pytest.mark.integration
 def test_inherited_pipe_child_is_stopped(tmp_path: Path) -> None:
     code = 'import os,time; child=os.fork(); time.sleep(5) if child==0 else None; open("survived","w").write("bad") if child==0 else None'
     result = run_command(
@@ -55,6 +58,7 @@ def test_inherited_pipe_child_is_stopped(tmp_path: Path) -> None:
     assert not (tmp_path / "survived").exists()
 
 
+@pytest.mark.integration
 def test_closed_pipe_descendant_coverage_is_explicit(tmp_path: Path) -> None:
     code = 'import os,time; from pathlib import Path; child=os.fork(); [(os.close(i)) for i in (0,1,2)] if child==0 else None; time.sleep(0.1) if child==0 else None; Path("child-pending").write_text("done") if child==0 else None; os.rename("child-pending", "child-finished") if child==0 else None'
     result = run_command(CommandSpec(argv=(sys.executable, "-c", code)), tmp_path)
@@ -66,6 +70,7 @@ def test_closed_pipe_descendant_coverage_is_explicit(tmp_path: Path) -> None:
     assert (tmp_path / "child-finished").read_text() == "done"
 
 
+@pytest.mark.integration
 def test_reaped_leader_is_never_signaled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
     monkeypatch.setattr(os, "killpg", lambda *args: calls.append(args))
@@ -80,6 +85,7 @@ def test_symlink_cwd_rejected(tmp_path: Path) -> None:
         run_command(CommandSpec(argv=("true",), cwd="escape"), tmp_path)
 
 
+@pytest.mark.integration
 def test_parent_cancellation_interrupts_a_child_with_closed_pipes(tmp_path):
     import threading
     import time
@@ -109,6 +115,7 @@ def test_parent_cancellation_interrupts_a_child_with_closed_pipes(tmp_path):
     assert time.monotonic() - started < 2
 
 
+@pytest.mark.integration
 def test_output_written_before_cancellation_is_retained(tmp_path: Path) -> None:
     started = tmp_path / "started"
     cancelled = threading.Event()
@@ -139,6 +146,7 @@ def test_output_written_before_cancellation_is_retained(tmp_path: Path) -> None:
     assert result.stdout == b"usage=12\n"
 
 
+@pytest.mark.integration
 def test_output_clipped_while_draining_reports_the_output_limit(tmp_path: Path) -> None:
     started = tmp_path / "started"
     cancelled = threading.Event()
@@ -169,6 +177,7 @@ def test_output_clipped_while_draining_reports_the_output_limit(tmp_path: Path) 
     assert result.stdout == b"x" * 100
 
 
+@pytest.mark.integration
 def test_drain_does_not_block_when_the_start_callback_fails(tmp_path: Path) -> None:
     holder = tmp_path / "holder.py"
     holder.write_text(

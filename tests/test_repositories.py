@@ -25,6 +25,7 @@ def fingerprint(root: Path) -> dict[str, bytes]:
     }
 
 
+@pytest.mark.integration
 def test_exact_ancestry_and_tree_without_source_changes(
     historical_repo: tuple[Path, str, str, str],
     tmp_path: Path,
@@ -73,6 +74,7 @@ def test_exact_ancestry_and_tree_without_source_changes(
     assert fingerprint(source) == before
 
 
+@pytest.mark.integration
 def test_initial_patch_applied_explicitly(
     historical_repo: tuple[Path, str, str, str], tmp_path: Path, store: ObjectStore
 ) -> None:
@@ -92,6 +94,7 @@ def test_initial_patch_applied_explicitly(
         assert git.run("cat-file", "-e", sha, check=False).returncode != 0
 
 
+@pytest.mark.integration
 def test_invalid_patch_and_baseline_fail(
     historical_repo: tuple[Path, str, str, str], store: ObjectStore
 ) -> None:
@@ -104,6 +107,7 @@ def test_invalid_patch_and_baseline_fail(
         capture_repository(store, source, baseline, initial_patch=b"not a patch")
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("kind", ["lfs", "symlink", "submodule", "shallow", "alternates"])
 def test_unsupported_dependencies_rejected(
     kind: str, historical_repo: tuple[Path, str, str, str], tmp_path: Path, store: ObjectStore
@@ -139,6 +143,7 @@ def test_unsupported_dependencies_rejected(
         capture_repository(store, source, baseline)
 
 
+@pytest.mark.integration
 def test_finite_tree_and_audit_limits(
     historical_repo: tuple[Path, str, str, str], store: ObjectStore
 ) -> None:
@@ -155,6 +160,7 @@ def test_finite_tree_and_audit_limits(
     assert len(snapshot.known_disallowed_commits) == 1
 
 
+@pytest.mark.integration
 def test_internal_symlink_and_executable_preserved(
     historical_repo: tuple[Path, str, str, str], tmp_path: Path, store: ObjectStore
 ) -> None:
@@ -183,6 +189,7 @@ def test_internal_symlink_and_executable_preserved(
         materialize_repository(store, identifier, target)
 
 
+@pytest.mark.integration
 def test_hash_valid_pack_with_future_objects_rejected(
     historical_repo: tuple[Path, str, str, str], tmp_path: Path, store: ObjectStore
 ) -> None:
@@ -240,6 +247,7 @@ def symlink_input(
     return commit, None
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("mode", ["baseline", "initial_patch"])
 @pytest.mark.parametrize(
     ("links", "error"),
@@ -268,6 +276,7 @@ def test_unsafe_symlinks_rejected_before_materialization(
     write_tree.assert_not_called()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("mode", ["baseline", "initial_patch"])
 def test_symlinks_resolve_components_in_filesystem_order(
     mode: str,

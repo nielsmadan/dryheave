@@ -85,6 +85,7 @@ def test_process_limit_is_visible_and_known_children_are_stopped(monkeypatch):
     assert not report.known_writers_stopped
 
 
+@pytest.mark.integration
 def test_real_detached_writer_is_retained_and_stopped(tmp_path):
     marker = tmp_path / "heartbeat"
     gate = tmp_path / "release-parent"

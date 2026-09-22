@@ -86,6 +86,7 @@ def test_failed_binding_leaves_reconcilable_marker(tmp_path):
     )
 
 
+@pytest.mark.integration
 def test_modern_codex_protocol_and_cleanup_are_versioned(store, benchmark, tmp_path):
     script = tmp_path / "synthetic-codex.py"
     script.write_text(
@@ -120,6 +121,7 @@ def test_modern_codex_protocol_and_cleanup_are_versioned(store, benchmark, tmp_p
     assert not (context.runtime_root / "config/auth.json").is_symlink()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "mutation,expected",
     [

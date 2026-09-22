@@ -68,6 +68,7 @@ def curated(store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp
     )
 
 
+@pytest.mark.integration
 def test_frozen_case_is_self_contained_without_full_sessions(
     store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path
 ) -> None:
@@ -104,6 +105,7 @@ def test_draft_requires_real_curation(store: ObjectStore, tmp_path: Path) -> Non
         freeze_case(store, draft, tmp_path)
 
 
+@pytest.mark.integration
 def test_tampered_evidence_and_invalid_range(
     store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path
 ) -> None:
@@ -117,6 +119,7 @@ def test_tampered_evidence_and_invalid_range(
         draft_case(store, draft.source_session_id, end="missing")
 
 
+@pytest.mark.integration
 def test_grading_rejects_empty_and_missing_checks(
     store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path
 ) -> None:
@@ -145,6 +148,7 @@ def test_grading_rejects_empty_and_missing_checks(
     )
 
 
+@pytest.mark.integration
 def test_subject_projections_exclude_hidden_inputs(
     store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path
 ) -> None:
@@ -186,6 +190,7 @@ def test_persona_requires_safe_examples_and_verifiable_provenance(store: ObjectS
         )
 
 
+@pytest.mark.integration
 def test_replay_validation_needs_no_sessions_and_rejects_bad_closure(
     store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path
 ) -> None:
@@ -210,6 +215,7 @@ def test_replay_validation_needs_no_sessions_and_rejects_bad_closure(
         FrozenCase.model_validate(case.model_dump() | {"criteria": ()})
 
 
+@pytest.mark.integration
 def test_reviewed_empty_facts_can_freeze_and_load(
     store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path
 ) -> None:
@@ -232,6 +238,7 @@ def test_reviewed_empty_facts_can_freeze_and_load(
         freeze_case(store, unreviewed, tmp_path)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("invalid", ["archive", "pack", "extra_blob", "reference"])
 def test_authoring_rejects_invalid_repository_inputs_before_publication(
     invalid: str,
@@ -266,6 +273,7 @@ def test_authoring_rejects_invalid_repository_inputs_before_publication(
     publish.assert_not_called()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("invalid", ["blob", "reference"])
 def test_authoring_rejects_invalid_persona_inputs_before_publication(
     invalid: str,

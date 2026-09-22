@@ -126,6 +126,7 @@ def test_rejects_simulator_native_authority(text):
         SimulatorDecision(action="reply", text=text, reason="answer")
 
 
+@pytest.mark.integration
 def test_json_command_records_observed_usage_and_dedicated_cwd(store, benchmark, tmp_path):
     script = "import json,sys,os; q=json.load(sys.stdin); print(json.dumps({'decision':{'action':'reply','text':q['allowed_facts'][0]['text'],'fact_ids':['punctuation'],'reason':'answer'},'usage':{'output':12,'provenance':'fixture'},'observed_model':'observed'}))"
     recipe = ControllerRecipe(
@@ -143,6 +144,7 @@ def test_json_command_records_observed_usage_and_dedicated_cwd(store, benchmark,
     assert (tmp_path / "call/stdout.bin").is_file()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "script",
     [
@@ -207,6 +209,7 @@ def test_codex_builder_and_real_format_cumulative_usage(tmp_path):
     )
 
 
+@pytest.mark.integration
 def test_codex_adapter_executes_only_python_protocol_fixture(store, benchmark, tmp_path):
     script = tmp_path / "codex-fixture.py"
     script.write_text("""import json,sys,pathlib
@@ -237,6 +240,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":20,"cached_inp
     assert result.decision.text == "Use a comma after Hello."
 
 
+@pytest.mark.integration
 def test_controller_output_file_limit_stops_writer(store, benchmark, tmp_path):
     script = (
         "import pathlib,time; pathlib.Path('response.json').write_bytes(b'x'*100000); time.sleep(5)"
@@ -254,6 +258,7 @@ def test_controller_output_file_limit_stops_writer(store, benchmark, tmp_path):
     assert "controller_response_file_limit" in error.read_text()
 
 
+@pytest.mark.integration
 def test_invalid_decision_preserves_independently_reported_usage(store, benchmark, tmp_path):
     script = "import json; print(json.dumps({'decision':{'action':'approve','reason':'bad authority'},'usage':{'output':9,'provenance':'fixture'}}))"
     recipe = ControllerRecipe(
@@ -267,6 +272,7 @@ def test_invalid_decision_preserves_independently_reported_usage(store, benchmar
     assert result.cost is None
 
 
+@pytest.mark.integration
 def test_controller_cleanup_failure_is_retained_in_role_result(
     store, benchmark, tmp_path, monkeypatch
 ):

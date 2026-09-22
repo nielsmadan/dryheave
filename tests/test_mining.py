@@ -574,6 +574,7 @@ def drafted_problem(store, historical_repo, mining_context):
     return root, decision, path, hidden, reference
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("changed", ["draft", "hidden", "reference", "request"])
 def test_freeze_rejects_stale_validation_for_every_content_boundary(
     store, drafted_problem, changed
@@ -601,6 +602,7 @@ def test_freeze_rejects_stale_validation_for_every_content_boundary(
     assert list(root.glob(".validation-*")) == []
 
 
+@pytest.mark.integration
 def test_validate_freeze_uses_reviewed_snapshot_and_pins_case(store, drafted_problem):
     root, decision, _, hidden, reference = drafted_problem
     with pytest.raises(ConflictError, match="missing or stale"):
@@ -623,6 +625,7 @@ def test_validate_freeze_uses_reviewed_snapshot_and_pins_case(store, drafted_pro
         record_decision(store, root, "tasks", decision, expected_revision=5)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("fault", ["provenance", "evidence", "dirty", "patch", "micro"])
 def test_drafted_candidates_require_matching_case_baseline_and_scope(store, drafted_problem, fault):
     root, decision, path, _, _ = drafted_problem
@@ -650,6 +653,7 @@ def test_drafted_candidates_require_matching_case_baseline_and_scope(store, draf
         )
 
 
+@pytest.mark.integration
 def test_micro_request_accepts_only_one_supported_candidate(store, drafted_problem):
     root, decision, _, _, _ = drafted_problem
     create_request(root, "micro", "chosen", "One small bug", micro_bug=True, expected_revision=3)

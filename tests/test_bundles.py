@@ -187,6 +187,7 @@ def test_corrupt_available_secondary_session_is_an_export_error(store, multi_sou
         )
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "selection, present, absent",
     [
@@ -283,6 +284,7 @@ def test_export_is_atomic_and_alias_collision_is_explicit(store, benchmark, tmp_
     assert store.resolve("experiment") == identifier
 
 
+@pytest.mark.integration
 def test_capture_selection_exports_durable_output_before_assessment(
     store, graded_benchmark, tmp_path
 ):
@@ -334,6 +336,7 @@ def test_unavailable_capture_selection_remains_disclosed(store, graded_benchmark
     assert any(item.startswith("captures unavailable for attempt") for item in manifest.omitted)
 
 
+@pytest.mark.integration
 def test_quarantine_capture_can_be_selected_before_assessment(
     store, graded_benchmark, tmp_path, monkeypatch
 ):

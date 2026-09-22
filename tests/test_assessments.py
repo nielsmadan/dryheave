@@ -13,6 +13,7 @@ from dryheave.runner import load_capture, run_experiment, run_status
 from dryheave.runner_models import RunOptions
 
 
+@pytest.mark.integration
 def test_real_hidden_check_calibrates_and_resume_never_relaunches(
     store, graded_benchmark, monkeypatch
 ):
@@ -47,6 +48,7 @@ def test_real_hidden_check_calibrates_and_resume_never_relaunches(
     assert run_experiment(store, resume=summary.run_id).pending_assessment == ()
 
 
+@pytest.mark.integration
 def test_verifier_blob_mutation_retains_invalid_report_without_loading_corrupt_inputs(
     store, graded_benchmark, monkeypatch
 ):
@@ -80,6 +82,7 @@ def test_verifier_blob_mutation_retains_invalid_report_without_loading_corrupt_i
     assert assess_run(store, summary.run_id) == (report.attempts[0].assessment_id,)
 
 
+@pytest.mark.integration
 def test_mutation_before_capture_publication_quarantines_and_blocks_next_subject(
     store, graded_benchmark, monkeypatch
 ):
@@ -115,6 +118,7 @@ def test_mutation_before_capture_publication_quarantines_and_blocks_next_subject
         run_experiment(store, resume=summary.run_id)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "program",
     [
@@ -141,6 +145,7 @@ def test_zero_checks_and_failure_are_not_success(store, graded_benchmark, progra
     assert result.completion == "indeterminate"
 
 
+@pytest.mark.integration
 def test_known_future_git_object_is_retained_but_excluded(
     store, graded_benchmark, historical_repo, monkeypatch
 ):
@@ -174,6 +179,7 @@ def test_known_future_git_object_is_retained_but_excluded(
     assert result.eligible is False
 
 
+@pytest.mark.integration
 def test_relative_verifier_executable_requires_an_explicit_trusted_path(store, graded_benchmark):
     import json
 
@@ -215,6 +221,7 @@ def test_relative_verifier_executable_requires_an_explicit_trusted_path(store, g
     )
 
 
+@pytest.mark.integration
 def test_interrupted_grading_resume_retains_error_without_reexecuting_command(
     store, graded_benchmark, monkeypatch
 ):
@@ -244,6 +251,7 @@ def test_interrupted_grading_resume_retains_error_without_reexecuting_command(
     assert result.evidence_id
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("layout", ["independent", "shared", "colliding-names"])
 def test_independent_checks_and_explicit_ordered_suites(store, graded_benchmark, layout):
     import sys
@@ -299,6 +307,7 @@ def test_independent_checks_and_explicit_ordered_suites(store, graded_benchmark,
     assert result.eligible
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("saved_first", [False, True])
 def test_interrupted_shared_suite_keeps_remaining_members_indeterminate(
     store, graded_benchmark, monkeypatch, saved_first

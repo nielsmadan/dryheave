@@ -5,7 +5,6 @@ import pytest
 
 from conftest import HOSTILE
 from dryheave import journals, storage, viewer
-from dryheave.assessments import assess_run
 from dryheave.bundles import export_bundle, import_bundle
 from dryheave.calibrations import calibrate_case
 from dryheave.errors import InputError, LimitError, NotFoundError
@@ -18,17 +17,6 @@ from dryheave.serialization import digest
 from dryheave.storage import ObjectStore
 from dryheave.viewer import ViewerService, resolve_target
 from dryheave.viewer_models import RunListing
-
-
-@pytest.fixture
-def assessed(store, graded_benchmark):
-    summary = run_experiment(
-        store,
-        create_experiment(store, graded_benchmark),
-        options=RunOptions(mode="offline-fixture"),
-    )
-    assess_run(store, summary.run_id)
-    return summary
 
 
 def _capture_blob(store, service, run_id, attempt_id, name):
@@ -50,6 +38,7 @@ def test_empty_store_lists_no_runs_and_rejects_bad_pages(store):
         service.run_report("not-a-run")
 
 
+@pytest.mark.integration
 def test_listing_paginates_and_corrupt_rows_degrade(store, graded_benchmark):
     first = run_experiment(
         store,
@@ -282,6 +271,7 @@ def test_compare_reuses_report_semantics(store, assessed):
         service.compare(assessed.run_id, assessed.run_id, before_variant="base")
 
 
+@pytest.mark.integration
 def test_calibrations_match_exact_case_identity(store, graded_benchmark):
     case_id = store.resolve(graded_benchmark.cases[0])
     calibration_id = calibrate_case(store, case_id)
@@ -310,6 +300,7 @@ def test_calibrations_match_exact_case_identity(store, graded_benchmark):
     assert limited.scan.scanned == 1
 
 
+@pytest.mark.integration
 def test_calibration_rows_report_verification_state(store, graded_benchmark):
     case_id = store.resolve(graded_benchmark.cases[0])
     calibration_id = calibrate_case(store, case_id)
@@ -337,6 +328,7 @@ def test_calibration_rows_report_verification_state(store, graded_benchmark):
     assert corrupted.scan.verified == 0
 
 
+@pytest.mark.integration
 def test_calibration_scan_is_incomplete_when_case_inputs_are_unreadable(store, graded_benchmark):
     summary = run_experiment(
         store,
@@ -521,6 +513,7 @@ def test_detail_routes_bound_the_journal_bytes_they_read(store, assessed):
     assert service.progress(assessed.run_id).attempts[0].attempt_id == attempt_id
 
 
+@pytest.mark.integration
 def test_listing_charges_every_row_for_the_prefix_bytes_it_read(
     store, graded_benchmark, monkeypatch
 ):
@@ -557,6 +550,7 @@ def test_listing_and_detail_routes_agree_on_the_run_metadata_limit(store, assess
     assert service.progress(assessed.run_id).experiment_id == assessed.experiment_id
 
 
+@pytest.mark.integration
 def test_calibration_verification_bounds_the_blob_bytes_it_reads(
     store, graded_benchmark, monkeypatch
 ):
@@ -577,6 +571,7 @@ def test_calibration_verification_bounds_the_blob_bytes_it_reads(
     assert max(limits) <= 64 * 1024
 
 
+@pytest.mark.integration
 def test_calibration_verification_refuses_evidence_over_its_serve_limit(store, graded_benchmark):
     case_id = store.resolve(graded_benchmark.cases[0])
     calibration_id = calibrate_case(store, case_id)
@@ -596,6 +591,7 @@ def test_resolve_target_bounds_the_journal_bytes_it_reads(store, assessed, monke
         resolve_target(store, assessed.run_id)
 
 
+@pytest.mark.integration
 def test_case_calibrations_are_reachable_without_a_run(store, graded_benchmark):
     case_id = store.resolve(graded_benchmark.cases[0])
     calibration_id = calibrate_case(store, case_id)
@@ -614,6 +610,7 @@ def test_case_calibrations_are_reachable_without_a_run(store, graded_benchmark):
         service.case_calibrations(case_id, after="nope")
 
 
+@pytest.mark.integration
 def test_calibration_scan_pages_through_objects_and_counts_unreadable(store, graded_benchmark):
     case_id = store.resolve(graded_benchmark.cases[0])
     calibration_id = calibrate_case(store, case_id)

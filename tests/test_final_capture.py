@@ -18,6 +18,7 @@ def workspace_for(store, tmp_path):
     return case, root
 
 
+@pytest.mark.integration
 def test_capture_patch_includes_untracked_and_preserves_git_evidence(store, benchmark, tmp_path):
     case, root = workspace_for(store, tmp_path)
     (root / "greet.py").write_text("new result\n")
@@ -38,6 +39,7 @@ def test_capture_patch_includes_untracked_and_preserves_git_evidence(store, benc
     assert (copy / "link").readlink() == Path("new.py")
 
 
+@pytest.mark.integration
 def test_special_files_and_external_links_never_opened(store, benchmark, tmp_path):
     case, root = workspace_for(store, tmp_path)
     os.mkfifo(root / "pipe")
@@ -58,6 +60,7 @@ def test_special_files_and_external_links_never_opened(store, benchmark, tmp_pat
     assert blobs["workspace/ok"] == b"kept"
 
 
+@pytest.mark.integration
 def test_links_to_workspace_root_preserve_bytes_and_remain_grade_eligible(
     store, graded_benchmark, tmp_path, monkeypatch
 ):
@@ -108,6 +111,7 @@ def test_links_to_workspace_root_preserve_bytes_and_remain_grade_eligible(
     assert result.completion == "pass"
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("target", ["missing/..", "greet.py/.."])
 def test_links_cannot_traverse_missing_or_regular_components_before_parent(
     store, benchmark, tmp_path, target
@@ -139,6 +143,7 @@ def test_links_cannot_traverse_missing_or_regular_components_before_parent(
         )
 
 
+@pytest.mark.integration
 def test_frozen_ignored_and_exclusion_policy(store, benchmark, tmp_path):
     case, root = workspace_for(store, tmp_path)
     (root / ".gitignore").write_text("build/\nkeep.log\n")
@@ -158,6 +163,7 @@ def test_frozen_ignored_and_exclusion_policy(store, benchmark, tmp_path):
     }
 
 
+@pytest.mark.integration
 def test_git_inventory_retains_subject_added_commit_without_classifying_it(
     store, benchmark, tmp_path
 ):
@@ -182,6 +188,7 @@ def test_git_inventory_retains_subject_added_commit_without_classifying_it(
     assert commit + b" commit" in blobs["git-inventory.txt"]
 
 
+@pytest.mark.integration
 def test_ignored_dependency_trees_are_pruned_before_capture_limit(store, benchmark, tmp_path):
     case, root = workspace_for(store, tmp_path)
     (root / ".gitignore").write_text("node_modules/\n.venv/\n")
@@ -210,6 +217,7 @@ def test_ignored_dependency_trees_are_pruned_before_capture_limit(store, benchma
     }
 
 
+@pytest.mark.integration
 def test_nested_ignore_rules_apply_before_descent(store, benchmark, tmp_path):
     case, root = workspace_for(store, tmp_path)
     (root / "src/cache").mkdir(parents=True)
@@ -228,6 +236,7 @@ def test_nested_ignore_rules_apply_before_descent(store, benchmark, tmp_path):
     }
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("included", ["node_modules/selected/input.py", "node_modules/selected"])
 def test_protected_ignored_leaves_do_not_spend_budget_on_siblings(
     store, benchmark, tmp_path, included
@@ -271,6 +280,7 @@ def test_protected_ignored_leaves_do_not_spend_budget_on_siblings(
         )
 
 
+@pytest.mark.integration
 def test_explicitly_included_ignored_directory_still_obeys_entry_limit(store, benchmark, tmp_path):
     case, root = workspace_for(store, tmp_path)
     (root / ".gitignore").write_text("node_modules/\n")

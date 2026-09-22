@@ -207,12 +207,14 @@ Install uv, just, Lefthook and Node, then run `just setup`; `just doctor` report
 any of the four that is missing. Node runs the viewer's development-only module
 tests and is needed by `just check`, never at runtime. The checkout uses
 `src/dryheave`, argparse, Pydantic 2, uv/Hatchling, Ruff, cyclic-import checks and
-strict mypy. `just check` runs the full check/test gate, including the viewer's
-Node built-in module tests (`just test-js`, no npm dependency) and, through
-`just test-packaging`, a built wheel; `just coverage`
-enforces the separate 80% branch-coverage gate. `uv build` packages resources and examples.
+strict mypy. `just test` runs the unit suite only; tests that drive a real
+process, socket or packaged CLI carry the `integration` marker and run through
+`just test-integration`. `just check` runs the full check/test gate, including
+both suites, the viewer's Node built-in module tests (`just test-js`, no npm
+dependency) and, through `just test-packaging`, a built wheel; `just coverage`
+enforces the separate 80% branch-coverage gate over the unit and integration
+suites together. `uv build` packages resources and examples.
 Use `just install` to install or replace a CLI snapshot from the checkout,
 `just install-editable` to link the installed command to source, and `just uninstall`
-to remove the tool installation. CI and checkout-local Lefthook hooks use the same
-checks. Development stores, fixtures, downloads and caches belong in ignored
-checkout-local directories.
+to remove the tool installation. CI and checkout-local Lefthook hooks use the same checks. Development stores,
+fixtures, downloads and caches belong in ignored checkout-local directories.

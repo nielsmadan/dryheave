@@ -115,6 +115,7 @@ def test_domain_commands_register_without_importing_cli_in_services(
     assert json.loads(capsys.readouterr().out)["data"] == {"title": "Task", "store": str(tmp_path)}
 
 
+@pytest.mark.integration
 def test_installed_module_entrypoint(tmp_path: Path) -> None:
     result = subprocess.run(
         [sys.executable, "-m", "dryheave", "store", "path", "--store", str(tmp_path), "--json"],

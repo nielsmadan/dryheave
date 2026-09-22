@@ -46,6 +46,7 @@ def test_subject_owned_executable_is_rejected_before_execution(tmp_path):
     assert not canary.exists()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "program, failure_marker, outcome, observed",
     [
@@ -99,6 +100,7 @@ def test_exit_codes_require_truthful_execution_evidence(
     assert identities
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
 def test_one_byte_stream_limit_remains_independent_of_evidence_budget(tmp_path, stream):
     workspace = tmp_path / "workspace"

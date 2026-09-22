@@ -53,6 +53,7 @@ def calibration_objects(store):
     ]
 
 
+@pytest.mark.integration
 def test_public_calibration_retains_baseline_failure_reference_success_without_run(
     store, graded_benchmark, historical_repo, capsys
 ):
@@ -88,6 +89,7 @@ def test_public_calibration_retains_baseline_failure_reference_success_without_r
     assert record.files == store.get(identifier).files
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "program",
     [
@@ -110,6 +112,7 @@ def test_runtime_and_unobserved_execution_errors_do_not_demonstrate_failure(
     assert result.baseline.error == "expected_execution_evidence_missing"
 
 
+@pytest.mark.integration
 def test_passing_baseline_is_ineffective(store, graded_benchmark):
     case_id = altered_case(
         store, graded_benchmark.cases[0], program="print('PRIVATE_VERIFIER_SENTINEL')\n"
@@ -120,6 +123,7 @@ def test_passing_baseline_is_ineffective(store, graded_benchmark):
     assert record.criteria[0].calibration.reference.outcome == "pass"
 
 
+@pytest.mark.integration
 def test_direct_executable_hidden_entrypoint_is_trusted(store, graded_benchmark):
     case = load_frozen_case(store, graded_benchmark.cases[0])
     program = (
@@ -133,6 +137,7 @@ def test_direct_executable_hidden_entrypoint_is_trusted(store, graded_benchmark)
     assert load_calibration(store, calibrate_case(store, case_id)).status == "demonstrated"
 
 
+@pytest.mark.integration
 def test_one_byte_verifier_output_calibrates_and_assesses_with_retained_metadata(
     store, graded_benchmark
 ):
@@ -191,6 +196,7 @@ def test_one_byte_verifier_output_calibrates_and_assesses_with_retained_metadata
     assert check.calibration.reference.outcome == "pass"
 
 
+@pytest.mark.integration
 def test_timeout_is_a_retained_error_and_stops_verifier(store, graded_benchmark):
     case = load_frozen_case(store, graded_benchmark.cases[0])
     criterion = case.criteria[0].model_copy(
@@ -208,6 +214,7 @@ def test_timeout_is_a_retained_error_and_stops_verifier(store, graded_benchmark)
     assert record.criteria[0].calibration.reference.outcome == "error"
 
 
+@pytest.mark.integration
 def test_completed_verifier_stops_observed_detached_child_before_snapshot(store, graded_benchmark):
     program = (
         "import subprocess, sys, time\n"
@@ -235,6 +242,7 @@ def test_completed_verifier_stops_observed_detached_child_before_snapshot(store,
             pass
 
 
+@pytest.mark.integration
 def test_missing_reference_and_judge_only_remain_honest(store, graded_benchmark):
     missing = altered_case(store, graded_benchmark.cases[0], reference_patch=False)
     record = load_calibration(store, calibrate_case(store, missing))
@@ -259,6 +267,7 @@ def test_missing_reference_and_judge_only_remain_honest(store, graded_benchmark)
     assert set(record.files) == {"cleanup.json"}
 
 
+@pytest.mark.integration
 def test_shared_suites_keep_side_order_and_independent_copies(store, graded_benchmark):
     case = load_frozen_case(store, graded_benchmark.cases[0])
     program = (
@@ -301,6 +310,7 @@ def test_shared_suites_keep_side_order_and_independent_copies(store, graded_benc
     assert record.criteria[1].calibration.reference.outcome == "error"
 
 
+@pytest.mark.integration
 def test_verifier_environment_and_setup_match_assessment_contract(
     store, graded_benchmark, tmp_path
 ):
@@ -317,10 +327,8 @@ def test_verifier_environment_and_setup_match_assessment_contract(
     "mutation",
     ["case", "criteria", "verifier", "files", "stdout", "result", "missing-result", "command"],
 )
-def test_calibration_validates_exact_identity_and_retained_evidence(
-    store, graded_benchmark, mutation
-):
-    identifier = calibrate_case(store, graded_benchmark.cases[0])
+def test_calibration_validates_exact_identity_and_retained_evidence(store, calibrated, mutation):
+    identifier = calibrated
     record = load_calibration(store, identifier)
     files = store.read_blobs(identifier)
     if mutation == "case":
@@ -364,6 +372,7 @@ def test_calibration_validates_exact_identity_and_retained_evidence(
     assert load_calibration(store, identifier).status == "demonstrated"
 
 
+@pytest.mark.integration
 def test_changed_case_alias_never_reuses_old_calibration(store, graded_benchmark):
     original = graded_benchmark.cases[0]
     store.set_alias("selected", original)
@@ -375,6 +384,7 @@ def test_changed_case_alias_never_reuses_old_calibration(store, graded_benchmark
     assert load_calibration(store, identifier).status == "demonstrated"
 
 
+@pytest.mark.integration
 def test_standalone_bundle_roundtrip_requires_declared_sensitive_evidence(
     store, graded_benchmark, tmp_path
 ):
@@ -411,6 +421,7 @@ def test_native_lock_prevents_calibration_execution(store, graded_benchmark):
     assert calibration_objects(store) == []
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("action", ["calibrate", "run", "assess"])
 def test_hard_interrupted_initial_publication_allows_later_native_progress(
     store, graded_benchmark, action
@@ -465,6 +476,7 @@ def test_hard_interrupted_initial_publication_allows_later_native_progress(
     assert {path.name: path.read_bytes() for path in staged.iterdir()} == original
 
 
+@pytest.mark.integration
 def test_interrupted_verifier_stops_owned_writers_and_retains_recovery_evidence(
     store, graded_benchmark, monkeypatch
 ):
@@ -508,6 +520,7 @@ def test_interrupted_verifier_stops_owned_writers_and_retains_recovery_evidence(
     )
 
 
+@pytest.mark.integration
 def test_unresolved_owned_writers_block_evidence_capture_and_publication(
     store, graded_benchmark, monkeypatch
 ):
@@ -527,6 +540,7 @@ def test_unresolved_owned_writers_block_evidence_capture_and_publication(
     assert list((store.root / "calibrations").glob("*/operation.json"))
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("matching", [True, False])
 def test_recovery_stops_only_matching_recorded_process_identities(
     store, graded_benchmark, matching
@@ -558,6 +572,7 @@ def test_recovery_stops_only_matching_recorded_process_identities(
             process.wait(timeout=5)
 
 
+@pytest.mark.integration
 def test_schema_version_is_strict(store, graded_benchmark):
     record = load_calibration(store, calibrate_case(store, graded_benchmark.cases[0]))
     for version in (2, "1", True):
@@ -566,6 +581,7 @@ def test_schema_version_is_strict(store, graded_benchmark):
             parse_model(canonical_json(payload), CaseCalibration)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("suite", [None, "workspace"])
 def test_criterion_names_do_not_hide_required_evidence(store, graded_benchmark, suite):
     case = load_frozen_case(store, graded_benchmark.cases[0])
@@ -576,6 +592,7 @@ def test_criterion_names_do_not_hide_required_evidence(store, graded_benchmark, 
     assert any(name.endswith("hidden-evidence/stdout.bin") for name in record.files)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("action", ["calibrate", "run", "assess"])
 def test_unresolved_calibration_recovery_guards_all_native_entrypoints(
     store, graded_benchmark, monkeypatch, action
@@ -632,6 +649,7 @@ def test_public_cancellation_returns_retry_instruction(
     assert "case calibrate" in json.loads(response.err)["error"]["message"]
 
 
+@pytest.mark.integration
 def test_run_export_discloses_unlinked_calibration_evidence(store, graded_benchmark, tmp_path):
     from dryheave.experiments import create_experiment
     from dryheave.runner import run_experiment

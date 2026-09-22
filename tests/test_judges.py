@@ -14,6 +14,7 @@ from dryheave.runner import run_experiment
 from dryheave.runner_models import RunOptions
 
 
+@pytest.mark.integration
 def test_deterministic_criterion_named_judge_has_separate_artifacts(
     store, graded_benchmark, tmp_path
 ):
@@ -69,6 +70,7 @@ def test_deterministic_criterion_named_judge_has_separate_artifacts(
     assert any("/judge/j-" in name for name in evidence)
 
 
+@pytest.mark.integration
 def test_partial_judge_response_retains_valid_judgment_and_spend(store, graded_benchmark, tmp_path):
     case_id = graded_benchmark.cases[0]
     case = load_frozen_case(store, case_id)
@@ -170,6 +172,7 @@ def test_codex_schema_requires_nullable_nested_fields_without_model_launch():
     assert {"type": "null"} in judgment["properties"]["score"]["anyOf"]
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("invalid", [False, True])
 def test_claude_judge_uses_structured_protocol_and_provider_usage(
     store, benchmark, tmp_path, invalid
@@ -222,6 +225,7 @@ def test_claude_judge_uses_structured_protocol_and_provider_usage(
     assert results[0].outcome == ("error" if invalid else "pass")
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("completed,pending", [(False, True), (True, False), (True, True)])
 def test_unfinished_assessment_and_export_reconstruct_durable_judge_spend(
     store, graded_benchmark, tmp_path, monkeypatch, completed, pending

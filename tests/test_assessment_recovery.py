@@ -66,6 +66,7 @@ def _writer_case(store, benchmark, root):
     )
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("interrupt", [signal.SIGINT, signal.SIGTERM, signal.SIGKILL])
 def test_assessor_persists_descendants_and_recovers_after_parent_disappears(
     store, graded_benchmark, tmp_path, monkeypatch, interrupt
@@ -144,6 +145,7 @@ def test_assessor_persists_descendants_and_recovers_after_parent_disappears(
                     psutil.Process(identity.pid).kill()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("finished", [False, True])
 def test_resume_refuses_subject_launch_when_grading_cleanup_is_unresolved(
     store, graded_benchmark, monkeypatch, finished
@@ -176,6 +178,7 @@ def test_resume_refuses_subject_launch_when_grading_cleanup_is_unresolved(
     assert len(run_status(store, summary.run_id).attempts) == 1
 
 
+@pytest.mark.integration
 def test_grading_recovery_preserves_reused_process_identity(store):
     from dryheave.assessment_recovery import reconcile_grading
     from dryheave.drivers.models import ProcessIdentity

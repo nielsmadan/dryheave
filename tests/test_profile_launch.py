@@ -204,6 +204,7 @@ def test_explicit_launcher_argv_and_missing_reference(store, tmp_path: Path) -> 
     assert plan.launcher_executable == sys.executable
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("on_path", [False, True])
 @pytest.mark.parametrize("use_launcher", [False, True])
 def test_relative_executables_work_from_launch_workspace(

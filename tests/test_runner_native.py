@@ -15,6 +15,7 @@ from dryheave.runner import load_capture, run_experiment
 from dryheave.runner_models import RunOptions
 
 
+@pytest.mark.integration
 def test_native_wiring_builds_log_source_before_launch_and_preserves_plan(
     store, benchmark, monkeypatch
 ):
@@ -83,6 +84,7 @@ def test_native_wiring_builds_log_source_before_launch_and_preserves_plan(
     assert Path(result.attempts[0].runtime).parent == runtime.absolute()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("terminal_closed", [False, True])
 def test_lost_launch_acknowledgement_requires_terminal_reconciliation(
     store, benchmark, monkeypatch, terminal_closed

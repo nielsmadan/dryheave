@@ -180,6 +180,7 @@ def test_locks_are_exclusive_and_released_on_error(tmp_path: Path) -> None:
         assert path.is_file()
 
 
+@pytest.mark.integration
 def test_lock_excludes_another_process(tmp_path: Path) -> None:
     path = tmp_path / "lock"
     program = """import sys

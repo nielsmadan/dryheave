@@ -9,7 +9,9 @@ Use `just setup` for dependencies and checkout-local Lefthook hooks. Before
 declaring work complete, run `just check`. Run `just coverage` for the separate
 80% branch coverage gate and `uv build` after packaging changes. CI uses the same
 lint, formatting, cyclic-import, strict type and test checks. Tests align with
-source modules under tests/ and share fixtures in conftest.py.
+source modules under tests/ and share fixtures in conftest.py. A bare pytest run
+covers the unit suite; mark a test `integration` when it drives a real process,
+socket or packaged CLI, and run those with `just test-integration`.
 
 Use `just install` to install or replace the current-source CLI snapshot,
 `just install-editable` to link the CLI to this checkout, and `just uninstall`

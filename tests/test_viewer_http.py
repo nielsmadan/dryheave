@@ -16,7 +16,6 @@ import pytest
 
 from conftest import HOSTILE
 from dryheave import journals, viewer_http
-from dryheave.assessments import assess_run
 from dryheave.calibrations import calibrate_case
 from dryheave.constants import VERSION
 from dryheave.errors import ConflictError
@@ -27,17 +26,6 @@ from dryheave.storage import ObjectStore
 from dryheave.viewer import ViewerService
 from dryheave.viewer_http import ServerLimits, ViewerServer
 from dryheave.viewer_models import ViewerTarget
-
-
-@pytest.fixture
-def assessed(store, graded_benchmark):
-    summary = run_experiment(
-        store,
-        create_experiment(store, graded_benchmark),
-        options=RunOptions(mode="offline-fixture"),
-    )
-    assess_run(store, summary.run_id)
-    return summary
 
 
 @pytest.fixture
@@ -72,6 +60,7 @@ def _raw(server: ViewerServer, request: bytes) -> bytes:
     return b"".join(chunks)
 
 
+@pytest.mark.integration
 def test_index_assets_and_security_headers(served):
     server, _ = served
     response, body = _get(server, "/")
@@ -116,6 +105,7 @@ def test_index_assets_and_security_headers(served):
         assert json.loads(body)["error"]["code"] == "not_found"
 
 
+@pytest.mark.integration
 def test_api_runs_report_and_progress(served):
     server, summary = served
     response, body = _get(server, "/api/runs")
@@ -143,6 +133,7 @@ def test_api_runs_report_and_progress(served):
     assert json.loads(body)["error"]["code"] == "not_found"
 
 
+@pytest.mark.integration
 def test_labels_route_serves_the_alias_index_for_immutable_ids(served, store):
     server, assessed = served
     response, body = _get(server, "/api/labels")
@@ -157,6 +148,7 @@ def test_labels_route_serves_the_alias_index_for_immutable_ids(served, store):
     assert json.loads(body)["error"]["code"] == "not_found"
 
 
+@pytest.mark.integration
 def test_attempt_detail_routes_validate_paths(served):
     server, summary = served
     attempt_id = summary.attempts[0].attempt_id
@@ -185,6 +177,7 @@ def test_attempt_detail_routes_validate_paths(served):
     assert response.status == 404
 
 
+@pytest.mark.integration
 def test_host_origin_and_method_validation(served):
     server, _ = served
     response, body = _get(server, "/api/runs", headers={"Host": "evil.example"})
@@ -226,6 +219,7 @@ def test_host_origin_and_method_validation(served):
     assert reply.startswith(b"HTTP/1.1 400")
 
 
+@pytest.mark.integration
 def test_lifecycle_port_reuse_and_clean_shutdown(store, assessed):
     service = ViewerService(store, target=ViewerTarget(kind="run", id=assessed.run_id))
     server = ViewerServer(service)
@@ -246,6 +240,7 @@ def test_lifecycle_port_reuse_and_clean_shutdown(store, assessed):
     replacement.stop()
 
 
+@pytest.mark.integration
 def test_concurrent_requests_are_bounded(store, assessed, monkeypatch):
     service = ViewerService(store)
     server = ViewerServer(service, limits=ServerLimits(max_concurrent=2, slot_seconds=10))
@@ -284,6 +279,7 @@ def test_concurrent_requests_are_bounded(store, assessed, monkeypatch):
         server.stop()
 
 
+@pytest.mark.integration
 def test_accepted_socket_times_out_when_idle(store, assessed):
     server = ViewerServer(ViewerService(store), limits=ServerLimits(socket_timeout=0.2))
     server.start()
@@ -298,6 +294,7 @@ def test_accepted_socket_times_out_when_idle(store, assessed):
         server.stop()
 
 
+@pytest.mark.integration
 def test_oversized_responses_fail_explicitly(store, assessed, monkeypatch):
     monkeypatch.setattr(viewer_http, "MAX_RESPONSE_BYTES", 10)
     server = ViewerServer(ViewerService(store))
@@ -310,6 +307,7 @@ def test_oversized_responses_fail_explicitly(store, assessed, monkeypatch):
         server.stop()
 
 
+@pytest.mark.integration
 def test_malformed_request_versions_are_refused_with_full_headers(served):
     server, _ = served
     host = f"127.0.0.1:{_port(server)}"
@@ -328,6 +326,7 @@ def test_malformed_request_versions_are_refused_with_full_headers(served):
         assert json.loads(body)["error"]["code"] == "invalid_version"
 
 
+@pytest.mark.integration
 def test_head_sends_headers_without_a_body(served):
     server, _ = served
     connection = http.client.HTTPConnection("127.0.0.1", _port(server), timeout=5)
@@ -341,6 +340,7 @@ def test_head_sends_headers_without_a_body(served):
     connection.close()
 
 
+@pytest.mark.integration
 def test_unknown_methods_are_validated_before_they_are_refused(served):
     server, _ = served
     host = f"127.0.0.1:{_port(server)}"
@@ -354,6 +354,7 @@ def test_unknown_methods_are_validated_before_they_are_refused(served):
     assert json.loads(reply.partition(b"\r\n\r\n")[2])["error"]["code"] == "invalid_host"
 
 
+@pytest.mark.integration
 def test_error_messages_never_disclose_store_paths(store, assessed, monkeypatch):
     monkeypatch.setattr(journals, "MAX_JOURNAL_BYTES", 1)
     server = ViewerServer(ViewerService(store))
@@ -370,6 +371,7 @@ def test_error_messages_never_disclose_store_paths(store, assessed, monkeypatch)
         server.stop()
 
 
+@pytest.mark.integration
 def test_host_authority_must_match_exactly(served):
     server, _ = served
     host = f"127.0.0.1:{_port(server)}"
@@ -387,6 +389,7 @@ def test_host_authority_must_match_exactly(served):
     assert json.loads(body)["total"] == 1
 
 
+@pytest.mark.integration
 def test_duplicate_and_null_origins_are_rejected(served):
     server, _ = served
     host = f"127.0.0.1:{_port(server)}"
@@ -405,6 +408,7 @@ def test_duplicate_and_null_origins_are_rejected(served):
     assert json.loads(body)["total"] == 1
 
 
+@pytest.mark.integration
 def test_percent_encoded_paths_never_reach_assets_or_the_filesystem(served):
     server, _ = served
     for path in (
@@ -421,6 +425,7 @@ def test_percent_encoded_paths_never_reach_assets_or_the_filesystem(served):
     assert body == files("dryheave").joinpath("resources/viewer/viewer.css").read_bytes()
 
 
+@pytest.mark.integration
 def test_get_with_a_body_is_answered_once_and_closed(served):
     server, _ = served
     host = f"127.0.0.1:{_port(server)}"
@@ -435,6 +440,7 @@ def test_get_with_a_body_is_answered_once_and_closed(served):
     assert json.loads(body)["total"] == 1
 
 
+@pytest.mark.integration
 def test_compare_route_serves_typed_comparisons(served):
     server, summary = served
     run = summary.run_id
@@ -461,6 +467,7 @@ def test_compare_route_serves_typed_comparisons(served):
     assert "both comparison variants" in json.loads(body)["error"]["message"]
 
 
+@pytest.mark.integration
 def test_calibration_routes_serve_run_and_case_scopes(store, graded_benchmark):
     case_id = store.resolve(graded_benchmark.cases[0])
     calibration_id = calibrate_case(store, case_id)
@@ -503,6 +510,7 @@ def test_calibration_routes_serve_run_and_case_scopes(store, graded_benchmark):
         server.stop()
 
 
+@pytest.mark.integration
 def test_hostile_transcript_bytes_round_trip_verbatim_over_http(store, hostile_run):
     run_id, attempt_id = hostile_run
     server = ViewerServer(ViewerService(store))
@@ -538,6 +546,7 @@ def test_hostile_transcript_bytes_round_trip_verbatim_over_http(store, hostile_r
         server.stop()
 
 
+@pytest.mark.integration
 def test_saturated_handler_slots_answer_503_with_security_headers(store, assessed, monkeypatch):
     service = ViewerService(store)
     entered = threading.Event()
@@ -575,6 +584,7 @@ def test_saturated_handler_slots_answer_503_with_security_headers(store, assesse
         server.stop()
 
 
+@pytest.mark.integration
 def test_connection_cap_refuses_without_blocking_the_accept_loop(store, assessed):
     server = ViewerServer(
         ViewerService(store),
@@ -598,6 +608,7 @@ def test_connection_cap_refuses_without_blocking_the_accept_loop(store, assessed
         server.stop()
 
 
+@pytest.mark.integration
 def test_a_trickling_refused_client_does_not_stall_the_accept_loop(store, assessed):
     server = ViewerServer(
         ViewerService(store),
@@ -638,6 +649,7 @@ def test_a_trickling_refused_client_does_not_stall_the_accept_loop(store, assess
         server.stop()
 
 
+@pytest.mark.integration
 def test_error_messages_scrub_store_paths_holding_spaces_and_quotes(tmp_path, monkeypatch):
     root = tmp_path / "My Bench's cases" / "store"
     runs = journals.RunStore(root)
@@ -657,6 +669,7 @@ def test_error_messages_scrub_store_paths_holding_spaces_and_quotes(tmp_path, mo
         server.stop()
 
 
+@pytest.mark.integration
 def test_serve_reports_handlers_that_outlive_the_shutdown_timeout(store, assessed, monkeypatch):
     service = ViewerService(store)
     entered = threading.Event()
@@ -698,6 +711,7 @@ def test_serve_reports_handlers_that_outlive_the_shutdown_timeout(store, assesse
         holder.join(timeout=25)
 
 
+@pytest.mark.integration
 def test_stop_reports_handlers_that_outlive_the_shutdown_timeout(store, assessed, monkeypatch):
     service = ViewerService(store)
     entered = threading.Event()
@@ -726,6 +740,7 @@ def test_stop_reports_handlers_that_outlive_the_shutdown_timeout(store, assessed
         holder.join(timeout=15)
 
 
+@pytest.mark.integration
 def test_a_full_slot_table_does_not_stall_the_accept_loop(store, assessed, monkeypatch):
     service = ViewerService(store)
     entered = threading.Event()
@@ -770,6 +785,7 @@ def _viewer_root():
     return files("dryheave").joinpath("resources", "viewer")
 
 
+@pytest.mark.integration
 def test_every_packaged_viewer_asset_is_allowlisted_and_served(served):
     server, _ = served
     root = _viewer_root()

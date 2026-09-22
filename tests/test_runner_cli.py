@@ -11,6 +11,7 @@ from dryheave.runner_models import RunOptions
 from dryheave.workspaces import Workspace, WorkspaceConfig, resolve_transport
 
 
+@pytest.mark.integration
 def test_assess_convenience_completes_existing_pipeline(store, graded_benchmark, capsys):
     identifier = create_experiment(store, graded_benchmark)
     common = ["--store", str(store.root), "--json"]
@@ -24,6 +25,7 @@ def test_assess_convenience_completes_existing_pipeline(store, graded_benchmark,
     assert resumed["assessments"] == data["assessments"]
 
 
+@pytest.mark.integration
 def test_status_rejects_assessment(store, benchmark, capsys):
     result = run_experiment(
         store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
@@ -41,11 +43,10 @@ def test_status_rejects_assessment(store, benchmark, capsys):
     ["unstarted", "missing-capture", "capture-error", "input-error", "cleanup", "cancelled"],
 )
 def test_assess_guard_preserves_run_identity_without_spending(
-    store, benchmark, capsys, monkeypatch, failure
+    store, assessed, capsys, monkeypatch, failure
 ):
-    identifier = create_experiment(store, benchmark)
-    summary = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
-    assert capsys.readouterr().err == f"dryheave run reserved: {summary.run_id}\n"
+    identifier = assessed.experiment_id
+    summary = assessed
     capture = load_capture(store, summary.attempts[0].capture_id)
     if failure == "unstarted":
         summary = summary.model_copy(update={"unstarted_trials": ("pending-trial",)})
@@ -94,6 +95,43 @@ def test_assess_guard_preserves_run_identity_without_spending(
     assert f"dryheave assess {summary.run_id}" in error
 
 
+@pytest.mark.integration
+def test_assess_guard_reserves_an_executed_run_before_refusing_it(
+    store, benchmark, capsys, monkeypatch
+):
+    identifier = create_experiment(store, benchmark)
+    summary = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    assert capsys.readouterr().err == f"dryheave run reserved: {summary.run_id}\n"
+    capture = load_capture(store, summary.attempts[0].capture_id)
+    guarded = summary.model_copy(update={"unstarted_trials": ("pending-trial",)})
+
+    def assess(*_args, **_kwargs):
+        pytest.fail("Guarded incomplete execution must not start assessment.")
+
+    monkeypatch.setattr("dryheave.runner_cli.run_experiment", lambda *_args, **_kwargs: guarded)
+    monkeypatch.setattr("dryheave.runner_cli.load_capture", lambda *_args: capture)
+    monkeypatch.setattr("dryheave.runner_cli.assess_run", assess)
+    assert (
+        main(
+            [
+                "--store",
+                str(store.root),
+                "--json",
+                "run",
+                identifier,
+                "--mode",
+                "offline-fixture",
+                "--assess",
+            ]
+        )
+        == 2
+    )
+    error = json.loads(capsys.readouterr().err)["error"]["message"]
+    assert f"Run {summary.run_id} retains its evidence" in error
+    assert f"dryheave assess {summary.run_id}" in error
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("error", [InputError("synthetic assessment failure"), KeyboardInterrupt()])
 def test_assessment_failure_keeps_run_id_and_recovery_command(
     store, benchmark, capsys, monkeypatch, error
@@ -138,6 +176,7 @@ def test_transport_resolution_precedence_is_explicit_then_config_then_path(tmp_p
     assert resolve_transport(None, None) is None
 
 
+@pytest.mark.integration
 def test_new_cli_run_freezes_transport_and_resume_does_not_resolve_defaults(
     store, benchmark, tmp_path, monkeypatch, capsys
 ):

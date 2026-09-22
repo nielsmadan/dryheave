@@ -6,7 +6,6 @@ from urllib.parse import urlsplit
 import pytest
 
 from dryheave import viewer_cli
-from dryheave.assessments import assess_run
 from dryheave.bundles import export_bundle, import_bundle
 from dryheave.cli import main
 from dryheave.errors import InputError, NotFoundError
@@ -18,17 +17,6 @@ from dryheave.viewer import ViewerService, resolve_target
 from dryheave.viewer_http import ViewerServer
 
 STUB_URL = "http://127.0.0.1:65500/"
-
-
-@pytest.fixture
-def assessed(store, graded_benchmark):
-    summary = run_experiment(
-        store,
-        create_experiment(store, graded_benchmark),
-        options=RunOptions(mode="offline-fixture"),
-    )
-    assess_run(store, summary.run_id)
-    return summary
 
 
 @pytest.fixture
@@ -115,6 +103,7 @@ def test_view_reports_a_missing_reference_without_serving(store, assessed, stub_
     assert json.loads(capsys.readouterr().err)["error"]["code"] == "not_found"
 
 
+@pytest.mark.integration
 def test_serve_returns_on_keyboard_interrupt_and_closes_the_socket(store, monkeypatch):
     server = ViewerServer(ViewerService(store))
     port = urlsplit(server.url).port
@@ -128,6 +117,7 @@ def test_serve_returns_on_keyboard_interrupt_and_closes_the_socket(store, monkey
         socket.create_connection(("127.0.0.1", port), timeout=2)
 
 
+@pytest.mark.integration
 def test_view_never_triggers_assessment_or_model_calls(
     store, graded_benchmark, stub_server, monkeypatch, capsys
 ):

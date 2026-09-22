@@ -15,6 +15,7 @@ from dryheave.runner import run_experiment
 from dryheave.runner_models import RunOptions
 
 
+@pytest.mark.integration
 def test_partial_judge_spend_across_attempts_uses_one_defensive_snapshot(
     store, benchmark, monkeypatch
 ):
@@ -54,6 +55,7 @@ def test_partial_judge_spend_across_attempts_uses_one_defensive_snapshot(
     assert all(attempt.roles[2].coverage == "partial" for attempt in report.attempts)
 
 
+@pytest.mark.integration
 def test_currencyless_proven_zero_is_neutral_and_pending_spend_is_visible(
     store, graded_benchmark, tmp_path
 ):
@@ -108,6 +110,7 @@ def test_currencyless_proven_zero_is_neutral_and_pending_spend_is_visible(
     assert report.groups[0].known_spend_by_currency == {"USD": 0.0002}
 
 
+@pytest.mark.integration
 def test_compatible_comparison_retains_partial_attempt_attrition(
     store, graded_benchmark, monkeypatch
 ):
@@ -151,6 +154,7 @@ def test_unstarted_variant_scheduling_remains_visible(store, graded_benchmark):
     assert report.groups[0].eligible_completion_rate is None
 
 
+@pytest.mark.integration
 def test_latest_unassessed_retry_is_attrition_and_retains_earlier_spend(
     store, graded_benchmark, tmp_path
 ):
@@ -202,6 +206,7 @@ def test_latest_unassessed_retry_is_attrition_and_retains_earlier_spend(
     )
 
 
+@pytest.mark.integration
 def test_completely_unassessed_matching_run_is_reported_as_attrition(store, graded_benchmark):
     identifier = create_experiment(store, graded_benchmark)
     before = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
@@ -212,6 +217,7 @@ def test_completely_unassessed_matching_run_is_reported_as_attrition(store, grad
     assert (comparison.excluded_before, comparison.excluded_after) == (0, 1)
 
 
+@pytest.mark.integration
 def test_saved_variant_comparison_records_real_failure_improvement_and_selected_spend(
     store, graded_benchmark, tmp_path, monkeypatch
 ):

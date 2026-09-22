@@ -11,8 +11,5 @@ pre-commit:
 pre-push:
   commands:
     check:
-      run: just check
+      run: just check-fast
       priority: 1
-    coverage:
-      run: just coverage
-      priority: 2

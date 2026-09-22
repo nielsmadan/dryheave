@@ -34,8 +34,10 @@ jobs:
         run: node --test tests/js/*.test.mjs
       - name: Test
         run: uv run pytest -q
+      - name: Integration test
+        run: uv run pytest -q -m integration
       - name: Coverage
-        run: uv run pytest -q --cov --cov-report=xml
+        run: uv run pytest -q -m 'not packaging' --cov --cov-report=xml
       - name: Build package
         run: uv build
       - name: Verify packaged wheel

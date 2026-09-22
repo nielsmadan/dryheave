@@ -79,6 +79,7 @@ def test_transport_config_rejects_unsafe_paths(value):
         WorkspaceConfig(tui_test=value)
 
 
+@pytest.mark.integration
 def test_real_cli_nested_discovery_precedence_and_relocation(tmp_path, short_runtime, monkeypatch):
     root = tmp_path / "original"
     result = cli(tmp_path, "init", str(root), "--runtime-root", str(short_runtime))
@@ -104,6 +105,7 @@ def test_real_cli_nested_discovery_precedence_and_relocation(tmp_path, short_run
     assert json.loads(nearest.stdout)["data"]["path"] == str(nested / "nearby")
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "content",
     [
@@ -182,6 +184,7 @@ def test_interrupted_init_resumes_owned_directories_and_original_options(
     assert initialized_workspace(tmp_path) == recovered
 
 
+@pytest.mark.integration
 def test_concurrent_init_reports_lock_busy_without_changing_files(tmp_path, short_runtime):
     with directory_fd(tmp_path) as descriptor:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -262,6 +265,7 @@ def test_config_rejects_overlapping_or_root_directories(tmp_path, content):
         discover_workspace(tmp_path)
 
 
+@pytest.mark.integration
 def test_real_cli_workspace_skill_install_defaults_and_explicit_override(tmp_path, short_runtime):
     from dryheave.skills import SKILL_NAMES, bundled_skill
 
@@ -281,6 +285,7 @@ def test_real_cli_workspace_skill_install_defaults_and_explicit_override(tmp_pat
     assert set(explicit.iterdir()) == {explicit / SKILL_NAMES[0]}
 
 
+@pytest.mark.integration
 def test_omitted_skill_target_requires_initialized_workspace(tmp_path):
     result = cli(tmp_path, "skills", "install")
     assert result.returncode == 2
