@@ -37,8 +37,10 @@ ABSOLUTE_PATH = re.compile(r"(?<![\w/])(?:/[^\s'\"/]*(?:[ '\"][^\s'\"/]+)*)+")
 SECURITY_HEADERS = (
     (
         "Content-Security-Policy",
-        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
-        "img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        (
+            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+            "img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        ),
     ),
     ("X-Content-Type-Options", "nosniff"),
     ("Cache-Control", "no-store"),

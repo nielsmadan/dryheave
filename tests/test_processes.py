@@ -130,12 +130,14 @@ def test_output_written_before_cancellation_is_retained(tmp_path: Path) -> None:
             argv=(
                 sys.executable,
                 "-c",
-                "import pathlib,sys,time\n"
-                f"pathlib.Path({str(started)!r}).write_text('1')\n"
-                "time.sleep(0.5)\n"
-                'sys.stdout.write("usage=12\\n")\n'
-                "sys.stdout.flush()\n"
-                "time.sleep(30)\n",
+                (
+                    "import pathlib,sys,time\n"
+                    f"pathlib.Path({str(started)!r}).write_text('1')\n"
+                    "time.sleep(0.5)\n"
+                    'sys.stdout.write("usage=12\\n")\n'
+                    "sys.stdout.flush()\n"
+                    "time.sleep(30)\n"
+                ),
             ),
             max_output_bytes=100000,
         ),
@@ -161,12 +163,14 @@ def test_output_clipped_while_draining_reports_the_output_limit(tmp_path: Path) 
             argv=(
                 sys.executable,
                 "-c",
-                "import pathlib,sys,time\n"
-                f"pathlib.Path({str(started)!r}).write_text('1')\n"
-                "time.sleep(0.5)\n"
-                'sys.stdout.write("x" * 100000)\n'
-                "sys.stdout.flush()\n"
-                "time.sleep(30)\n",
+                (
+                    "import pathlib,sys,time\n"
+                    f"pathlib.Path({str(started)!r}).write_text('1')\n"
+                    "time.sleep(0.5)\n"
+                    'sys.stdout.write("x" * 100000)\n'
+                    "sys.stdout.flush()\n"
+                    "time.sleep(30)\n"
+                ),
             ),
             max_output_bytes=100,
         ),

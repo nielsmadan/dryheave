@@ -52,7 +52,7 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "PL", "BLE", "S", "SLF", "RUF"]
+extend-select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "PL", "BLE", "S", "SLF", "RUF"]
 ignore = ["E501", "S603", "S607"]
 
 [tool.ruff.lint.pylint]
@@ -64,6 +64,8 @@ max-args = 6
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F401", "E402"]
 "tests/*" = ["S101", "SLF001", "S108", "E702", "E402", "PLC0415", "PLW1510", "PLR2004"]
+# The example validates CLI output shape; ValueError is its contract, not a caller type error.
+"src/dryheave/resources/examples/offline_demo.py" = ["TRY004"]
 
 [tool.pylint."messages control"]
 disable = ["all"]
@@ -80,11 +82,12 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not packaging and not integration'"
+addopts = "-m 'not packaging and not integration' --strict-config --strict-markers"
 markers = [
     "packaging: asserts against a wheel that `just build` has already produced",
     "integration: drives a real process, socket or packaged CLI end to end",
 ]
+filterwarnings = ["error"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dryheave"]

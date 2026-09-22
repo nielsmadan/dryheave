@@ -221,8 +221,10 @@ def test_delayed_composer_render_waits_for_match(tmp_path, driver_plan):
             "structured_input",
         ),
         (
-            "Unknown service: select an option\n\u203a 1. Proceed\n  2. Cancel\n\n"
-            "Press enter to confirm or esc to cancel",
+            (
+                "Unknown service: select an option\n\u203a 1. Proceed\n  2. Cancel\n\n"
+                "Press enter to confirm or esc to cancel"
+            ),
             "unsupported",
         ),
     ],
