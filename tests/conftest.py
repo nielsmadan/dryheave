@@ -18,6 +18,9 @@ class ExamplePayload(StrictModel):
     count: int = 1
 
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
 @pytest.fixture
 def payload() -> ExamplePayload:
     return ExamplePayload(title="Historical task")
@@ -190,7 +193,7 @@ def build_benchmark(store, historical_repo, root: Path) -> ExperimentDraft:
 
     source, baseline, _, _ = historical_repo
     repository = capture_repository(store, source, baseline)
-    session = import_session(store, Path("tests/fixtures/codex-recorded.jsonl"), AgentKind.CODEX)
+    session = import_session(store, FIXTURES / "codex-recorded.jsonl", AgentKind.CODEX)
     draft = draft_case(store, session, repository_id=repository)
     verifier = root / "hidden.py"
     verifier.write_text('print("PRIVATE_VERIFIER_SENTINEL")\n')

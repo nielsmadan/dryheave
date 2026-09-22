@@ -119,7 +119,7 @@ def _selection(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonVa
         "selection": selection.model_dump(mode="json"),
         "sessions": sessions,
         "triage": triage.model_dump(mode="json"),
-        "triage_warnings": _triage_warnings(triage),
+        "warnings": _merged_warnings(None, triage),
     }
 
 
@@ -145,7 +145,7 @@ def _triage(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue
         "id": selection.identifier,
         "name": selection.name,
         "triage": triage.model_dump(mode="json"),
-        "triage_warnings": _triage_warnings(triage),
+        "warnings": _merged_warnings(None, triage),
         "next": "Triage every examined session, then derive the voice from the chosen ones with dryheave-voice-profile.",
     }
 
@@ -313,7 +313,7 @@ def _evidence_warnings(evidence: VoiceEvidence | None) -> list[JsonValue]:
     ]
 
 
-def _triage_warnings(triage: TriageEvidence) -> list[JsonValue]:
+def _sampling_warnings(triage: TriageEvidence) -> list[JsonValue]:
     variety = triage.variety
     kinds = "; ".join(f"{name}: {count}" for name, count in sorted(variety.kinds.items())) or "none"
     spread = (
@@ -347,6 +347,12 @@ def _triage_warnings(triage: TriageEvidence) -> list[JsonValue]:
     return messages
 
 
+def _merged_warnings(
+    evidence: VoiceEvidence | None, triage: TriageEvidence | None
+) -> list[JsonValue]:
+    return _evidence_warnings(evidence) + (_sampling_warnings(triage) if triage else [])
+
+
 def _voice_draft(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     root = _root()
     catalog = read_catalog(root)
@@ -366,9 +372,8 @@ def _voice_draft(args: argparse.Namespace, store: ObjectStore) -> dict[str, Json
         "revision": catalog.revision,
         "selection_id": selection.identifier,
         "evidence": evidence.model_dump(mode="json"),
-        "warnings": _evidence_warnings(evidence),
+        "warnings": _merged_warnings(evidence, triage),
         "triage": triage.model_dump(mode="json"),
-        "triage_warnings": _triage_warnings(triage),
         "next": "Use dryheave-voice-profile to curate policies, exact user excerpts and safety_review, then voice create [NAME] PATH --expect-revision REVISION; omit NAME for the default voice.",
     }
 
@@ -385,9 +390,8 @@ def _voice_create(args: argparse.Namespace, store: ObjectStore) -> dict[str, Jso
         "name": name,
         "id": record.persona_id,
         "evidence": record.evidence.model_dump(mode="json") if record.evidence else None,
-        "warnings": _evidence_warnings(record.evidence),
+        "warnings": _merged_warnings(record.evidence, record.triage),
         "triage": record.triage.model_dump(mode="json") if record.triage else None,
-        "triage_warnings": _triage_warnings(record.triage) if record.triage else [],
     }
 
 
@@ -414,7 +418,7 @@ def _voice(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]
     catalog = read_catalog(_root())
     result = inspect_voice(store, catalog, args.reference)
     record = voice_for(catalog, args.reference)
-    result["triage_warnings"] = _triage_warnings(record.triage) if record.triage else []
+    result["warnings"] = _merged_warnings(record.evidence, record.triage)
     return result
 
 

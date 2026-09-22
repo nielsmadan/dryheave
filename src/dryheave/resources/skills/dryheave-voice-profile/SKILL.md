@@ -73,9 +73,9 @@ only the excerpts that survived.
 6. Triage **every** pinned session, including the ones you reject. The response
    carries `data.triage` — each session's decision with its `repository`, the
    `untriaged` list, and a `variety` summary holding the kind distribution and the
-   repository spread of the chosen sessions — and `data.triage_warnings`, which
-   names sessions that still carry no decision and warns when the chosen set comes
-   from one kind of work or one repository. These are warnings, not refusals: you
+   repository spread of the chosen sessions — and `data.warnings`, which names
+   sessions that still carry no decision and warns when the chosen set comes from
+   one kind of work or one repository. These are warnings, not refusals: you
    may proceed over them, but they must travel in the report.
 7. If the chosen set is narrow, widen it rather than describing it as balanced:
    scan for further candidates, pin a new, wider selection and triage that.
@@ -94,10 +94,11 @@ only the excerpts that survived.
    session is a one-session voice regardless of how many sessions were pinned.
    Use these numbers verbatim. Never recount them
    yourself and never write counts into `safety_review` as if they were measured.
-   `data.warnings` carries the below-threshold warning and `data.triage_warnings`
-   the sampling ones; repeat whichever are present. The command names the voice
-   `default` while that name is free. Once it is taken the command fails: ask the
-   user what to call this voice and pass `--name NAME`. Do not invent a name yourself.
+   `data.warnings` is one list of plain strings: the below-threshold warning
+   first, then the sampling ones; repeat every entry that is present. The command
+   names the voice `default` while that name is free. Once it is taken the command
+   fails: ask the user what to call this voice and pass `--name NAME`. Do not
+   invent a name yourself.
 9. Take excerpts **only from sessions the triage marked chosen**. The evidence
    counts cover every pinned session, so a candidate listed there may belong to a
    rejected one; check its `session_id` against `data.triage` before using it. The
@@ -128,10 +129,11 @@ only the excerpts that survived.
 14. Read `collect selections --json` for the latest catalog `revision`, then run
    `dryheave voice create [NAME] DRAFT_PATH --expect-revision REVISION --json`.
    Omit NAME for the default voice; otherwise pass the name the user chose. The
-   response repeats `evidence`, `warnings`, `triage` and `triage_warnings`, and
-   the record keeps all of them. Inspect with `voice inspect NAME --json`, which
-   reports the same computed evidence and the same triage from the record. Pass
-   the voice **name** to `dryheave-generate-problem`, which resolves `default`
+   response repeats `evidence`, `warnings` and `triage`, and the record keeps the
+   evidence and the triage. Inspect with `voice inspect NAME --json`, which
+   reports the same computed evidence and the same triage from the record, and
+   whose `warnings` carries the sampling warnings read back from that triage.
+   Pass the voice **name** to `dryheave-generate-problem`, which resolves `default`
    when none is given. A later voice change needs a new name; existing
    experiments retain their frozen persona.
 
@@ -164,9 +166,9 @@ Report all of the following. A voice without this report is not finished.
   you wrote, naming any trait that is inferred rather than evidenced.
 - The voice name and its immutable `persona_id`.
 
-Repeat every entry of `warnings` and `triage_warnings` verbatim. When `sufficient`
-is false, say plainly that the selection is below the threshold of genuine
-conversational messages and report both numbers. Name every session the selection
+Repeat every entry of `warnings` verbatim. When `sufficient` is false, say
+plainly that the selection is below the threshold of genuine conversational
+messages and report both numbers. Name every session the selection
 draws on with its genuine count from `evidence.sessions`, so the reader sees how
 narrow the base is. Recommend a wider selection — `collect scan` to find richer
 candidates, then `collect select NEW_NAME FILE FILE FILE --agent AGENT`, since
@@ -197,7 +199,7 @@ no trait the three do not show. Name the sessions those five came from — if
 scanning for further sessions before the voice is used.
 
 For a selection whose triage chose three sessions that are all `bugfix_easy` in one
-repository, `triage_warnings` says the chosen set lacks variety. Report that
+repository, `warnings` says the chosen set lacks variety. Report that
 sentence, say the voice describes bug-report writing in one repository rather than
 the user, and recommend triaging feature and config sessions from other
 repositories into a new, wider selection before the voice is used.

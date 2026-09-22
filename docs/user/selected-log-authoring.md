@@ -158,13 +158,14 @@ session replaces that session's decision while preserving the rest.
 `rejected`, the `kinds` distribution of the chosen sessions, their
 `repositories` spread with `unknown_repositories` for chosen sessions with no
 recorded `cwd`, and a `varied` verdict that is true only when the chosen sessions
-span more than one kind *and* more than one repository. `triage_warnings` names
-sessions that still carry no decision, says when every triaged session was
-rejected, and says when the chosen set comes from one kind of work or one
-repository. Nothing is refused for thin or lopsided sampling; the warning travels
-with the voice instead. `collect selection` also reports each session's
-`repository` and its own triage decision, so the repository spread is visible
-before any reading starts.
+span more than one kind *and* more than one repository. Each of those responses
+also carries a single `warnings` list of plain strings — below-threshold evidence
+warnings first, then sampling ones. The sampling warnings name sessions that still
+carry no decision, say when every triaged session was rejected, and say when the
+chosen set comes from one kind of work or one repository. Nothing is refused for
+thin or lopsided sampling; the warning travels with the voice instead.
+`collect selection` also reports each session's `repository` and its own triage
+decision, so the repository spread is visible before any reading starts.
 
 `voice create` recomputes the triage from the selection and stores it on the
 voice record beside the computed evidence, so `voice inspect` reports later what

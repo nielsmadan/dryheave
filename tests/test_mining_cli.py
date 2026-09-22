@@ -242,9 +242,10 @@ def test_voice_defaults_to_one_default_name_and_reports_computed_evidence(
         "characters": len(user["text"]),
         "preview": user["text"],
     }
-    assert len(drafted["warnings"]) == 1
+    assert len(drafted["warnings"]) == 2
     assert "below threshold" in drafted["warnings"][0]
     assert "threshold of 8" in drafted["warnings"][0]
+    assert "Untriaged sessions: 1 of 1" in drafted["warnings"][1]
     path = Path(drafted["path"])
     payload = json.loads(path.read_text())
     assert payload["persona"]["name"] == "default"
@@ -452,11 +453,12 @@ def test_voice_draft_reports_per_session_coverage_and_asks_for_more_sessions(
     assert sorted(item["genuine"] for item in breakdown.values()) == [1, 2]
     assert sorted(item["genuine_characters"] for item in breakdown.values()) == [8, 126]
     assert sum(item["harness_injected"] for item in breakdown.values()) == 1
-    assert len(drafted["warnings"]) == 1
+    assert len(drafted["warnings"]) == 2
     warning = drafted["warnings"][0]
     assert "Genuine messages per selected session (2 selected)" in warning
     assert all(f"{identifier}: " in warning for identifier in breakdown)
     assert "collect select NAME FILE [FILE ...] --agent AGENT" in warning
+    assert "Untriaged sessions: 2 of 2" in drafted["warnings"][1]
 
 
 FEATURE_TEXTS = (
@@ -531,9 +533,9 @@ def test_collect_triage_records_the_sampling_frame_against_a_checked_revision(
         "unknown_repositories": 0,
         "varied": False,
     }
-    assert len(summary["triage_warnings"]) == 1
-    assert "Untriaged sessions: 2 of 2" in summary["triage_warnings"][0]
-    assert all(identifier in summary["triage_warnings"][0] for identifier in (first, second))
+    assert len(summary["warnings"]) == 1
+    assert "Untriaged sessions: 2 of 2" in summary["warnings"][0]
+    assert all(identifier in summary["warnings"][0] for identifier in (first, second))
     partial = invoke(
         capsys,
         "collect",
@@ -554,9 +556,9 @@ def test_collect_triage_records_the_sampling_frame_against_a_checked_revision(
     )
     assert partial["revision"] == 2
     assert partial["triage"]["untriaged"] == [second]
-    assert len(partial["triage_warnings"]) == 2
-    assert "Untriaged sessions: 1 of 2" in partial["triage_warnings"][0]
-    assert "lack variety" in partial["triage_warnings"][1]
+    assert len(partial["warnings"]) == 2
+    assert "Untriaged sessions: 1 of 2" in partial["warnings"][0]
+    assert "lack variety" in partial["warnings"][1]
     complete = invoke(
         capsys,
         "collect",
@@ -579,7 +581,7 @@ def test_collect_triage_records_the_sampling_frame_against_a_checked_revision(
     assert complete["triage"]["variety"]["kinds"] == {"feature_medium": 1, "bugfix_easy": 1}
     assert complete["triage"]["variety"]["repositories"] == {"/repos/alpha": 1, "/repos/beta": 1}
     assert complete["triage"]["variety"]["varied"] is True
-    assert complete["triage_warnings"] == []
+    assert complete["warnings"] == []
     arguments = [
         "collect",
         "triage",
@@ -602,7 +604,8 @@ def test_collect_triage_records_the_sampling_frame_against_a_checked_revision(
     assert json.loads(capsys.readouterr().err)["error"]["code"] == "conflict"
     created = curate_voice(capsys, "varied", "balanced", 3)
     assert created["triage"]["variety"]["varied"] is True
-    assert created["triage_warnings"] == []
+    assert len(created["warnings"]) == 1
+    assert "below threshold" in created["warnings"][0]
     assert invoke(capsys, "voice", "inspect", "balanced")["triage"] == created["triage"]
 
 
@@ -616,13 +619,11 @@ def test_voice_create_warns_about_untriaged_sessions_and_a_narrow_chosen_set(
     invoke(capsys, "collect", "select", "narrow", str(first), str(second), "--agent", "codex")
     untriaged = curate_voice(capsys, "narrow", "untriaged", 1)
     assert untriaged["triage"]["variety"]["untriaged"] == 2
-    assert len(untriaged["triage_warnings"]) == 1
-    assert "Untriaged sessions: 2 of 2" in untriaged["triage_warnings"][0]
-    assert "collect triage SELECTION" in untriaged["triage_warnings"][0]
-    assert (
-        invoke(capsys, "voice", "inspect", "untriaged")["triage_warnings"]
-        == (untriaged["triage_warnings"])
-    )
+    assert len(untriaged["warnings"]) == 2
+    assert "below threshold" in untriaged["warnings"][0]
+    assert "Untriaged sessions: 2 of 2" in untriaged["warnings"][1]
+    assert "collect triage SELECTION" in untriaged["warnings"][1]
+    assert invoke(capsys, "voice", "inspect", "untriaged")["warnings"] == untriaged["warnings"]
     revision = untriaged["revision"]
     for identifier in invoke(capsys, "collect", "selection", "narrow")["selection"]["session_ids"]:
         revision = invoke(
@@ -647,16 +648,12 @@ def test_voice_create_warns_about_untriaged_sessions_and_a_narrow_chosen_set(
     assert narrow["triage"]["variety"]["kinds"] == {"bugfix_easy": 2}
     assert narrow["triage"]["variety"]["repositories"] == {"/repos/alpha": 2}
     assert narrow["triage"]["variety"]["varied"] is False
-    assert len(narrow["triage_warnings"]) == 1
-    warning = narrow["triage_warnings"][0]
+    assert len(narrow["warnings"]) == 2
+    assert "below threshold" in narrow["warnings"][0]
+    warning = narrow["warnings"][1]
     assert "Chosen sessions lack variety: 2 chosen" in warning
     assert "bugfix_easy: 2" in warning and "/repos/alpha: 2" in warning
-    assert len(narrow["warnings"]) == 1
-    assert "below threshold" in narrow["warnings"][0]
-    assert (
-        invoke(capsys, "voice", "inspect", "one-kind")["triage_warnings"]
-        == narrow["triage_warnings"]
-    )
+    assert invoke(capsys, "voice", "inspect", "one-kind")["warnings"] == narrow["warnings"]
 
 
 def test_voice_delete_frees_the_name_and_keeps_the_frozen_persona(

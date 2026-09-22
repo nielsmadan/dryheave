@@ -110,7 +110,7 @@ def multi_source_case(store, benchmark, tmp_path):
     sessions = [case.source_session_id]
     for index in range(3):
         source = tmp_path / f"secondary-{index}.jsonl"
-        source.write_bytes(Path("tests/fixtures/codex-recorded.jsonl").read_bytes())
+        source.write_bytes((Path(__file__).parent / "fixtures/codex-recorded.jsonl").read_bytes())
         sessions.append(import_session(store, source, primary.agent))
     excerpts = [
         case.evidence[0].model_copy(update={"session_id": identifier, "visibility": "subject"})

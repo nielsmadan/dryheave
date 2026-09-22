@@ -178,12 +178,15 @@ each session may appear once. `TriageEvidence` stays optional on `VoiceRecord`, 
 version-1 records written before triage still parse.
 
 Sampling warnings are CLI presentation, next to the existing below-threshold one:
-`mining_cli._triage_warnings` reports untriaged sessions, a triaged set with
-nothing chosen, and a chosen set that is not varied. They travel in a separate
-`triage_warnings` response field rather than in `warnings`, which keeps the
-existing evidence-warning contract unchanged. Neither `voice create` nor
-`collect triage` refuses for thin or lopsided sampling; a curator may proceed
-knowingly, and the persisted triage keeps the frame readable afterwards.
+`mining_cli._sampling_warnings` reports untriaged sessions, a triaged set with
+nothing chosen, and a chosen set that is not varied. `mining_cli._merged_warnings`
+appends them to the below-threshold evidence warning, so every response carries
+one `warnings` list of plain strings in a fixed order: evidence warnings first,
+then sampling ones. `collect selection`, `collect triage` and `voice inspect`
+compute no evidence warning, so their list holds sampling ones only. Neither
+`voice create` nor `collect triage` refuses for thin or lopsided sampling; a
+curator may proceed knowingly, and the persisted triage keeps the frame readable
+afterwards.
 
 `collect scan` reports the same `UserMessageProfile` per discovered log under
 `user_messages`, computed from the session it already parsed, and orders the
