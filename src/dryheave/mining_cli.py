@@ -304,12 +304,14 @@ def _evidence_warnings(evidence: VoiceEvidence | None) -> list[JsonValue]:
         return []
     coverage = "; ".join(f"{item.session_id}: {item.genuine}" for item in evidence.sessions)
     return [
-        f"Evidence below threshold: {evidence.genuine} genuine user messages from "
-        f"{evidence.user_events} user-role events, against a threshold of {evidence.threshold}. "
-        f"Genuine messages per selected session ({len(evidence.sessions)} selected): {coverage}. "
-        "Name the sessions this voice was drawn from and add more varied sessions with "
-        "collect select NAME FILE [FILE ...] --agent AGENT. "
-        "Report the shortfall and do not assert voice traits the retained excerpts do not show."
+        (
+            f"Evidence below threshold: {evidence.genuine} genuine user messages from "
+            f"{evidence.user_events} user-role events, against a threshold of {evidence.threshold}. "
+            f"Genuine messages per selected session ({len(evidence.sessions)} selected): {coverage}. "
+            "Name the sessions this voice was drawn from and add more varied sessions with "
+            "collect select NAME FILE [FILE ...] --agent AGENT. "
+            "Report the shortfall and do not assert voice traits the retained excerpts do not show."
+        )
     ]
 
 
