@@ -6,11 +6,11 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
-from dryheave.cases import load_frozen_case
+from dryheave.cases import InspectStep, PromptStep, effective_workflow, load_frozen_case
 from dryheave.constants import MAX_RUNTIME_PATH_BYTES
 from dryheave.errors import DryheaveError, InputError
-from dryheave.experiment_models import FrozenExperiment
-from dryheave.experiments import inspect_experiment, load_experiment
+from dryheave.experiment_models import FrozenExperiment, ScoringConfig, inspection_recipe
+from dryheave.experiments import inspect_experiment, load_experiment, load_role
 from dryheave.journals import RunStore
 from dryheave.live_config import (
     LIVE_CONFIG_DIRECTORY,
@@ -19,7 +19,7 @@ from dryheave.live_config import (
     require_servers,
     snapshot_live_config,
 )
-from dryheave.models import ObjectKind, TrialStage
+from dryheave.models import AgentKind, ObjectKind, TrialStage
 from dryheave.native_recovery import reconcile_store_ownership
 from dryheave.profiles import load_profile
 from dryheave.runner_attempt import TrialExecution
@@ -118,6 +118,36 @@ def _options(options: RunOptions) -> RunOptions:
     return options
 
 
+def require_workflow_support(
+    store: ObjectStore, experiment: FrozenExperiment, options: RunOptions
+) -> None:
+    if not options.workflow:
+        return
+    inspector = inspection_recipe(
+        load_role(store, experiment.scoring_id, ScoringConfig, ObjectKind.SCORING)
+    )
+    workflows = {
+        case_id: effective_workflow(
+            load_frozen_case(store, case_id), enabled=True, inspected=inspector is not None
+        )
+        for case_id in {trial.case_id for trial in experiment.trials}
+    }
+    if inspector is None and any(
+        isinstance(step, InspectStep) for steps in workflows.values() for step in steps
+    ):
+        raise InputError(
+            "Workflow inspect steps need an inspector or judge with max_calls above zero."
+        )
+    slashed = {
+        case_id
+        for case_id, steps in workflows.items()
+        if any(isinstance(step, PromptStep) and step.prompt.startswith("/") for step in steps)
+    }
+    profiles = {trial.profile_id for trial in experiment.trials if trial.case_id in slashed}
+    if any(load_profile(store, profile).recipe.agent != AgentKind.CLAUDE for profile in profiles):
+        raise InputError("Slash-command workflow prompts are only delivered to Claude.")
+
+
 @contextmanager
 def cancellation_signals(cancelled: threading.Event) -> Iterator[None]:
     if threading.current_thread() is not threading.main_thread():
@@ -156,6 +186,7 @@ def run_experiment(
             raise InputError("Offline fixture mode requires a frozen subject fixture.")
         if retry:
             raise InputError("Explicit retry requires --resume RUN_ID.")
+        require_workflow_support(store, experiment, selected)
         resume = RunStore(store.root).create(identifier)
         print(f"dryheave run reserved: {resume}", file=sys.stderr, flush=True)
     cancelled = cancelled or threading.Event()

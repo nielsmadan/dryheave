@@ -369,3 +369,48 @@ def test_reconciliation_stops_every_recorded_identity_across_batches(
             cleanup = ExecutionJournal(journal).cleanup_reports[attempt_id]
             assert cleanup.known_writers_stopped
             assert {first_identity, second_identity} <= set(cleanup.owned)
+
+
+def _journal_inspection_intent(execution, state, private):
+    execution.record(
+        state,
+        "inspection-intent",
+        {"step_id": "inspect-required", "position": 0, "turn": 1, "private": [str(private)]},
+    )
+
+
+def test_crash_mid_inspection_recovery_removes_the_scratch_directory(store, benchmark):
+    experiment_id = create_experiment(store, benchmark)
+    run_id, attempt_id = _reserve(store, experiment_id)
+    private = store.root / "scratch" / "inspection-crash"
+    (private / "judge" / "call-1").mkdir(parents=True)
+    (private / "judge" / "call-1" / "000001-cleanup.json").write_text(
+        CleanupReport(terminal_closed=True, known_writers_stopped=True).model_dump_json()
+    )
+    with RunStore(store.root).open(run_id) as journal:
+        execution = ExecutionJournal(journal)
+        state = execution.attempts[attempt_id]
+        _journal_inspection_intent(execution, state, private)
+        reconcile_execution(execution)
+    assert not private.exists()
+
+
+def test_crash_mid_inspection_recovery_leaves_the_scratch_directory_when_unconfirmed(
+    store, benchmark
+):
+    experiment_id = create_experiment(store, benchmark)
+    run_id, attempt_id = _reserve(store, experiment_id)
+    private = store.root / "scratch" / "inspection-crash"
+    (private / "judge" / "call-1").mkdir(parents=True)
+    (private / "judge" / "call-1" / "000001-cleanup.json").write_text(
+        CleanupReport(terminal_closed=True, known_writers_stopped=False).model_dump_json()
+    )
+    with RunStore(store.root).open(run_id) as journal:
+        execution = ExecutionJournal(journal)
+        state = execution.attempts[attempt_id]
+        _journal_inspection_intent(execution, state, private)
+        with pytest.raises(InputError, match="reconciliation before another subject launch"):
+            reconcile_execution(execution)
+        cleanup = ExecutionJournal(journal).cleanup_reports[attempt_id]
+    assert private.exists()
+    assert "inspection_scratch_unresolved" in cleanup.errors

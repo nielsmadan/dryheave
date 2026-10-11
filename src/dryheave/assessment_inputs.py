@@ -5,10 +5,16 @@ from dryheave.cases import FrozenCase, load_frozen_case
 from dryheave.controller_models import ControllerRecipe, RoleCall
 from dryheave.drivers.models import NativeEvent
 from dryheave.errors import DryheaveError, InputError
-from dryheave.experiment_models import FrozenExperiment, ScoringConfig, TrialSpec
+from dryheave.experiment_models import (
+    FrozenExperiment,
+    PriceTable,
+    ScoringConfig,
+    TrialSpec,
+    inspection_recipe,
+)
 from dryheave.experiments import inspect_experiment, load_experiment, load_role
 from dryheave.integrity import native_events
-from dryheave.metrics import call_metrics, subject_metrics
+from dryheave.metrics import call_metrics, subject_metrics, summarize_role
 from dryheave.models import ObjectKind
 from dryheave.pricing import builtin_price_table
 from dryheave.profiles import load_profile
@@ -118,6 +124,29 @@ def _controller_raw_stdout(files: dict[str, bytes]) -> dict[str, bytes]:
     return raw
 
 
+def _judge_metrics(
+    scoring: ScoringConfig | None,
+    graded: tuple[RoleCall, ...],
+    inspected: tuple[RoleCall, ...],
+    table: PriceTable,
+) -> RoleMetrics:
+    judge = scoring.judge if scoring else None
+    if not inspected:
+        return call_metrics("judge", graded, judge, table)
+    inspection = call_metrics(
+        "judge", inspected, inspection_recipe(scoring) if scoring else None, table
+    )
+    if not graded:
+        return inspection
+    grading = call_metrics("judge", graded, judge, table)
+    return summarize_role(
+        "judge",
+        (*grading.records, *inspection.records),
+        partial=any(call.status != "completed" for call in (*graded, *inspected)),
+        reason=grading.reasons[0],
+    )
+
+
 def role_metrics(
     inputs: AssessmentInputs, state: AttemptState, judge_calls: tuple[RoleCall, ...]
 ) -> tuple[RoleMetrics, ...]:
@@ -125,16 +154,22 @@ def role_metrics(
     events: tuple[NativeEvent, ...] = ()
     with suppress(DryheaveError):
         events = native_events(inputs.files)
+    calls = inputs.capture.controller_calls if inputs.capture else state.calls
     return (
         subject_metrics(inputs.capture, table, events, inputs.requested_model),
         call_metrics(
             "simulator",
-            inputs.capture.controller_calls if inputs.capture else state.calls,
+            tuple(call for call in calls if call.role == "simulator"),
             inputs.simulator,
             table,
             _controller_raw_stdout(inputs.files),
         ),
-        call_metrics("judge", judge_calls, inputs.scoring.judge if inputs.scoring else None, table),
+        _judge_metrics(
+            inputs.scoring,
+            judge_calls,
+            tuple(call for call in calls if call.role == "judge"),
+            table,
+        ),
     )
 
 

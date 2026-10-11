@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, SerializerFunctionWrapHandler, model_serializer
 
 from dryheave.capture_models import WorkspaceCapture
 from dryheave.controller_models import DialogueMessage, RoleCall
@@ -21,6 +21,14 @@ class RunOptions(StrictModel):
     strict: bool = False
     runtime_root: str | None = None
     transport: str | None = None
+    workflow: bool = False
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if not self.workflow:
+            value.pop("workflow", None)
+        return value
 
 
 MAX_OWNED_PER_EVENT = 1024
@@ -32,6 +40,29 @@ class OwnedProcesses(StrictModel):
 
 class AttemptCheckpoint(StrictModel):
     attempts: dict[Name, TrialStage]
+
+
+class WorkflowEvent(StrictModel):
+    step_id: Name
+    kind: Literal["prompt", "inspect", "dialog"]
+    outcome: Literal[
+        "sent", "passed", "failed", "fix_requested", "answered", "unavailable", "reused"
+    ]
+    turn: int = Field(ge=0)
+    failed_criteria: tuple[Name, ...] = ()
+    call_ids: tuple[Name, ...] = ()
+    seconds: float | None = Field(default=None, ge=0)
+
+
+class WorkflowProgress(StrictModel):
+    steps: tuple[Name, ...]
+    position: int = Field(ge=0)
+    events: tuple[WorkflowEvent, ...] = ()
+
+
+class WorkflowStepRecord(StrictModel):
+    event: WorkflowEvent
+    position: int = Field(ge=0)
 
 
 class AttemptState(StrictModel):
@@ -53,6 +84,14 @@ class AttemptState(StrictModel):
     quarantine_id: ObjectId | None = None
     capture_error: str | None = None
     stop_reason: str | None = None
+    workflow_position: int | None = Field(default=None, ge=0)
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.workflow_position is None:
+            value.pop("workflow_position", None)
+        return value
 
 
 class CapturedAttempt(StrictModel):
@@ -94,6 +133,14 @@ class CapturedAttempt(StrictModel):
         "Native telemetry and detached-process visibility are partial.",
         "Audit, eligibility, deterministic grading and price calculation are pending.",
     )
+    workflow: WorkflowProgress | None = None
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.workflow is None:
+            value.pop("workflow", None)
+        return value
 
 
 class QuarantinedCapture(StrictModel):

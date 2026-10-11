@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
@@ -16,6 +16,16 @@ from dryheave.storage import ObjectStore
 MIN_DESCRIPTION_LENGTH = 10
 MIN_RUBRIC_LENGTH = 20
 DEFAULT_RUBRIC_IDS = ("code-quality", "codebase-consistency", "test-quality")
+NO_TURN_COMMANDS = (
+    "/clear",
+    "/compact",
+    "/exit",
+    "/quit",
+    "/resume",
+    "/rewind",
+    "/login",
+    "/logout",
+)
 
 
 class TaskFact(StrictModel):
@@ -125,6 +135,29 @@ class CapturePolicy(StrictModel):
     include_ignored: tuple[RelativePath, ...] = ()
 
 
+class InspectStep(StrictModel):
+    kind: Literal["inspect"] = "inspect"
+    step_id: Name
+    criteria: tuple[Name, ...] = Field(min_length=1)
+
+
+class PromptStep(StrictModel):
+    kind: Literal["prompt"] = "prompt"
+    step_id: Name
+    prompt: str = Field(min_length=1, max_length=32000)
+    answer_hint: str | None = Field(default=None, max_length=2000)
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.answer_hint is None:
+            value.pop("answer_hint", None)
+        return value
+
+
+WorkflowStep = Annotated[InspectStep | PromptStep, Field(discriminator="kind")]
+
+
 class CaseContent(StrictModel):
     schema_version: Literal[1] = 1
     title: str = Field(min_length=1, max_length=300)
@@ -142,6 +175,34 @@ class CaseContent(StrictModel):
     checks: tuple[CaseCheck, ...] = ()
     metrics: tuple[MetricsCommand, ...] = ()
     disabled_rubrics: tuple[Name, ...] = ()
+    workflow: tuple[WorkflowStep, ...] = ()
+
+    @model_validator(mode="after")
+    def valid_workflow(self) -> Self:
+        seen_ids: set[str] = set()
+        known_criteria = {item.criterion_id for item in self.criteria}
+        allowed_defaults = set(DEFAULT_RUBRIC_IDS) - set(self.disabled_rubrics)
+        for step in self.workflow:
+            if step.step_id in seen_ids:
+                raise ValueError(f"workflow step IDs must be unique: {step.step_id}")
+            seen_ids.add(step.step_id)
+            if isinstance(step, InspectStep):
+                if len(set(step.criteria)) != len(step.criteria):
+                    raise ValueError(f"workflow step {step.step_id} inspects duplicate criteria")
+                unknown = sorted(set(step.criteria) - known_criteria - allowed_defaults)
+                if unknown:
+                    raise ValueError(
+                        f"workflow step {step.step_id} inspects unknown criteria: "
+                        f"{', '.join(unknown)}"
+                    )
+            else:
+                words = step.prompt.strip().split(maxsplit=1)
+                if words and words[0] in NO_TURN_COMMANDS:
+                    raise ValueError(
+                        f"workflow step {step.step_id} uses a command with no model turn: "
+                        f"{words[0]}"
+                    )
+        return self
 
     @model_validator(mode="after")
     def valid_checks(self) -> Self:
@@ -164,10 +225,25 @@ class CaseContent(StrictModel):
     @model_serializer(mode="wrap")
     def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         value: dict[str, object] = handler(self)
-        for name in ("checks", "metrics", "disabled_rubrics"):
+        for name in ("checks", "metrics", "disabled_rubrics", "workflow"):
             if not getattr(self, name):
                 value.pop(name, None)
         return value
+
+
+def effective_workflow(
+    case: CaseContent, *, enabled: bool, inspected: bool
+) -> tuple[WorkflowStep, ...]:
+    if not enabled:
+        return ()
+    if case.workflow:
+        return case.workflow
+    if not inspected:
+        return ()
+    required = tuple(item.criterion_id for item in case.criteria if item.required)
+    if not required:
+        return ()
+    return (InspectStep(step_id="inspect-required", criteria=required),)
 
 
 class CaseDraft(CaseContent):

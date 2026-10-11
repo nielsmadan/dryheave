@@ -56,6 +56,21 @@ class ScoringConfig(StrictModel):
     policy: Literal["required-criteria-v1"] = "required-criteria-v1"
     judge: ControllerRecipe | None = None
     prices: PriceTable | None = None
+    inspector: ControllerRecipe | None = None
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.inspector is None:
+            value.pop("inspector", None)
+        return value
+
+
+def inspection_recipe(scoring: ScoringConfig) -> ControllerRecipe | None:
+    candidate = scoring.inspector if scoring.inspector is not None else scoring.judge
+    if candidate is None or candidate.budget.max_calls <= 0:
+        return None
+    return candidate
 
 
 class FixtureTurn(StrictModel):

@@ -184,3 +184,114 @@ def test_failed_pre_stop_publish_still_stops_the_owned_child(tmp_path):
     finally:
         with suppress(psutil.NoSuchProcess):
             psutil.Process(child).kill()
+
+
+@pytest.mark.integration
+def test_execute_check_stops_the_verifier_at_its_deadline(tmp_path):
+    workspace, hidden = tmp_path / "workspace", tmp_path / "hidden"
+    workspace.mkdir()
+    hidden.mkdir()
+    (hidden / "check.py").write_text('import time\ntime.sleep(30)\nprint("CHECKS_PASSED")\n')
+    criterion = DeterministicCriterion(
+        criterion_id="check",
+        description="Stop a verifier that outlives the caller's deadline.",
+        command=CommandSpec(argv=(sys.executable, "{verifier}/check.py")),
+        entrypoint="check.py",
+        expected_stdout="CHECKS_PASSED",
+    )
+    context = SimpleNamespace(
+        cancelled=threading.Event(), original_workspace=None, on_identities=lambda _identities: None
+    )
+    started = time.monotonic()
+    execution = execute_check(
+        criterion,
+        workspace,
+        hidden,
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        context,
+        started + 0.5,
+    )
+    assert (execution.outcome, execution.process_outcome) == ("error", "timeout")
+    assert time.monotonic() - started < 10
+
+
+@pytest.mark.integration
+def test_check_snapshot_materializes_captured_files_into_a_fresh_final_copy(tmp_path):
+    from dryheave.capture_models import CapturedFile, WorkspaceCapture
+    from dryheave.errors import InputError
+    from dryheave.grading import VerifierContext, check_snapshot
+    from dryheave.serialization import digest
+
+    content = b'print(open("greet.txt").read().strip())\n'
+    greeting = b"CHECKS_PASSED\n"
+    snapshot = WorkspaceCapture(
+        files=(
+            CapturedFile(
+                path="greet.txt",
+                blob="workspace/greet.txt",
+                mode="file",
+                sha256=digest(greeting),
+                size=len(greeting),
+            ),
+        ),
+        complete=True,
+        git_complete=True,
+    )
+    criterion = DeterministicCriterion(
+        criterion_id="check",
+        description="Run the hidden verifier against the captured files only.",
+        command=CommandSpec(argv=(sys.executable, "{verifier}/check.py")),
+        entrypoint="check.py",
+        expected_stdout="CHECKS_PASSED",
+    )
+    context = VerifierContext(
+        store=None,
+        case=SimpleNamespace(hidden_files={"check.py": "verifiers/check.py"}),
+        blobs={"workspace/greet.txt": greeting, "verifiers/check.py": content},
+        root=tmp_path / "inspection",
+        original_workspace=tmp_path / "live",
+        on_identities=lambda _identities: None,
+        cancelled=threading.Event(),
+    )
+    execution, evidence = check_snapshot(context, criterion, snapshot, time.monotonic() + 30)
+    assert (execution.outcome, execution.execution_observed) == ("pass", True)
+    assert evidence == tmp_path / "inspection/criteria/check/final/check-evidence"
+    assert json.loads((evidence / "result.json").read_text())["outcome"] == "pass"
+    with pytest.raises(InputError, match="fresh directory"):
+        check_snapshot(context, criterion, snapshot, time.monotonic() + 30)
+
+
+def test_run_copy_keeps_cleanup_failure_precedence_over_a_later_hidden_file_change(
+    tmp_path, monkeypatch
+):
+    from dryheave import grading
+    from dryheave.grading import VerifierContext, _run_copy
+    from dryheave.result_models import CheckExecution
+
+    context = VerifierContext(
+        store=None,
+        case=SimpleNamespace(hidden_files={"check.py": "verifiers/check.py"}),
+        blobs={"verifiers/check.py": b"print('CHECKS_PASSED')\n"},
+        root=tmp_path / "inspection",
+        original_workspace=None,
+        on_identities=lambda _identities: None,
+        cancelled=threading.Event(),
+    )
+    criterion = DeterministicCriterion(
+        criterion_id="check",
+        description="Keep cleanup-failure precedence over a later hidden file change.",
+        command=CommandSpec(argv=(sys.executable, "{verifier}/check.py")),
+        entrypoint="check.py",
+        expected_stdout="CHECKS_PASSED",
+    )
+
+    def forced_execute_check(criterion, workspace, hidden, artifacts, context, deadline=None):
+        (hidden / "check.py").write_text("tampered\n")
+        return CheckExecution(outcome="error", error="verifier_cleanup_failed")
+
+    monkeypatch.setattr(grading, "execute_check", forced_execute_check)
+    artifacts = ArtifactWriter(context.root / "evidence", 1_000_000)
+    execution = _run_copy(
+        context, criterion, context.root, artifacts, lambda workspace: workspace.mkdir(), None
+    )
+    assert (execution.outcome, execution.error) == ("error", "verifier_cleanup_failed")

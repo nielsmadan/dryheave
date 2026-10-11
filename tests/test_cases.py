@@ -456,6 +456,166 @@ def test_case_checks_and_disabled_rubrics_round_trip() -> None:
     assert parse_model(canonical_json(content), CaseContent) == content
 
 
+def test_legacy_case_without_workflow_keeps_its_object_id(store: ObjectStore) -> None:
+    from dryheave.cases import CaseContent
+    from dryheave.models import ObjectKind
+
+    case = CaseContent(title="Pin case", initial_prompt="Do the thing.")
+    assert "workflow" not in case.model_dump(mode="json")
+    identifier = store.put(ObjectKind.CASE, case)
+    assert identifier == "0e6bc5d8d7c84486d392c055305d09b2fe5238faa2335e5044261a83df4667b7"
+
+
+def test_workflow_round_trips_prompt_and_inspect_steps() -> None:
+    from dryheave.cases import CaseContent, InspectStep, PromptStep
+    from dryheave.serialization import canonical_json, parse_model
+
+    payload = LEGACY_CONTENT | {
+        "workflow": [
+            {"kind": "prompt", "step_id": "review", "prompt": "/code-review --quick"},
+            {
+                "kind": "prompt",
+                "step_id": "hint",
+                "prompt": "fix the findings",
+                "answer_hint": "fix Critical and Should Fix findings",
+            },
+            {"kind": "inspect", "step_id": "inspect-quality", "criteria": ["quality"]},
+        ]
+    }
+    content = parse_model(canonical_json(payload), CaseContent)
+    assert content.workflow[0] == PromptStep(step_id="review", prompt="/code-review --quick")
+    assert content.workflow[1].answer_hint == "fix Critical and Should Fix findings"
+    assert content.workflow[2] == InspectStep(step_id="inspect-quality", criteria=("quality",))
+    assert canonical_json(content) == canonical_json(payload)
+    assert "answer_hint" not in canonical_json(content.workflow[0]).decode()
+
+
+@pytest.mark.parametrize(
+    ("workflow", "message"),
+    [
+        (
+            [
+                {"kind": "prompt", "step_id": "dup", "prompt": "/code-review"},
+                {"kind": "prompt", "step_id": "dup", "prompt": "update the docs"},
+            ],
+            "workflow step IDs must be unique",
+        ),
+        (
+            [{"kind": "inspect", "step_id": "inspect-unknown", "criteria": ["not-a-criterion"]}],
+            "inspects unknown criteria",
+        ),
+        (
+            [{"kind": "inspect", "step_id": "inspect-disabled", "criteria": ["test-quality"]}],
+            "inspects unknown criteria",
+        ),
+        (
+            [{"kind": "inspect", "step_id": "inspect-dup", "criteria": ["quality", "quality"]}],
+            "inspects duplicate criteria",
+        ),
+        (
+            [{"kind": "prompt", "step_id": "no-turn", "prompt": "/clear"}],
+            "command with no model turn",
+        ),
+        (
+            [{"kind": "prompt", "step_id": "no-turn", "prompt": "/compact please"}],
+            "command with no model turn",
+        ),
+    ],
+)
+def test_case_content_rejects_invalid_workflow_steps(workflow, message) -> None:
+    from dryheave.cases import CaseContent
+    from dryheave.serialization import canonical_json
+
+    payload = LEGACY_CONTENT | {
+        "disabled_rubrics": ["test-quality"],
+        "workflow": workflow,
+    }
+    with pytest.raises(ValidationError, match=message):
+        CaseContent.model_validate_json(canonical_json(payload))
+
+
+def test_inspect_step_rejects_answer_hint_field() -> None:
+    from dryheave.cases import InspectStep
+    from dryheave.serialization import canonical_json
+
+    with pytest.raises(ValidationError, match="answer_hint"):
+        InspectStep.model_validate_json(
+            canonical_json(
+                {"step_id": "inspect", "criteria": ["quality"], "answer_hint": "not allowed"}
+            )
+        )
+
+
+def test_inspect_step_may_cite_a_non_disabled_default_rubric() -> None:
+    from dryheave.cases import CaseContent, InspectStep
+    from dryheave.serialization import canonical_json
+
+    payload = LEGACY_CONTENT | {
+        "workflow": [
+            {"kind": "inspect", "step_id": "inspect-code-quality", "criteria": ["code-quality"]}
+        ]
+    }
+    content = CaseContent.model_validate_json(canonical_json(payload))
+    assert content.workflow == (
+        InspectStep(step_id="inspect-code-quality", criteria=("code-quality",)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("enabled", "inspected", "has_required", "expected"),
+    [
+        (False, True, True, ()),
+        (True, False, True, ()),
+        (True, True, False, ()),
+    ],
+)
+def test_effective_workflow_default_cases(enabled, inspected, has_required, expected) -> None:
+    from dryheave.cases import CaseContent, RubricCriterion, effective_workflow
+
+    criteria = (
+        (RubricCriterion(criterion_id="quality", required=True, rubric="Quality rubric text."),)
+        if has_required
+        else (
+            RubricCriterion(criterion_id="quality", required=False, rubric="Quality rubric text."),
+        )
+    )
+    case = CaseContent(title="t", initial_prompt="p", criteria=criteria)
+    assert effective_workflow(case, enabled=enabled, inspected=inspected) == expected
+
+
+def test_effective_workflow_builds_the_default_inspect_step() -> None:
+    from dryheave.cases import CaseContent, InspectStep, RubricCriterion, effective_workflow
+
+    case = CaseContent(
+        title="t",
+        initial_prompt="p",
+        criteria=(
+            RubricCriterion(criterion_id="quality", required=True, rubric="Quality rubric text."),
+            RubricCriterion(criterion_id="style", required=False, rubric="Style rubric text here."),
+        ),
+    )
+    assert effective_workflow(case, enabled=True, inspected=True) == (
+        InspectStep(step_id="inspect-required", criteria=("quality",)),
+    )
+
+
+def test_effective_workflow_prefers_the_declared_workflow() -> None:
+    from dryheave.cases import CaseContent, PromptStep, RubricCriterion, effective_workflow
+
+    workflow = (PromptStep(step_id="review", prompt="/code-review --quick"),)
+    case = CaseContent(
+        title="t",
+        initial_prompt="p",
+        criteria=(
+            RubricCriterion(criterion_id="quality", required=True, rubric="Quality rubric text."),
+        ),
+        workflow=workflow,
+    )
+    assert effective_workflow(case, enabled=True, inspected=True) == workflow
+    assert effective_workflow(case, enabled=True, inspected=False) == workflow
+    assert effective_workflow(case, enabled=False, inspected=True) == ()
+
+
 @pytest.mark.integration
 def test_frozen_case_keeps_declared_checks(
     store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path

@@ -1,4 +1,6 @@
 import re
+import shutil
+from pathlib import Path
 
 import psutil
 
@@ -7,12 +9,15 @@ from dryheave.controller_runtime import reconcile_runtimes
 from dryheave.drivers.models import CleanupReport, ProcessIdentity
 from dryheave.errors import InputError
 from dryheave.filesystem import directory_names
+from dryheave.inspection import writers_confirmed_stopped
 from dryheave.journals import RunStore
 from dryheave.models import TrialStage
 from dryheave.process_ownership import ProcessOwner
 from dryheave.runner_models import AttemptState
 from dryheave.runner_state import ExecutionJournal
 from dryheave.storage import ObjectStore
+
+INSPECTION_INTENT_EVENT = "inspection-intent"
 
 ACTIVE_STAGES = {
     TrialStage.RESERVED,
@@ -27,6 +32,35 @@ def cleanup_resolved(report: CleanupReport | None) -> bool:
     return bool(
         report and report.terminal_closed and report.known_writers_stopped and not report.errors
     )
+
+
+def _inspection_scratch_paths(execution: ExecutionJournal, attempt_id: str) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for event in execution.journal.events:
+        if event.attempt_id != attempt_id or event.event != INSPECTION_INTENT_EVENT:
+            continue
+        value = event.data.get("private", ())
+        if isinstance(value, list):
+            paths.extend(Path(item) for item in value if isinstance(item, str))
+    return tuple(paths)
+
+
+def reconcile_inspection_scratch(
+    execution: ExecutionJournal, state: AttemptState
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    for private in _inspection_scratch_paths(execution, state.attempt_id):
+        if not private.exists():
+            continue
+        reconcile_runtimes(private / "runtime")
+        if writers_confirmed_stopped(private):
+            try:
+                shutil.rmtree(private)
+            except OSError:
+                errors.append("inspection_scratch_cleanup_failed")
+        else:
+            errors.append("inspection_scratch_unresolved")
+    return tuple(errors)
 
 
 def reconcile_attempt(
@@ -44,7 +78,14 @@ def reconcile_attempt(
         and cleanup_resolved(previous)
     ):
         reconcile_runtimes(execution.attempt_root(state) / "role-runtime")
-        return previous
+        scratch_errors = reconcile_inspection_scratch(execution, state)
+        if not scratch_errors:
+            return previous
+        updated = previous.model_copy(
+            update={"errors": tuple(dict.fromkeys((*previous.errors, *scratch_errors)))}
+        )
+        execution.evidence(state, event, updated)
+        return updated
     owner = ProcessOwner()
     errors = []
 
@@ -83,9 +124,14 @@ def reconcile_attempt(
             "errors": tuple(dict.fromkeys((*report.errors, *errors))),
         }
     )
-    execution.evidence(state, event, cleanup)
     if cleanup_resolved(cleanup):
         reconcile_runtimes(execution.attempt_root(state) / "role-runtime")
+        scratch_errors = reconcile_inspection_scratch(execution, state)
+        if scratch_errors:
+            cleanup = cleanup.model_copy(
+                update={"errors": tuple(dict.fromkeys((*cleanup.errors, *scratch_errors)))}
+            )
+    execution.evidence(state, event, cleanup)
     return cleanup
 
 

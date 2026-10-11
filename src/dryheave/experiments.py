@@ -42,6 +42,8 @@ def validate_experiment(store: ObjectStore, draft: ExperimentDraft) -> Experimen
     validate_role_recipe(draft.simulator)
     if draft.scoring.judge is not None:
         validate_role_recipe(draft.scoring.judge)
+    if draft.scoring.inspector is not None:
+        validate_role_recipe(draft.scoring.inspector)
     validate_judge(draft.scoring)
     case_ids = tuple(store.resolve(reference) for reference in draft.cases)
     if len(set(case_ids)) != len(case_ids):
@@ -140,6 +142,8 @@ def validate_judge(scoring: ScoringConfig, case: FrozenCase | None = None) -> No
     judge = scoring.judge
     if judge is not None and judge.kind == "scripted":
         raise InputError("Scripted controllers are unsupported as judges.")
+    if scoring.inspector is not None and scoring.inspector.kind == "scripted":
+        raise InputError("Scripted controllers are unsupported as inspectors.")
     if (
         case is not None
         and any(
@@ -162,8 +166,11 @@ def load_role[T: StrictModel](
         raise InputError("Role configuration must be self-contained.")
     if isinstance(role, ControllerRecipe):
         validate_role_recipe(role)
-    elif isinstance(role, ScoringConfig) and role.judge is not None:
-        validate_role_recipe(role.judge)
+    elif isinstance(role, ScoringConfig):
+        if role.judge is not None:
+            validate_role_recipe(role.judge)
+        if role.inspector is not None:
+            validate_role_recipe(role.inspector)
     return role
 
 

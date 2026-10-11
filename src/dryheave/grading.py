@@ -9,6 +9,7 @@ from threading import Event
 
 import psutil
 
+from dryheave.capture_models import WorkspaceCapture
 from dryheave.cases import DeterministicCriterion, FrozenCase
 from dryheave.controller_watch import ControllerWatch
 from dryheave.drivers.artifacts import ArtifactWriter
@@ -92,6 +93,7 @@ def execute_check(
     hidden: Path,
     artifacts: ArtifactWriter,
     context: VerifierContext,
+    deadline: float | None = None,
 ) -> CheckExecution:
     started = time.monotonic()
     owner = ProcessOwner()
@@ -127,7 +129,7 @@ def execute_check(
             workspace,
             environment=_environment(command),
             on_start=own,
-            control=CommandControl(cancelled=watch.cancelled, on_poll=publish),
+            control=CommandControl(cancelled=watch.cancelled, deadline=deadline, on_poll=publish),
         )
         artifacts.append("stdout.bin", result.stdout)
         artifacts.append("stderr.bin", result.stderr)
@@ -203,21 +205,60 @@ def check_copy(
         root / (criterion.criterion_id + "-evidence"),
         max(65536, 8 * criterion.command.max_output_bytes),
     )
-    try:
-        workspace = root / "workspace"
+
+    def materialize(workspace: Path) -> None:
         if not workspace.exists():
             materialize_check(context, kind, workspace)
+
+    return _run_copy(context, criterion, root, artifacts, materialize, None)
+
+
+def check_snapshot(
+    context: VerifierContext,
+    criterion: DeterministicCriterion,
+    snapshot: WorkspaceCapture,
+    deadline: float,
+) -> tuple[CheckExecution, Path]:
+    root = context.root / "criteria" / criterion.criterion_id / "final"
+    if root.exists():
+        raise InputError("Snapshot verification requires a fresh directory.")
+    ensure_directory(root)
+    artifacts = ArtifactWriter(
+        root / (criterion.criterion_id + "-evidence"),
+        max(65536, 8 * criterion.command.max_output_bytes),
+    )
+
+    def materialize(workspace: Path) -> None:
+        materialize_files(
+            workspace, snapshot.files, context.blobs, directories=snapshot.directories
+        )
+
+    return _run_copy(context, criterion, root, artifacts, materialize, deadline), artifacts.root
+
+
+def _run_copy(
+    context: VerifierContext,
+    criterion: DeterministicCriterion,
+    root: Path,
+    artifacts: ArtifactWriter,
+    materialize: Callable[[Path], None],
+    deadline: float | None,
+) -> CheckExecution:
+    try:
+        workspace = root / "workspace"
+        materialize(workspace)
         hidden = hidden_inputs(context, root)
-        execution = execute_check(criterion, workspace, hidden, artifacts, context)
+        execution = execute_check(criterion, workspace, hidden, artifacts, context, deadline)
     except (DryheaveError, OSError) as error:
         artifacts.record("error", {"type": type(error).__name__, "message": str(error)})
         execution = CheckExecution(outcome="error", error=type(error).__name__)
     try:
         hidden_inputs(context, root)
     except (DryheaveError, OSError):
-        execution = execution.model_copy(
-            update={"outcome": "error", "error": "hidden_verifier_changed"}
-        )
+        if execution.error != "verifier_cleanup_failed":
+            execution = execution.model_copy(
+                update={"outcome": "error", "error": "hidden_verifier_changed"}
+            )
     atomic_write(artifacts.root / "result.json", canonical_json(execution), replace=False)
     return execution
 

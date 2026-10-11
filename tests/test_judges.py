@@ -226,7 +226,7 @@ def test_claude_judge_uses_structured_protocol_and_provider_usage(
         on_identities=lambda _identities: None,
         runtime_root=tmp_path / "runtime",
     )
-    call, results, answers = invoke_judge(
+    call, results, answers, judgments = invoke_judge(
         recipe, request, ArtifactWriter(tmp_path / "evidence", 1000000), context
     )
     assert call.status == ("failed" if invalid else "completed")
@@ -236,6 +236,9 @@ def test_claude_judge_uses_structured_protocol_and_provider_usage(
     assert call.cleanup.known_writers_stopped
     assert results[0].outcome == ("error" if invalid else "pass")
     assert answers == ({} if invalid else {"applied": "yes"})
+    assert [(item.criterion_id, item.rationale) for item in judgments] == (
+        [] if invalid else [("quality", "Synthetic rubric fixture.")]
+    )
 
 
 @pytest.mark.integration
@@ -402,6 +405,31 @@ def test_transcript_orders_by_sequence_and_relativizes_paths():
         ("action", 'shell: {"command": ["git", "status"]}'),
         ("assistant", "Added the toggle."),
     ]
+
+
+def test_transcript_from_events_matches_the_blob_projection_and_falls_back_to_dialogue():
+    from dryheave.controller_models import DialogueMessage
+    from dryheave.drivers.models import NativeEvent
+    from dryheave.judges import judge_transcript, judge_transcript_from_events
+
+    records = (
+        {"sequence": 2, "kind": "assistant", "text": f"Edited {WORKSPACE}/greet.py."},
+        {"sequence": 1, "kind": "accepted", "text": "Fix the greeting."},
+        tool_use(3, "Bash", {"command": f"python {WORKSPACE}/greet.py"}),
+    )
+    events = tuple(NativeEvent.model_validate(record) for record in records)
+    dialogue = (DialogueMessage(role="user", text="Fix the greeting."),)
+    transcript = judge_transcript_from_events(events, dialogue, (WORKSPACE,))
+    assert transcript == judge_transcript(native_blobs(*records), dialogue, (WORKSPACE,))
+    assert [(entry.role, entry.text) for entry in transcript] == [
+        ("user", "Fix the greeting."),
+        ("assistant", "Edited greet.py."),
+        ("action", 'Bash: {"command": "python greet.py"}'),
+    ]
+    assert [
+        (entry.role, entry.text)
+        for entry in judge_transcript_from_events((), dialogue, (WORKSPACE,))
+    ] == [("user", "Fix the greeting.")]
 
 
 def test_transcript_bounds_action_excerpts_and_falls_back_to_dialogue():

@@ -5,6 +5,7 @@ import time
 import psutil
 import pytest
 
+from conftest import judged_case_benchmark
 from dryheave.cases import load_frozen_case
 from dryheave.drivers.models import ProcessIdentity
 from dryheave.experiments import create_experiment, load_experiment
@@ -70,3 +71,42 @@ def test_recovery_stops_only_recorded_process_identity_before_capture(store, ben
         if writer.poll() is None:
             writer.kill()
         writer.wait()
+
+
+@pytest.mark.integration
+def test_recovered_interrupted_attempt_carries_its_workflow_progress(
+    store, graded_benchmark, tmp_path
+):
+    from dryheave.runner_models import WorkflowEvent, WorkflowStepRecord
+
+    benchmark, _ = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    identifier = create_experiment(store, benchmark)
+    experiment = load_experiment(store, identifier)
+    run_id = RunStore(store.root).create(identifier)
+    event = WorkflowEvent(
+        step_id="inspect-required",
+        kind="inspect",
+        outcome="failed",
+        turn=2,
+        failed_criteria=("greeting",),
+        seconds=1.5,
+    )
+    with RunStore(store.root).open(run_id) as journal:
+        execution = ExecutionJournal(journal)
+        execution.configure(RunOptions(mode="offline-fixture", workflow=True))
+        state = execution.reserve(experiment.trials[0].trial_id)
+        execution.save(state.model_copy(update={"stage": TrialStage.PREPARING}))
+        execution.record(
+            state,
+            "workflow-step",
+            WorkflowStepRecord(event=event, position=0).model_dump(mode="json"),
+        )
+        execution.save(
+            execution.attempts[state.attempt_id].model_copy(update={"workflow_position": 0})
+        )
+    result = run_experiment(store, resume=run_id)
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "interrupted"
+    assert capture.interaction_coverage == "partial"
+    assert capture.workflow.steps == ("inspect-required",)
+    assert (capture.workflow.position, capture.workflow.events) == (0, (event,))

@@ -36,7 +36,9 @@ auth files or environment inventories. Commands use argv with finite limits.
 
 Preserve immutable object IDs and evidence. Alias updates cannot alter historical
 inputs. Native execution needs both a run lock and the store native lock. Stop
-owned writers before snapshotting outputs or grading. Missing observations remain
+owned writers before snapshotting outputs or grading, except for a workflow
+inspection snapshot of the idle live workspace, which is feedback-only, never
+capture evidence and never graded. Missing observations remain
 unknown; no fake successful commands or placeholder CLI actions.
 
 Keep development stores, fixtures, downloads, virtual environments and caches in

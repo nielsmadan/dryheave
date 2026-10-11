@@ -263,7 +263,7 @@ def _judge(
         runtime_root=execution.attempt_root(state) / "role-runtime" / call_id,
     )
     workspace = str(Path(state.workspace))
-    call, results, answers = invoke_judge(
+    call, results, answers, _ = invoke_judge(
         recipe,
         judge_projection(
             inputs.case,

@@ -474,6 +474,46 @@ descendants. Calibration, native run and assessment reconcile this ownership bef
 execution. Failed cleanup blocks snapshot/publication. Retrying calibration starts
 fresh copies; it does not infer results from interrupted work.
 
+## Workflows
+
+A case is personal: it captures one person's real workflow, including the
+reviews, manual testing, QA and documentation habits they actually followed, not
+an idealized task stripped of those habits. `CaseContent.workflow` is an ordered
+tuple of `InspectStep` and `PromptStep` entries (`cases.WorkflowStep`), each with
+a unique `step_id`. A `PromptStep` sends its `prompt` text verbatim once — a
+skill invocation such as `/code-review --quick`, or a plain instruction such as
+"update the docs" — and may carry an `answer_hint` guiding how the simulated
+user answers any dialog that step triggers; a prompt cannot be one of the
+built-in commands that produce no model turn (`cases.NO_TURN_COMMANDS`: `/clear`,
+`/compact`, `/exit`, `/quit`, `/resume`, `/rewind`, `/login`, `/logout`). An
+`InspectStep` names the criteria the user would check at that point — case
+criterion IDs or non-disabled default rubric IDs — and represents the user
+looking at the work and judging it against what they can observe.
+
+Steps advance only at a simulator "done" stop. At that point, a `prompt` step is
+delivered and the workflow advances to the next step; an `inspect` step is
+checked, and on failure the run receives a user-voice fix-it reply and the same
+step is retried at the next done point, while on success the workflow silently
+advances and continues evaluating the next step at the same done point. The
+workflow completes, and the run stops with `stop_reason="workflow_complete"`,
+once every step has passed or been delivered. `cases.effective_workflow(case,
+enabled=..., inspected=...)` computes the workflow actually run: the empty
+tuple when workflows are disabled for the run; the case's declared `workflow`
+when it has one; otherwise, when the run has an inspector and the case declares
+at least one required criterion, a single default `InspectStep` named
+`inspect-required` over those required criteria IDs; otherwise the empty tuple
+(today's behaviour, no workflow). `workflow.next_workflow_action(steps,
+position)` is the pure step-transition function the runner drives this loop
+with, returning `"deliver_prompt"`, `"inspect"` or `"complete"` for a given
+position.
+
+Authors write inspect criteria as a dedicated, observable judge or deterministic
+criterion — what a user sees using the result, such as a UI behaving correctly
+or a command printing the right thing — and keep their correctness criterion
+held out, graded only at final assessment as every criterion already is.
+`CaseContent.workflow` is dropped from serialization when empty, so cases
+without one keep their existing object ID.
+
 ## Historical repository snapshots
 
 `capture_repository(store, repo, commit, initial_patch=..., limits=...)` requires a

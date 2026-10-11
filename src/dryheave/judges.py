@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from dryheave.capture_models import CapturedFile
 from dryheave.cases import CaseCheck, FrozenCase, RubricCriterion
 from dryheave.claude_controller import claude_payload
 from dryheave.controller_models import (
@@ -189,12 +190,11 @@ def _entry(event: NativeEvent, roots: tuple[str, ...]) -> TranscriptEntry | None
     return None
 
 
-def judge_transcript(
-    blobs: dict[str, bytes], dialogue: tuple[DialogueMessage, ...], roots: tuple[str, ...]
+def judge_transcript_from_events(
+    events: tuple[NativeEvent, ...],
+    dialogue: tuple[DialogueMessage, ...],
+    roots: tuple[str, ...],
 ) -> tuple[TranscriptEntry, ...]:
-    events: tuple[NativeEvent, ...] = ()
-    with suppress(DryheaveError):
-        events = native_events(blobs)
     ordered = sorted(enumerate(events), key=lambda item: (item[1].sequence, item[0]))
     entries = tuple(entry for _, event in ordered if (entry := _entry(event, roots)) is not None)
     return entries or tuple(
@@ -202,6 +202,28 @@ def judge_transcript(
         for message in dialogue
         if message.text.strip()
     )
+
+
+def judge_transcript(
+    blobs: dict[str, bytes], dialogue: tuple[DialogueMessage, ...], roots: tuple[str, ...]
+) -> tuple[TranscriptEntry, ...]:
+    events: tuple[NativeEvent, ...] = ()
+    with suppress(DryheaveError):
+        events = native_events(blobs)
+    return judge_transcript_from_events(events, dialogue, roots)
+
+
+def judge_files(
+    entries: tuple[CapturedFile, ...], blobs: Mapping[str, bytes]
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    files = {}
+    omitted = []
+    for entry in entries:
+        try:
+            files[entry.path] = blobs[entry.blob].decode("utf-8")
+        except UnicodeError:
+            omitted.append(entry.path)
+    return files, tuple(omitted)
 
 
 def _keeping(request: JudgeInput, actions: list[int], count: int) -> JudgeInput:
@@ -257,18 +279,12 @@ def judge_projection(
     roots: tuple[str, ...] = (),
     limit: int | None = None,
 ) -> JudgeInput:
-    files = {}
-    omitted = []
-    for entry in capture.workspace.files:
-        try:
-            files[entry.path] = blobs[entry.blob].decode("utf-8")
-        except UnicodeError:
-            omitted.append(entry.path)
+    files, omitted = judge_files(capture.workspace.files, blobs)
     request = JudgeInput(
         initial_prompt=case.initial_prompt,
         criteria=effective_rubrics(case),
         files=files,
-        omitted_binary_files=tuple(omitted),
+        omitted_binary_files=omitted,
         checks=tuple(
             JudgeCheck(check_id=item.check_id, question=item.question) for item in case.checks
         ),
@@ -305,7 +321,7 @@ def check_results(
 
 def invoke_judge(
     recipe: ControllerRecipe, request: JudgeInput, artifacts: ArtifactWriter, context: CallContext
-) -> tuple[RoleCall, tuple[CriterionResult, ...], dict[str, Answer]]:
+) -> tuple[RoleCall, tuple[CriterionResult, ...], dict[str, Answer], tuple[Judgment, ...]]:
     started = time.monotonic()
     observation = RoleObservation()
     response = None
@@ -396,4 +412,4 @@ def invoke_judge(
         for item in request.criteria
     )
     answers = {item.check_id: item.answer for item in response.checks} if response else {}
-    return call, results, answers
+    return call, results, answers, response.judgments if response else ()

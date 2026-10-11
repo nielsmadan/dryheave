@@ -36,6 +36,36 @@ def test_frozen_aliases_variants_and_pair_seed(store, benchmark):
     assert create_experiment(store, pinned) == identifier
 
 
+def test_frozen_experiment_id_is_pinned(store):
+    from dryheave.experiment_models import FrozenExperiment, FrozenVariant, TrialSpec
+
+    case_id = "a" * 64
+    profile_id = "b" * 64
+    simulator_id = "c" * 64
+    scoring_id = "d" * 64
+    frozen = FrozenExperiment(
+        name="Pinned",
+        case_ids=(case_id,),
+        variants=(FrozenVariant(name="base", profile_id=profile_id),),
+        repetitions=1,
+        seed=0,
+        simulator_id=simulator_id,
+        scoring_id=scoring_id,
+        trials=(
+            TrialSpec(
+                trial_id="t-" + "e" * 24,
+                case_id=case_id,
+                profile_id=profile_id,
+                variant="base",
+                repetition=1,
+                seed=0,
+            ),
+        ),
+    )
+    identifier = store.put(ObjectKind.EXPERIMENT, frozen)
+    assert identifier == "5aaeb75e2c8265525843fd79f180972126813b0298439834453f17156398e172"
+
+
 def test_matrix_validation_rejects_alias_duplicates_and_unknown_facts(store, benchmark):
     store.set_alias("same-task", store.resolve("task"))
     with pytest.raises(InputError, match="same case"):
@@ -72,6 +102,45 @@ def test_controller_literal_credentials_are_rejected_without_echo(store, benchma
     with pytest.raises(InputError, match="runtime reference") as error:
         validate_experiment(store, benchmark.model_copy(update={"simulator": recipe}))
     assert "synthetic-credential" not in str(error.value)
+
+
+def test_inspector_recipe_gets_the_same_validation_as_the_judge(store, benchmark):
+    secret_bearing = ControllerRecipe(
+        kind="json-command",
+        isolation="trusted-native",
+        command=CommandSpec(argv=("controller", "--api-key", "synthetic-credential")),
+    )
+    with pytest.raises(InputError, match="runtime reference") as error:
+        validate_experiment(
+            store, benchmark.model_copy(update={"scoring": ScoringConfig(inspector=secret_bearing)})
+        )
+    assert "synthetic-credential" not in str(error.value)
+    scripted = benchmark.model_copy(update={"scoring": ScoringConfig(inspector=ControllerRecipe())})
+    for operation in (validate_experiment, create_experiment):
+        with pytest.raises(InputError, match="inspector"):
+            operation(store, scripted)
+
+
+def test_frozen_inspector_revalidated_on_load(store, benchmark):
+    usable = ControllerRecipe(
+        kind="json-command",
+        isolation="trusted-native",
+        command=CommandSpec(argv=(sys.executable, "judge.py")),
+    )
+    draft = benchmark.model_copy(update={"scoring": ScoringConfig(judge=usable, inspector=usable)})
+    identifier = create_experiment(store, draft)
+    frozen = load_experiment(store, identifier)
+    frozen = frozen.model_copy(
+        update={
+            "scoring_id": store.put(
+                ObjectKind.SCORING,
+                ScoringConfig(judge=usable, inspector=ControllerRecipe()),
+            )
+        }
+    )
+    invalid = store.put(ObjectKind.EXPERIMENT, frozen, references=references(frozen))
+    with pytest.raises(InputError, match="inspector"):
+        load_experiment(store, invalid)
 
 
 @pytest.mark.parametrize(

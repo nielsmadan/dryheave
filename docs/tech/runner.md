@@ -210,6 +210,64 @@ status-only requests, incomplete capture and unresolved cleanup. It preserves
 the run ID and evidence on failure or cancellation; normal `run` stays
 capture-only. See [results.md](results.md).
 
+## Case workflows
+
+`RunOptions.workflow` (default false, dropped from the frozen options when false)
+turns on the case's workflow; see authoring.md for steps and the default inspect
+step. A run with workflows on is refused before launch when a case has an inspect
+step but the scoring config has no inspector or judge with `max_calls` above zero,
+or when a slash prompt step targets an agent other than Claude. With workflows off,
+or a case with no effective workflow, the loop below never runs.
+
+A decision may carry `stop_kind` (`"done"`, the default, or `"declined"` when the
+simulated user will not approve what was asked) and `choices` (reserved for dialog
+answers). Both are dropped from serialization at their defaults, so existing
+scripts and recorded calls keep their bytes. A simulator `stop` with `stop_kind:
+"done"` is a done point; script exhaustion and script divergence are not — they
+carry `stop_kind: "declined"` and end the run with `stop_reason: "simulator_stop"`
+as today. At a done point the runner asks `next_workflow_action` what to do:
+
+- `deliver_prompt`: send the prompt step verbatim; it advances once the subject
+  accepts it. Prompts starting with `/` use the `curated-native-command` submission policy; the rest use `conversation`.
+- `inspect`: inspect the live workspace against the step's criteria (inspection.py).
+  A pass advances and the loop continues at the same done point. A failure stays on
+  the step and asks the simulator for a fix-it reply: `SimulatorInput.inspection`
+  carries the findings and the instruction replaces "stop when the work is done"
+  with the user-voice fix-it rules. A `stop` returned with findings is recorded as a
+  failed call with error `stop_with_findings` and retried once.
+- `complete`: stop with `stop_reason: "workflow_complete"`.
+
+A `declined` stop ends the run as `simulator_stop`. Native events are ingested before
+and after each inspection and terminal-owned processes are published. If events
+arrived meanwhile, the inspection reruns once and is then unavailable. The judge
+transcript comes from the driver's native events so far, falling back to the
+dialogue. An unavailable inspection stops with `inspection_unavailable`, unless the
+run was cancelled (`cancelled`) or its deadline passed (`timeout`). Inspections per
+attempt are capped at the case's `max_turns` (`turn_budget`); every other budget
+keeps its existing stop reason and the progress made so far.
+
+Simulator budgets, elapsed time and call indexes count only `role: "simulator"`
+calls, so scripted fixtures stay aligned. Inspection judge calls join the attempt's
+calls as `role: "judge"`, with their own per-inspection index and a deadline of
+`min(subject deadline, now + call_seconds)`; assessment prices them with the
+inspector (or judge) recipe under the judge role. Private inspection material lives
+in a fresh directory under the store's `scratch/`. Retained judge and verifier
+artifacts live under `runs/RUN_ID/inspections/ATTEMPT_ID/`, outside the attempt
+tree, and are copied into the capture's `evidence/inspection/` once the subject has
+stopped.
+
+Journal events: `workflow-step` (one `WorkflowEvent` and the position after it),
+`inspection-intent` and `inspection-result`. They never reuse assessment event
+names, so grading after an inspected run still invokes its own judge.
+`AttemptState.workflow_position` (dropped when None) is the only workflow field in
+the attempt state. Inspect events record `passed`, `failed`, `reused` (unchanged
+snapshot, previous failed verdict, no call) or `unavailable`, with the judge call
+IDs and inspection wall time; each fix-it reply adds a `fix_requested` event naming
+its simulator calls. The capture's `workflow` (`WorkflowProgress`: step IDs,
+position, events) is rebuilt from `workflow-step` events at capture, including when
+recovery captures an interrupted attempt. Interrupted attempts are never resumed
+mid-interaction.
+
 ## Durable recovery and assessment integration
 
 `run_experiment`, `run_status` and `load_capture` in `runner.py` are reusable

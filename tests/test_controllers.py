@@ -117,6 +117,33 @@ def test_script_condition_and_divergence(store, benchmark, tmp_path):
     result, _ = invoke(benchmark.simulator, diverged, tmp_path / "different")
     assert result.decision.action == "stop"
     assert "divergence" in result.decision.reason
+    assert result.decision.stop_kind == "declined"
+
+
+def test_script_exhaustion_is_not_a_done_point(store, benchmark, tmp_path):
+    request = request_for(store)
+    exhausted = benchmark.simulator.model_copy(update={"script": benchmark.simulator.script[:0]})
+    result, _ = invoke(exhausted, request, tmp_path)
+    assert result.decision.action == "stop"
+    assert "exhausted" in result.decision.reason
+    assert result.decision.stop_kind == "declined"
+
+
+def test_fix_it_findings_shrink_to_fit_the_simulator_input_bound(store, benchmark):
+    from dryheave.controller_models import InspectionFinding, RoleBudget
+    from dryheave.serialization import canonical_json
+
+    case = load_frozen_case(store, "task")
+    persona = load_frozen_persona(store, case.persona_id)
+    dialogue = (DialogueMessage(role="assistant", text="Done."),)
+    findings = (InspectionFinding(criterion_id="greeting", rationale="x" * 4000),)
+    oversized = simulator_projection(case, persona, dialogue, 17, inspection=findings)
+    assert len(canonical_json(oversized)) > 3000
+    recipe = ControllerRecipe(budget=RoleBudget(max_input_bytes=3000))
+    fitted = simulator_projection(case, persona, dialogue, 17, recipe=recipe, inspection=findings)
+    assert len(canonical_json(fitted)) <= 3000
+    assert fitted.inspection[0].criterion_id == "greeting"
+    assert len(fitted.inspection[0].rationale) < 4000
 
 
 @pytest.mark.parametrize(
@@ -222,7 +249,7 @@ assert "--ignore-user-config" in sys.argv
 q = json.load(sys.stdin)
 schema = json.loads(pathlib.Path(sys.argv[sys.argv.index("--output-schema") + 1]).read_text())
 assert schema["properties"]["action"]
-assert set(schema["required"]) == {"action", "text", "fact_ids", "reason"}
+assert set(schema["required"]) == {"action", "text", "fact_ids", "reason", "stop_kind", "choices"}
 assert schema["additionalProperties"] is False
 pathlib.Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text(json.dumps({"action":"reply","text":q["allowed_facts"][0]["text"],"fact_ids":["punctuation"],"reason":"fixture answer"}))
 print(json.dumps({"type":"turn.completed","usage":{"input_tokens":20,"cached_input_tokens":2,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":4}}))
@@ -320,3 +347,50 @@ def test_a_stop_decision_drops_any_explanation_text():
         ).encode()
     )
     assert (decision.action, decision.text) == ("stop", "")
+
+
+def test_decision_serialization_drops_default_stop_kind_and_choices(benchmark):
+    done = SimulatorDecision(action="stop", reason="The work is reported done.")
+    assert set(json.loads(done.model_dump_json())) == {"action", "text", "fact_ids", "reason"}
+    declined = done.model_copy(update={"stop_kind": "declined"})
+    assert json.loads(declined.model_dump_json())["stop_kind"] == "declined"
+    assert "stop_kind" not in benchmark.simulator.model_dump_json()
+
+
+def test_findings_switch_the_projection_to_a_fix_request(store, benchmark):
+    from dryheave.controller_models import FIX_IT_INSTRUCTION, InspectionFinding
+
+    case = load_frozen_case(store, "task")
+    persona = load_frozen_persona(store, case.persona_id)
+    dialogue = (DialogueMessage(role="assistant", text="Done."),)
+    plain = simulator_projection(case, persona, dialogue, 17)
+    finding = InspectionFinding(criterion_id="greeting", rationale="The comma is missing.")
+    fix = simulator_projection(case, persona, dialogue, 17, inspection=(finding,))
+    assert "Stop instead of replying" in plain.instruction
+    assert "inspection" not in plain.model_dump()
+    assert fix.instruction == FIX_IT_INSTRUCTION
+    assert "Stop instead of replying" not in fix.instruction
+    assert "symptoms not code" in fix.instruction
+    assert "never mention criteria, rubrics, judges or tests" in fix.instruction
+    assert fix.model_dump()["inspection"] == (
+        {"criterion_id": "greeting", "rationale": "The comma is missing."},
+    )
+    assert fix.model_dump(exclude={"instruction", "inspection"}) == plain.model_dump(
+        exclude={"instruction"}
+    )
+
+
+def test_a_native_reply_is_always_a_done_decision():
+    decision = native_decision(
+        json.dumps(
+            {
+                "action": "reply",
+                "text": "Use a comma.",
+                "fact_ids": [],
+                "reason": "Answering the question.",
+                "stop_kind": "declined",
+                "choices": [],
+            }
+        ).encode()
+    )
+    assert (decision.action, decision.stop_kind) == ("reply", "done")

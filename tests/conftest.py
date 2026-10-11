@@ -509,6 +509,62 @@ def judged_case_benchmark(store, graded_benchmark, tmp_path):
     return benchmark, changed_id
 
 
+INSPECTOR = """
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+request = json.load(sys.stdin)
+count = len(list(root.glob("request-*.json")))
+(root / f"request-{count}.json").write_text(json.dumps(request))
+outcomes = json.loads((root / "outcomes.json").read_text())
+outcome = outcomes[min(count, len(outcomes) - 1)]
+if outcome == "broken":
+    print("not json")
+    raise SystemExit(0)
+rationale = "The greeting reads oddly when used." if outcome == "fail" else "Reads well."
+print(json.dumps({
+    "judgments": [
+        {"criterion_id": item["criterion_id"], "outcome": outcome, "rationale": rationale}
+        for item in request["criteria"]
+    ],
+    "usage": {"output": 7, "provenance": "fixture"},
+}))
+"""
+
+
+def workflow_benchmark(store, graded_benchmark, tmp_path, *, outcomes=("pass",), workflow=None):
+    import json as jsonlib
+
+    from dryheave.cases import load_frozen_case
+    from dryheave.controller_models import ControllerRecipe
+    from dryheave.models import CommandSpec, ObjectKind
+
+    benchmark, case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    if workflow is not None:
+        case = load_frozen_case(store, case_id)
+        case_id = store.put(
+            ObjectKind.CASE,
+            case.model_copy(update={"workflow": workflow}),
+            files=store.read_blobs(case_id),
+            references=(case.persona_id, case.repository_id),
+        )
+    root = tmp_path / "inspector"
+    root.mkdir()
+    (root / "outcomes.json").write_text(jsonlib.dumps(list(outcomes)))
+    script = tmp_path / "inspector.py"
+    script.write_text(INSPECTOR)
+    inspector = ControllerRecipe(
+        kind="json-command",
+        isolation="trusted-native",
+        command=CommandSpec(argv=(sys.executable, str(script), str(root))),
+    )
+    return benchmark.model_copy(
+        update={
+            "cases": (case_id,),
+            "scoring": benchmark.scoring.model_copy(update={"inspector": inspector}),
+        }
+    ), root
+
+
 @dataclass(frozen=True)
 class Baseline:
     source: Path
