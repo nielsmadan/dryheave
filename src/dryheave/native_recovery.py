@@ -48,10 +48,8 @@ def reconcile_attempt(
     owner = ProcessOwner()
     errors = []
 
-    def publish(identity: ProcessIdentity) -> None:
-        current = execution.attempts[state.attempt_id]
-        if identity not in current.owned:
-            execution.own(current, identity)
+    def publish(identities: tuple[ProcessIdentity, ...]) -> None:
+        execution.own(execution.attempts[state.attempt_id], identities)
 
     identities = (*state.owned, *(previous.owned if previous else ()))
     if state.launch is not None and state.launch.daemon is not None:
@@ -66,10 +64,10 @@ def reconcile_attempt(
                 continue
             except psutil.AccessDenied:
                 errors.append("recovery_process_visibility_denied")
-        owner.publish(publish)
+        owner.publish(publish, force=True)
     finally:
         report = owner.stop(timeout=3, terminal_closed=False)
-        owner.publish(publish)
+        owner.publish(publish, force=True)
     identity_known = (
         not state.launch_attempted
         or (state.launch is not None and state.launch.daemon is not None)

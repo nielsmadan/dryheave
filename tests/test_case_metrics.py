@@ -3,6 +3,7 @@ import sys
 import threading
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from dryheave.case_metrics import (
@@ -14,7 +15,7 @@ from dryheave.case_metrics import (
 )
 from dryheave.cases import MetricsCommand
 from dryheave.drivers.artifacts import ArtifactWriter
-from dryheave.errors import InputError
+from dryheave.errors import InputError, LimitError
 from dryheave.models import CommandSpec, EnvironmentReference
 from dryheave.processes import CommandResult
 from dryheave.result_models import MetricValue
@@ -143,7 +144,7 @@ def test_metrics_environment_passes_only_declared_references_and_contract_paths(
         metrics_environment(spec, {"PATH": "/usr/bin"}, paths)
 
 
-def run_script(tmp_path, program: str, *, timeout: int = 60):
+def run_script(tmp_path, program: str, *, timeout: int = 60, on_identities=None):
     paths = MetricsPaths(
         workspace=tmp_path / "workspace",
         baseline=tmp_path / "baseline",
@@ -165,11 +166,13 @@ def run_script(tmp_path, program: str, *, timeout: int = 60):
     )
     identities = []
     context = SimpleNamespace(
-        cancelled=threading.Event(), original_workspace=None, on_identity=identities.append
+        cancelled=threading.Event(),
+        original_workspace=None,
+        on_identities=on_identities or identities.extend,
     )
     evidence = ArtifactWriter(tmp_path / "evidence", 1000000)
     result = execute_metrics(command, paths, evidence, context, {"PATH": "/usr/bin:/bin"})
-    assert identities
+    assert identities or on_identities
     return result, evidence
 
 
@@ -227,3 +230,72 @@ def test_failed_metrics_commands_become_errors_with_their_reason(tmp_path, progr
     result, _ = run_script(tmp_path, program, timeout=2 if "sleep" in program else 60)
     assert (result.outcome, result.values) == ("error", ())
     assert result.error.startswith(message)
+
+
+WRITE_ONE_METRIC = (
+    "import json, os\n"
+    'open(os.environ["DRYHEAVE_METRICS_OUTPUT"], "w").write(json.dumps('
+    '{"metrics": [{"metric_id": "t", "label": "T", "value": 1}]}))\n'
+)
+
+
+@pytest.mark.integration
+def test_metrics_whose_owned_process_cleanup_fails_report_no_values(tmp_path):
+    child_code = "import time\ntime.sleep(10)\n"
+    program = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}], stdin=subprocess.DEVNULL,"
+        " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "time.sleep(.3)\n" + WRITE_ONE_METRIC
+    )
+    parent: list[psutil.Process] = []
+    failed: list[tuple[int, ...]] = []
+
+    def on_identities(batch):
+        if not parent:
+            parent.append(psutil.Process(batch[0].pid))
+        if not failed and not parent[0].is_running():
+            failed.append(tuple(item.pid for item in batch))
+            raise LimitError("Journal exceeds the limit.")
+
+    result, evidence = run_script(tmp_path, program, on_identities=on_identities)
+    assert failed
+    assert (result.outcome, result.values, result.error) == ("error", (), "metrics_cleanup_failed")
+    cleanup = json.loads(next(evidence.root.glob("*-cleanup.json")).read_text())
+    assert cleanup["errors"] == ["process_identity_publish_failed"]
+
+
+@pytest.mark.integration
+def test_metrics_that_overflow_their_watched_files_report_no_values(tmp_path):
+    program = (
+        WRITE_ONE_METRIC
+        + 'open(os.path.join(os.path.dirname(os.environ["DRYHEAVE_METRICS_OUTPUT"]), "junk.bin"),'
+        ' "wb").write(b"x" * 3_000_000)\n'
+    )
+    result, _ = run_script(tmp_path, program)
+    assert (result.outcome, result.values, result.error) == (
+        "error",
+        (),
+        "metrics files exceeded their limits: controller_file_limit",
+    )
+
+
+@pytest.mark.integration
+def test_metrics_script_that_changes_its_hidden_input_reports_no_values(store, graded_benchmark):
+    from dryheave.assessments import assess_run
+    from dryheave.experiments import create_experiment
+    from dryheave.integrity import load_assessment
+    from dryheave.runner import run_experiment
+    from dryheave.runner_models import RunOptions
+    from test_assessments import measured_benchmark
+
+    program = (WRITE_ONE_METRIC + 'open(__file__, "a").write("# changed\\n")\n').encode()
+    summary = run_experiment(
+        store,
+        create_experiment(store, measured_benchmark(store, graded_benchmark, program)),
+        options=RunOptions(mode="offline-fixture"),
+    )
+    result = load_assessment(store, assess_run(store, summary.run_id)[0])
+    assert [(item.outcome, item.values, item.error) for item in result.metrics] == [
+        ("error", (), "hidden_metrics_input_changed")
+    ]

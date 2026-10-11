@@ -396,6 +396,119 @@ def build_calibrated(store, graded_benchmark) -> str:
     return calibrate_case(store, graded_benchmark.cases[0])
 
 
+def judged_case_benchmark(store, graded_benchmark, tmp_path):
+    import json as jsonlib
+
+    from dryheave.cases import (
+        CaseCheck,
+        CheckCondition,
+        MetricsCommand,
+        RubricCriterion,
+        load_frozen_case,
+    )
+    from dryheave.controller_models import ControllerRecipe
+    from dryheave.experiment_models import ScoringConfig
+    from dryheave.models import CommandSpec, ObjectKind
+
+    case_id = graded_benchmark.cases[0]
+    case = load_frozen_case(store, case_id)
+    measure = (
+        b"import json, os\n"
+        b"from pathlib import Path\n"
+        b'Path(os.environ["DRYHEAVE_METRICS_OUTPUT"]).write_text(json.dumps(\n'
+        b'    {"metrics": [{"metric_id": "changed_lines", "label": "Changed lines", "value": 1}]}\n'
+        b"))\n"
+    )
+    files = store.read_blobs(case_id) | {"verifiers/measure.py": measure}
+    case = case.model_copy(
+        update={
+            "criteria": (
+                *case.criteria,
+                RubricCriterion(
+                    criterion_id="quality", rubric="The greeting keeps its public interface."
+                ),
+            ),
+            "checks": (
+                CaseCheck(
+                    check_id="asked",
+                    question="Did the agent ask which punctuation to use?",
+                    expect="yes",
+                ),
+                CaseCheck(
+                    check_id="confirmed",
+                    question="Did the agent confirm the punctuation before finishing?",
+                    expect="yes",
+                    only_if=CheckCondition(check_id="asked", answer="yes"),
+                ),
+            ),
+            "metrics": (
+                MetricsCommand(
+                    metrics_id="greeting-metrics",
+                    description="Measure how the final greeting differs from the baseline.",
+                    command=CommandSpec(argv=(sys.executable, "{verifier}/measure.py")),
+                    entrypoint="measure.py",
+                ),
+            ),
+            "hidden_files": {**case.hidden_files, "measure.py": "verifiers/measure.py"},
+            "disabled_rubrics": ("test-quality",),
+        }
+    )
+    changed_id = store.put(
+        ObjectKind.CASE, case, files=files, references=(case.persona_id, case.repository_id)
+    )
+    script = tmp_path / "judge.py"
+    script.write_text(
+        "import pathlib,sys\n"
+        f"root = pathlib.Path({str(tmp_path)!r})\n"
+        "sys.stdin.buffer.read()\n"
+        'print((root / "response.json").read_text())\n'
+    )
+    (tmp_path / "response.json").write_text(
+        jsonlib.dumps(
+            {
+                "judgments": [
+                    {
+                        "criterion_id": "quality",
+                        "outcome": "pass",
+                        "rationale": "Judged quality.",
+                    },
+                    {
+                        "criterion_id": "code-quality",
+                        "outcome": "pass",
+                        "rationale": "Judged code quality.",
+                    },
+                    {
+                        "criterion_id": "codebase-consistency",
+                        "outcome": "pass",
+                        "rationale": "Judged consistency.",
+                    },
+                ],
+                "checks": [
+                    {
+                        "check_id": "asked",
+                        "answer": "yes",
+                        "rationale": "Asked about punctuation.",
+                    },
+                    {
+                        "check_id": "confirmed",
+                        "answer": "yes",
+                        "rationale": "Confirmed before finishing.",
+                    },
+                ],
+            }
+        )
+    )
+    scoring = ScoringConfig(
+        judge=ControllerRecipe(
+            kind="json-command",
+            isolation="trusted-native",
+            command=CommandSpec(argv=(sys.executable, str(script))),
+        )
+    )
+    benchmark = graded_benchmark.model_copy(update={"cases": (changed_id,), "scoring": scoring})
+    return benchmark, changed_id
+
+
 @dataclass(frozen=True)
 class Baseline:
     source: Path

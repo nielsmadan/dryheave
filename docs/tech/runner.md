@@ -248,8 +248,9 @@ Fresh `ownership-reconciled` events determine whether later execution is safe.
 They preserve historical capture cleanup failures and assessment exclusions; they
 do not rewrite an earlier capture into eligible evidence. A newly recorded setup,
 subject or controller/grader process invalidates earlier cleanup success. Setup
-commands publish discovered descendants during polling and cleanup, so observed
-children remain recoverable after their direct parent exits. Unknown launch
+commands publish discovered descendants in batches during polling (at most one
+batch per second) and cleanup, so observed children remain recoverable after
+their direct parent exits; see storage.md for the ownership event format. Unknown launch
 ownership and newly unresolved writers still block continuation.
 
 The `capture` object kind holds `CapturedAttempt` and exact blob maps:

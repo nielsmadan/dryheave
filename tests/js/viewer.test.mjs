@@ -180,6 +180,38 @@ function evidenceFile(name, content) {
   };
 }
 
+function reasoning() {
+  return {
+    attempt_id: "attempt-1",
+    assessment_id: null,
+    status: "unavailable",
+    reason: "No judge reasoning was retained for this assessment.",
+    reason_code: "not_retained",
+    criteria: [],
+    checks: [],
+  };
+}
+
+function caseView(id) {
+  return {
+    case_id: id,
+    title: "Fix the greeting",
+    initial_prompt: "Fix the greeting; ask which punctuation to use.",
+    facts: [],
+    rubrics: [],
+    disabled_rubrics: [],
+    deterministic: [],
+    checks: [],
+    metrics: [],
+    budgets: { max_turns: 4, subject_seconds: 180, setup_seconds: 120 },
+    tool_requirements: [],
+    repository_id: "r".repeat(64),
+    persona_id: "p".repeat(64),
+    baseline_commit: null,
+    reference_patch: false,
+  };
+}
+
 function listing(rows, extra = {}) {
   return { runs: rows, offset: 0, limit: 25, total: rows.length, ...extra };
 }
@@ -192,6 +224,8 @@ function store(overrides = {}) {
     reports: { [RUN]: report(RUN), [OTHER]: report(OTHER), [REPORT_ID]: report(REPORT_ID) },
     calibrations: calibrations(RUN, null, [calibrationEntry("1".repeat(64))]),
     dialogue: dialogue("hello"),
+    reasoning: reasoning(),
+    cases: { [CASE]: caseView(CASE) },
     comparison: null,
     ...overrides,
   };
@@ -222,6 +256,9 @@ function answer(path, data) {
     if (kind === "patch") {
       return { body: patch() };
     }
+    if (kind === "reasoning") {
+      return { body: data.reasoning };
+    }
     return { body: name ? evidenceFile(name, `bytes of ${name}`) : evidenceListing() };
   }
   const scoped = /^\/api\/(?:runs|cases)\/([0-9a-f]+)\/(progress|calibrations)$/.exec(route);
@@ -229,6 +266,10 @@ function answer(path, data) {
     return {
       body: scoped[2] === "progress" ? progress(scoped[1], data.progressStage) : data.calibrations,
     };
+  }
+  const caseLookup = /^\/api\/cases\/([0-9a-f]+)$/.exec(route);
+  if (caseLookup) {
+    return { body: data.cases[caseLookup[1]] };
   }
   const source = /^\/api\/(?:runs|reports)\/([0-9a-f]+)$/.exec(route);
   if (source) {
@@ -464,7 +505,7 @@ test("arrow, Home and End keys walk the tab list and move focus with it", async 
   const tabs = node(page.doc, "tabs");
   const right = fire(tabs, "keydown", { key: "ArrowRight" });
   assert.equal(right.defaultPrevented, true);
-  assert.equal(page.doc.activeElement.id, "tab-attempts");
+  assert.equal(page.doc.activeElement.id, "tab-results");
   fire(tabs, "keydown", { key: "ArrowLeft" });
   assert.equal(page.doc.activeElement.id, "tab-overview");
   fire(tabs, "keydown", { key: "ArrowLeft" });
@@ -541,6 +582,90 @@ test("choosing an evidence file loads and renders that file", async () => {
     page.paths().includes(`/api/runs/${RUN}/attempts/attempt-1/evidence/stdout.txt`),
   );
   assert.match(renderedText(node(page.doc, "panel-detail")), /bytes of stdout\.txt/);
+});
+
+test("choosing an attempt loads judge reasoning and renders when it is unavailable", async () => {
+  const page = await open();
+  const before = page.calls.length;
+  fire(attemptButtons(page.doc)[1], "click");
+  await flush();
+  const fresh = page.paths().slice(before);
+  assert.ok(fresh.includes(`/api/runs/${RUN}/attempts/attempt-2/reasoning`));
+  assert.match(
+    renderedText(node(page.doc, "panel-detail")),
+    /No help-needed accounting is retained for this attempt\./,
+  );
+});
+
+test("the case lookup form opens a case and renders it", async () => {
+  const page = await open();
+  fire(node(page.doc, "tab-case"), "click");
+  node(page.doc, "case-tab-id").value = CASE;
+  fire(node(page.doc, "case-form"), "submit");
+  await flush();
+  assert.ok(page.paths().includes(`/api/cases/${CASE}`));
+  assert.equal(node(page.doc, "panel-case").hidden, false);
+  assert.match(renderedText(node(page.doc, "panel-case")), /Fix the greeting/);
+});
+
+test("the case lookup form rejects a reference that is not a case object id", async () => {
+  const page = await open();
+  const before = page.calls.length;
+  node(page.doc, "case-tab-id").value = "not-a-case";
+  fire(node(page.doc, "case-form"), "submit");
+  await flush();
+  assert.equal(page.calls.length, before);
+  assert.match(
+    renderedText(node(page.doc, "panel-case")),
+    /Enter a 64-character lowercase case object ID\./,
+  );
+});
+
+test("clicking a case chip in the results tab opens the case tab and loads that case", async () => {
+  const groupWithCase = {
+    variant: "haiku",
+    mode: "offline-fixture",
+    scheduled_trials: 1,
+    attempts: 1,
+    completed: 1,
+    scored: 1,
+    eligible: 1,
+    eligible_passes: 1,
+    eligible_completion_rate: 1,
+    audit_excluded: 0,
+    subjects_reporting_completion: 1,
+    exclusion_reasons: {},
+    durations: { count: 1, unknown: 0, minimum: 1, median: 1, maximum: 1, mean: 1, stdev: 0 },
+    input_tokens: { count: 1, unknown: 0, minimum: 1, median: 1, maximum: 1, mean: 1, stdev: 0 },
+    output_tokens: { count: 1, unknown: 0, minimum: 1, median: 1, maximum: 1, mean: 1, stdev: 0 },
+    accepted_turns: { count: 1, unknown: 0, minimum: 1, median: 1, maximum: 1, mean: 1, stdev: 0 },
+    costs: { count: 1, unknown: 0, minimum: 1, median: 1, maximum: 1, mean: 1, stdev: 0 },
+    known_spend_by_currency: {},
+    unknown_cost_records: 0,
+    partial_cost_attempts: 0,
+    criteria: [
+      {
+        case_id: CASE,
+        criterion_id: "quality",
+        passes: 1,
+        graded: 1,
+        scores: { count: 1, unknown: 0, minimum: 1, median: 1, maximum: 1, mean: 1, stdev: 0 },
+      },
+    ],
+  };
+  const page = await open({
+    reports: { [RUN]: report(RUN, { groups: [groupWithCase] }) },
+  });
+  const before = page.calls.length;
+  const button = matching([node(page.doc, "panel-results")], (item) =>
+    item.getAttribute?.("data-case") === CASE,
+  )[0];
+  assert.ok(button);
+  fire(button, "click");
+  await flush();
+  assert.equal(node(page.doc, "panel-case").hidden, false);
+  assert.ok(page.paths().slice(before).includes(`/api/cases/${CASE}`));
+  assert.match(renderedText(node(page.doc, "panel-case")), /Fix the greeting/);
 });
 
 test("continuing a truncated calibration scan passes the cursor and merges the result", async () => {

@@ -16,16 +16,30 @@ from dryheave.journals import RunStore
 from dryheave.models import ObjectId, ObjectKind, TokenUsage, TrialStage
 from dryheave.report_models import (
     AttemptReport,
+    AttemptTopline,
     CheckSummary,
     Comparison,
     CriterionSummary,
     Distribution,
+    Eligibility,
+    FactDisclosure,
     GroupMetrics,
+    GroupTopline,
+    HelpNeededSummary,
     MetricSummary,
     PairChange,
+    PriceBasis,
     RunReport,
+    ToplineCheck,
 )
-from dryheave.result_models import Assessment, CheckResult, CriterionResult, MetricValue
+from dryheave.result_models import (
+    Assessment,
+    CheckResult,
+    CriterionResult,
+    MetricValue,
+    RoleMetrics,
+    UsageCharge,
+)
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json, digest
 from dryheave.storage import ObjectStore
@@ -67,13 +81,18 @@ def _total_input(tokens: TokenUsage) -> float | None:
     return tokens.uncached_input + tokens.cache_read + tokens.cache_write
 
 
+def _reported_case_id(result: Assessment) -> ObjectId | None:
+    return result.graded_case_id or result.case_id
+
+
 def _criteria_summary(eligible: list[Assessment]) -> tuple[CriterionSummary, ...]:
     by_case_criterion: dict[tuple[ObjectId, str], list[CriterionResult]] = defaultdict(list)
     for result in eligible:
-        if result.case_id is None:
+        case_id = _reported_case_id(result)
+        if case_id is None:
             continue
         for item in result.criteria:
-            by_case_criterion[(result.case_id, item.criterion_id)].append(item)
+            by_case_criterion[(case_id, item.criterion_id)].append(item)
     return tuple(
         CriterionSummary(
             case_id=case_id,
@@ -99,10 +118,11 @@ def _agreement(items: list[CheckResult]) -> float | None:
 def _checks_summary(eligible: list[Assessment]) -> tuple[CheckSummary, ...]:
     by_case_check: dict[tuple[ObjectId, str], list[CheckResult]] = defaultdict(list)
     for result in eligible:
-        if result.case_id is None:
+        case_id = _reported_case_id(result)
+        if case_id is None:
             continue
         for item in result.checks:
-            by_case_check[(result.case_id, item.check_id)].append(item)
+            by_case_check[(case_id, item.check_id)].append(item)
     return tuple(
         CheckSummary(
             case_id=case_id,
@@ -120,11 +140,12 @@ def _checks_summary(eligible: list[Assessment]) -> tuple[CheckSummary, ...]:
 def _metrics_summary(eligible: list[Assessment]) -> tuple[MetricSummary, ...]:
     by_case_metric: dict[tuple[ObjectId, str], list[MetricValue]] = defaultdict(list)
     for result in eligible:
-        if result.case_id is None:
+        case_id = _reported_case_id(result)
+        if case_id is None:
             continue
         for metrics_result in result.metrics:
             for value in metrics_result.values:
-                by_case_metric[(result.case_id, value.metric_id)].append(value)
+                by_case_metric[(case_id, value.metric_id)].append(value)
     return tuple(
         MetricSummary(
             case_id=case_id,
@@ -146,6 +167,159 @@ def _latest_eligible(attempts: list[AttemptReport]) -> list[Assessment]:
         for item in latest.values()
         if item.result and item.result.eligible and not item.current_exclusions
     ]
+
+
+def attempt_eligibility(item: AttemptReport) -> Eligibility:
+    if item.result is None:
+        return "unassessed"
+    if item.result.eligible and not item.current_exclusions:
+        return "eligible"
+    return "excluded" if item.current_exclusions or item.result.exclusion_reasons else "ungraded"
+
+
+def price_basis(records: Iterable[UsageCharge]) -> PriceBasis:
+    charges = list(records)
+    return PriceBasis(
+        kinds=tuple(sorted(Counter(item.cost_kind for item in charges).items())),
+        bases=tuple(sorted(Counter(item.model_basis for item in charges).items())),
+        currencies=tuple(sorted({item.currency for item in charges if item.currency})),
+        versions=tuple(sorted({item.price_version for item in charges if item.price_version})),
+        dates=tuple(sorted({item.price_date for item in charges if item.price_date})),
+    )
+
+
+def _fact_kind(fact_id: str, result: Assessment) -> Literal["proactive", "on request", "unknown"]:
+    help_needed = result.help_needed
+    if help_needed and fact_id in help_needed.proactive_facts:
+        return "proactive"
+    if help_needed and fact_id in help_needed.on_request_facts:
+        return "on request"
+    return "unknown"
+
+
+def help_needed_summary(eligible: list[Assessment]) -> HelpNeededSummary | None:
+    measured = [item for item in eligible if item.help_needed]
+    if not measured:
+        return None
+    counts = Counter(
+        (fact_id, _fact_kind(fact_id, item))
+        for item in measured
+        if item.help_needed
+        for fact_id in item.help_needed.facts_disclosed
+    )
+    return HelpNeededSummary(
+        measured=len(measured),
+        unmeasured=len(eligible) - len(measured),
+        facts=tuple(
+            FactDisclosure(fact_id=fact_id, kind=kind, count=count)
+            for (fact_id, kind), count in sorted(counts.items())
+        ),
+    )
+
+
+def _attempt_roles(item: AttemptReport) -> tuple[RoleMetrics, ...]:
+    return item.roles or (item.result.roles if item.result else ())
+
+
+def _group_key(item: AttemptReport) -> tuple[str, str]:
+    return (item.variant or "unknown", item.result.mode if item.result else item.mode or "pending")
+
+
+def _mean(values: Iterable[float | int | None]) -> float | None:
+    observed = [value for value in values if value is not None]
+    return statistics.fmean(observed) if observed else None
+
+
+def _subject_role(item: AttemptReport) -> RoleMetrics | None:
+    return next((role for role in _attempt_roles(item) if role.role == "subject"), None)
+
+
+def _total_tokens(tokens: TokenUsage) -> int | None:
+    total_input = _total_input(tokens)
+    if total_input is None or tokens.output is None:
+        return None
+    return int(total_input) + tokens.output
+
+
+def attempt_topline(item: AttemptReport, *, latest: bool) -> AttemptTopline:
+    subject = _subject_role(item)
+    return AttemptTopline(
+        latest=latest,
+        turns=item.result.accepted_turns if item.result else None,
+        seconds=item.result.subject_seconds if item.result else None,
+        tokens=_total_tokens(subject.known_tokens) if subject else None,
+        cost=subject.known_cost if subject else None,
+        currency=subject.currency if subject else None,
+        checks=item.result.checks if item.result else (),
+    )
+
+
+def group_topline(toplines: list[AttemptTopline]) -> GroupTopline:
+    currencies = {item.currency for item in toplines if item.cost is not None}
+    check_ids = dict.fromkeys(check.check_id for item in toplines for check in item.checks)
+    answered = [
+        check for item in toplines for check in item.checks if check.outcome in {"pass", "fail"}
+    ]
+    return GroupTopline(
+        attempts=len(toplines),
+        turns=_mean(item.turns for item in toplines),
+        seconds=_mean(item.seconds for item in toplines),
+        tokens=_mean(item.tokens for item in toplines),
+        cost=_mean(item.cost for item in toplines) if len(currencies) <= 1 else None,
+        currency=next(iter(currencies)) if len(currencies) == 1 else None,
+        checks=tuple(
+            ToplineCheck(
+                check_id=check_id,
+                passes=sum(
+                    check.check_id == check_id and check.outcome == "pass" for check in answered
+                ),
+                answered=sum(check.check_id == check_id for check in answered),
+            )
+            for check_id in check_ids
+        ),
+    )
+
+
+def _derived_group(group: GroupMetrics, members: list[AttemptReport]) -> GroupMetrics:
+    return group.model_copy(
+        update={
+            "price_basis": price_basis(
+                record
+                for item in members
+                for role in _attempt_roles(item)
+                for record in role.records
+            ),
+            "help_needed": help_needed_summary(_latest_eligible(members)),
+            "topline": group_topline(
+                [item.topline for item in members if item.topline and item.topline.latest]
+            ),
+        }
+    )
+
+
+def with_derived(report: RunReport) -> RunReport:
+    latest = {item.trial_id: item.attempt_id for item in report.attempts}
+    attempts = tuple(
+        item.model_copy(
+            update={
+                "eligibility": attempt_eligibility(item),
+                "topline": attempt_topline(item, latest=latest[item.trial_id] == item.attempt_id),
+            }
+        )
+        for item in report.attempts
+    )
+    members: dict[tuple[str, str], list[AttemptReport]] = defaultdict(list)
+    for item in attempts:
+        members[_group_key(item)].append(item)
+    return report.model_copy(
+        update={
+            "attempts": attempts,
+            "groups": tuple(
+                _derived_group(group, members[(group.variant, group.mode)])
+                for group in report.groups
+            ),
+        }
+    )
 
 
 def _group(
@@ -171,7 +345,7 @@ def _group(
     role_costs: dict[str, list[float | None]] = defaultdict(list)
     subject_tokens: list[TokenUsage | None] = []
     for attempt in attempts:
-        roles = attempt.roles or (attempt.result.roles if attempt.result else ())
+        roles = _attempt_roles(attempt)
         subject_tokens.append(roles[0].known_tokens if roles else None)
         totals = []
         currency = set()
@@ -256,9 +430,7 @@ def group_metrics(
 ) -> tuple[GroupMetrics, ...]:
     groups: dict[tuple[str, str], list[AttemptReport]] = defaultdict(list)
     for item in attempts:
-        groups[
-            (item.variant or "unknown", item.result.mode if item.result else item.mode or "pending")
-        ].append(item)
+        groups[_group_key(item)].append(item)
     for variant in scheduled or {}:
         if not any(key[0] == variant for key in groups):
             groups[(variant, mode)] = []
@@ -272,8 +444,7 @@ def report_run(
     store: ObjectStore, reference: str, *, journal_limit: int | None = None
 ) -> RunReport:
     if not re.fullmatch(r"[0-9a-f]{32}", reference):
-        report = store.load(reference, RunReport, kind=ObjectKind.PORTABLE_REPORT)
-        return report
+        return with_derived(store.load(reference, RunReport, kind=ObjectKind.PORTABLE_REPORT))
     journal = RunStore(store.root).inspect(reference, limit=journal_limit)
     execution = ExecutionJournal(journal)
     experiment, input_error = inspect_experiment(store, journal.metadata.experiment_id)
@@ -329,31 +500,33 @@ def report_run(
         )
     attempted = {item.trial_id for item in rows}
     scheduled = dict(Counter(item.variant for item in trials.values())) if experiment else None
-    return RunReport(
-        run_id=reference,
-        experiment_id=journal.metadata.experiment_id,
-        compatibility_id=digest(
-            canonical_json(
-                {
-                    "cases": ",".join(sorted(experiment.case_ids)),
-                    "simulator": experiment.simulator_id,
-                    "scoring": experiment.scoring_id,
-                    "seed": experiment.seed,
-                    "repetitions": experiment.repetitions,
-                    "mode": execution.options.mode if execution.options else None,
-                }
+    return with_derived(
+        RunReport(
+            run_id=reference,
+            experiment_id=journal.metadata.experiment_id,
+            compatibility_id=digest(
+                canonical_json(
+                    {
+                        "cases": ",".join(sorted(experiment.case_ids)),
+                        "simulator": experiment.simulator_id,
+                        "scoring": experiment.scoring_id,
+                        "seed": experiment.seed,
+                        "repetitions": experiment.repetitions,
+                        "mode": execution.options.mode if execution.options else None,
+                    }
+                )
             )
+            if experiment
+            else None,
+            durable_sequence=journal.sequence,
+            scheduled_trials=len(trials) if experiment else None,
+            unstarted_trials=tuple(item for item in trials if item not in attempted),
+            input_error=input_error,
+            attempts=tuple(rows),
+            groups=group_metrics(
+                tuple(rows), scheduled, execution.options.mode if execution.options else "pending"
+            ),
         )
-        if experiment
-        else None,
-        durable_sequence=journal.sequence,
-        scheduled_trials=len(trials) if experiment else None,
-        unstarted_trials=tuple(item for item in trials if item not in attempted),
-        input_error=input_error,
-        attempts=tuple(rows),
-        groups=group_metrics(
-            tuple(rows), scheduled, execution.options.mode if execution.options else "pending"
-        ),
     )
 
 
@@ -428,6 +601,7 @@ def compare_runs(
             first is None
             or second is None
             or first.criteria_id != second.criteria_id
+            or _reported_case_id(first) != _reported_case_id(second)
             or not first.eligible
             or not second.eligible
             or row.current_exclusions

@@ -1,5 +1,8 @@
 # Assessment and retained results
 
+The design decisions behind checks, metrics commands, default rubrics, pricing,
+summaries and regrade are in docs/decisions/0002-benchmark-results.md.
+
 Execution and assessment are explicit commands. `run` stops writers and captures;
 `assess RUN_ID` audits, grades and advances each retained attempt to `finished`.
 `assess` and execution resume acquire the exclusive run and native locks. Repeating
@@ -129,15 +132,22 @@ The optional judge uses the frozen JSON-command/Codex recipe and finite role
 budgets. Required rubrics need a judge with a positive call budget; experiment
 validation and loading reject missing or disabled required judges and any explicit
 scripted judge. Optional rubrics can omit the judge. A JSON-command receives
-`JudgeInput` on stdin and returns `JudgeResponse`:
+`JudgeInput` on stdin: `initial_prompt`, `criteria`, `files`,
+`omitted_binary_files`, `checks` (each case check's `check_id` and `question`),
+`transcript` (`role` `user`, `assistant` or `action`, and `text`),
+`transcript_truncated` and `instruction`. It returns `JudgeResponse`, with one
+`checks` entry per supplied check:
 
 ```json
 {"judgments":[{"criterion_id":"quality","outcome":"pass","score":0.8,
 "rationale":"The implementation satisfies the supplied rubric."}],
+"checks":[{"check_id":"error-path-handled","answer":"yes",
+"rationale":"The parser returns an error value for malformed input."}],
 "usage":null,"observed_model":null,"observed_effort":null}
 ```
 
-Missing judgments produce individual errors. Raw requests, responses and rationale
+`answer` is `yes`, `no` or `unclear`. Missing judgments and missing check
+answers produce individual errors. Raw requests, responses and rationale
 remain in optional grading evidence; structured results carry evidence hashes.
 For valid JSON with an invalid decision, unavailable fact or invalid criterion IDs,
 independently valid usage and observed model/effort survive in the failed call.
@@ -167,13 +177,64 @@ failed, interrupted, retried and excluded attempts. Unfinished assessments recon
 judge charges from their report's durable event prefix: unmatched call intents retain
 unknown spending and completed calls retain their observed spending. Comparisons
 require matching case, criterion, simulator, scoring, repetition, seed and execution mode identities;
-profile differences are allowed. Compatible partially completed runs retain
+profile differences are allowed. Attempts graded against different cases, such as
+regrades against different replacement cases, are not paired. Compatible partially completed runs retain
 unstarted-trial attrition. The latest attempt per paired trial is selected,
 including an unassessed retry as attrition, while all earlier spending stays in the
 report. Selecting variants also filters each side's metrics and all-attempt spending
 to that variant. Saved comparisons retain each supplied input, resolved immutable
 report reference (or run ID), durable report sequence and selected variant. Moving
 a portable-report alias cannot change the saved reference. Two trials imply no significance.
+
+## HTML report
+
+```sh
+uv run dryheave --store .dryheave report RUN_ID --html report.html
+uv run dryheave --store .dryheave report RUN_ID --html report.html --force
+uv run dryheave --store .dryheave report RUN_ID --html report.html \
+  --include-sensitive assessment-evidence
+```
+
+`--html PATH` renders `report_run`'s `RunReport`, each referenced case's
+`ViewerService.case()` summary and, when requested, each attempt's judge
+reasoning into one self-contained HTML file: inline CSS with light/dark support
+via `prefers-color-scheme`, no `<script>`, no external resource references, and
+every value HTML-escaped. `render_report_html` in `report_html.py` is a pure
+function from that data to the page string; the CLI does the I/O (resolving the
+reference, loading cases, optionally loading reasoning, writing the file).
+Both open with a Summary table: one row per variant, then one row per latest
+attempt of each trial, giving the agent's accepted turns, working time, total tokens
+(cache reads and writes included) and API-equivalent cost, plus one column per case
+check (✓ wanted outcome, ✗ the opposite, – not applicable, ? no clear answer; variant
+rows show passes over answered). Variant rows average the attempts listed under them,
+so retried attempts are excluded there, though their spend stays in the sections below.
+These come from each attempt's and each group's `topline`, derived in `reports.py`.
+Sections mirror the viewer's Results and Case tabs: per-variant cost (API-equivalent
+estimate, with price basis), tokens, turns, duration and help needed, each labelled
+with its population (every retained attempt including retries, or eligible attempts
+only); per-case criterion/check/metric summaries keyed by `(case_id, id)`. The
+report itself carries each group's `price_basis` and `help_needed` summary and each attempt's `eligibility`, computed once in
+`reports.py`, so the HTML export and the viewer render them rather than
+re-deriving them from attempts. The page then has an
+`Attempts` table with a collapsible detail per attempt; and a `Cases` section per
+referenced case (prompt, facts with disclosure, effective rubrics with origin,
+deterministic criteria by description/required/argv, checks, metrics commands,
+budgets, tool requirements, baseline and reference-patch presence — hidden
+entrypoint content is never shown). A case referenced by a result (e.g. a
+regrade's replacement case dropped from a portable bundle's closure) that
+cannot be loaded from the store renders its section as "case not available
+in this store" rather than aborting the export.
+
+Judge rationale per criterion and check is included only with
+`--include-sensitive assessment-evidence` — the only accepted value for
+`report --html` — the same flag and semantics as `export`'s sensitive-artifact
+selection; without it, or when no reasoning was retained, attempt detail shows
+"reasoning not included". Reasoning is built from the attempts already loaded
+for the report, not a second per-attempt journal read. `--force` and
+`--include-sensitive` are rejected without `--html`. The CLI refuses to
+overwrite an existing destination unless `--force` is given; the write itself
+is exclusive (create-only) so a file that appears at the destination between
+the refusal check and the write is never overwritten.
 
 # Portable bundles
 

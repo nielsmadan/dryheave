@@ -205,7 +205,7 @@ def test_setup_resolves_explicit_simulator_paths_before_owned_runtime_launch(
         deadline=time.monotonic() + 5,
         cancelled=threading.Event(),
         inherited={"PATH": str(tools), "CLAUDE_CODE_OAUTH_TOKEN": "synthetic-offline-value"},
-        on_identity=lambda _identity: None,
+        on_identities=lambda _identities: None,
         runtime_root=tmp_path / "separate-runtime/call",
     )
     writer = ArtifactWriter(tmp_path / "evidence", 1000000)

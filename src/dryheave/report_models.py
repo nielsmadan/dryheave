@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import Field, SerializerFunctionWrapHandler, model_serializer
 
 from dryheave.models import Name, ObjectId, RunId, StrictModel
-from dryheave.result_models import Assessment, RoleMetrics
+from dryheave.result_models import Assessment, CheckResult, RoleMetrics
 
 
 class Distribution(StrictModel):
@@ -14,6 +14,55 @@ class Distribution(StrictModel):
     mean: float | None
     median: float | None
     stdev: float | None
+
+
+Eligibility = Literal["eligible", "excluded", "ungraded", "unassessed"]
+
+
+class PriceBasis(StrictModel):
+    kinds: tuple[tuple[str, int], ...] = ()
+    bases: tuple[tuple[str, int], ...] = ()
+    currencies: tuple[str, ...] = ()
+    versions: tuple[str, ...] = ()
+    dates: tuple[str, ...] = ()
+
+
+class FactDisclosure(StrictModel):
+    fact_id: Name
+    kind: Literal["proactive", "on request", "unknown"]
+    count: int = Field(ge=1)
+
+
+class HelpNeededSummary(StrictModel):
+    measured: int = Field(ge=1)
+    unmeasured: int = Field(ge=0)
+    facts: tuple[FactDisclosure, ...] = ()
+
+
+class AttemptTopline(StrictModel):
+    latest: bool
+    turns: int | None
+    seconds: float | None
+    tokens: int | None
+    cost: float | None
+    currency: str | None
+    checks: tuple[CheckResult, ...]
+
+
+class ToplineCheck(StrictModel):
+    check_id: Name
+    passes: int = Field(ge=0)
+    answered: int = Field(ge=0)
+
+
+class GroupTopline(StrictModel):
+    attempts: int = Field(ge=0)
+    turns: float | None
+    seconds: float | None
+    tokens: float | None
+    cost: float | None
+    currency: str | None
+    checks: tuple[ToplineCheck, ...]
 
 
 class AttemptReport(StrictModel):
@@ -30,6 +79,16 @@ class AttemptReport(StrictModel):
     raw_evidence: Literal["available", "invalid", "unavailable"]
     mode: Literal["native", "offline-fixture"] | None = None
     roles: tuple[RoleMetrics, ...] = ()
+    eligibility: Eligibility | None = None
+    topline: AttemptTopline | None = None
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        for name in ("eligibility", "topline"):
+            if getattr(self, name) is None:
+                value.pop(name, None)
+        return value
 
 
 class CriterionSummary(StrictModel):
@@ -87,6 +146,9 @@ class GroupMetrics(StrictModel):
     metrics: tuple[MetricSummary, ...] = ()
     simulator_replies: Distribution | None = None
     cost_by_role: dict[str, Distribution] = Field(default_factory=dict)
+    price_basis: PriceBasis | None = None
+    help_needed: HelpNeededSummary | None = None
+    topline: GroupTopline | None = None
 
     @model_serializer(mode="wrap")
     def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
@@ -94,8 +156,9 @@ class GroupMetrics(StrictModel):
         for name in ("criteria", "checks", "metrics"):
             if not getattr(self, name):
                 value.pop(name, None)
-        if self.simulator_replies is None:
-            value.pop("simulator_replies", None)
+        for name in ("simulator_replies", "price_basis", "help_needed", "topline"):
+            if getattr(self, name) is None:
+                value.pop(name, None)
         return value
 
 

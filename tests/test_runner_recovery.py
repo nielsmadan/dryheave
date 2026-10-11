@@ -43,7 +43,11 @@ def test_recovery_stops_only_recorded_process_identity_before_capture(store, ben
             assert (root / "writer.txt").exists()
             state = execution.own(
                 state,
-                ProcessIdentity(pid=writer.pid, created=psutil.Process(writer.pid).create_time()),
+                (
+                    ProcessIdentity(
+                        pid=writer.pid, created=psutil.Process(writer.pid).create_time()
+                    ),
+                ),
             )
             execution.save(state.model_copy(update={"stage": TrialStage.PREPARING}))
         except BaseException:

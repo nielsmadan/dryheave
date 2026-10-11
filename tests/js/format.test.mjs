@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  checkLabel,
   chipTitle,
   contentNotes,
   describeCalibration,
@@ -14,16 +15,22 @@ import {
   describeScan,
   describeSpend,
   errorMessage,
+  formatCost,
   formatCount,
   formatDistribution,
+  formatDuration,
+  formatMetricValue,
   formatMoney,
   formatRate,
   formatSpend,
   formatTimestamp,
+  formatTokens,
+  formatTurns,
   groupDefinitions,
   labelNames,
   labelledId,
   priceBasis,
+  reasoningMap,
   roleTotals,
   shortId,
   tokenLines,
@@ -151,7 +158,8 @@ test("groupDefinitions scopes the token distributions to the subject role", () =
       "Subject uncached input tokens (eligible)",
       "Subject total output tokens (eligible)",
       "Accepted turns (eligible)",
-      "Per-attempt cost across every role (single currency, complete telemetry only)",
+      "Per-attempt cost (API-equivalent estimate) across every role "
+        + "(single currency, complete telemetry only)",
     ],
   );
   assert.match(entries[1][1], /^n=1 · min 4 · median 4 · max 4 · mean 4 · sd unknown$/);
@@ -278,6 +286,19 @@ test("describeRunRow marks a truncated journal prefix as a lower bound", () => {
   assert.match(part(prefix, /finished$/), /^at least 1 of at least 2 attempt\(s\)/);
   assert.match(part(prefix, /^mode /), /unknown$/);
   assert.match(part(prefix, /durable sequence/), /unknown; 4 event\(s\) read$/);
+  const checkpointed = describeRunRow({
+    run_id: "a".repeat(32),
+    finished: 4,
+    attempts: 4,
+    mode: "native",
+    durable_sequence: null,
+    observed_events: 700,
+    truncated: true,
+    counted_through: 5048,
+  });
+  assert.equal(parts(checkpointed).length, 3);
+  assert.match(part(checkpointed, /finished/), /^4 of 4 attempt\(s\) finished as of event 5048$/);
+  assert.match(part(checkpointed, /durable sequence/), /unknown; 700 event\(s\) read$/);
   const overrun = describeRunRow({
     run_id: "a".repeat(32),
     finished: 0,
@@ -554,7 +575,7 @@ test("roleTotals matches the backend on a zero-cost record with no currency", ()
   ]);
   assert.deepEqual(totals[0].spend, {});
   assert.equal(totals[0].unknownCostRecords, 0);
-  assert.match(describeRoleTotal(totals[0]), /spend none observed/);
+  assert.match(describeRoleTotal(totals[0]), /spend \(API-equivalent estimate\) none observed/);
   const priced = roleTotals([
     {
       roles: [
@@ -572,4 +593,44 @@ test("roleTotals matches the backend on a zero-cost record with no currency", ()
     },
   ]);
   assert.deepEqual(priced[0].spend, { USD: 0, UNSPECIFIED: 0.5 });
+});
+
+test("reasoningMap keeps only entries with a non-empty rationale", () => {
+  const map = reasoningMap(
+    [
+      { criterion_id: "a", rationale: "Judged." },
+      { criterion_id: "b", rationale: null },
+      { criterion_id: "c", rationale: "" },
+    ],
+    "criterion_id",
+  );
+  assert.equal(map.get("a"), "Judged.");
+  assert.equal(map.has("b"), false);
+  assert.equal(map.has("c"), false);
+  assert.equal(reasoningMap(undefined, "criterion_id").size, 0);
+});
+
+test("formatMetricValue renders booleans, numbers and strings as text", () => {
+  assert.equal(formatMetricValue(true), "true");
+  assert.equal(formatMetricValue(false), "false");
+  assert.equal(formatMetricValue(12), "12");
+  assert.equal(formatMetricValue("ok"), "ok");
+  assert.equal(formatMetricValue(null), "unknown");
+});
+
+test("topline formatters render compact durations, token counts, costs and turns", () => {
+  assert.deepEqual(
+    [formatDuration(269.5), formatDuration(42), formatDuration(null)],
+    ["4m 30s", "42s", "unknown"],
+  );
+  assert.deepEqual(
+    [formatTokens(1548589), formatTokens(9191), formatTokens(28), formatTokens(undefined)],
+    ["1.55M", "9.2k", "28", "unknown"],
+  );
+  assert.deepEqual(
+    [formatCost(0.906648, "USD"), formatCost(1.5, "EUR"), formatCost(null, "USD")],
+    ["$0.91", "1.50 EUR", "unknown"],
+  );
+  assert.deepEqual([formatTurns(2), formatTurns(2.5), formatTurns(null)], ["2", "2.5", "unknown"]);
+  assert.equal(checkLabel("layout-collapse-at-any-point"), "Layout collapse at any point");
 });

@@ -39,6 +39,7 @@ class JournalPrefix:
     events: tuple[JournalEvent, ...]
     bytes_read: int
     truncated: bool
+    checkpoint: RunCheckpoint | None = None
 
 
 def _parse_events(content: bytes) -> tuple[list[JournalEvent], bytes]:
@@ -76,6 +77,31 @@ def _read_prefix(path: Path, *, limit: int) -> tuple[list[JournalEvent], int, bo
         content = content[: content.rfind(b"\n") + 1]
     events, _ = _parse_events(content)
     return events, consumed, truncated
+
+
+def _bounded_snapshot(path: Path, *, limit: int) -> bytes:
+    try:
+        return read_bytes(path, limit=min(limit, MAX_MANIFEST_BYTES))
+    except (FileNotFoundError, LimitError):
+        return b""
+
+
+def _prefix_checkpoint(
+    content: bytes, metadata: RunMetadata, events: list[JournalEvent]
+) -> RunCheckpoint:
+    try:
+        checkpoint = parse_model(content, RunCheckpoint)
+    except InputError as error:
+        raise IntegrityError(f"Invalid checkpoint.json. {error}") from error
+    if checkpoint.run_id != metadata.run_id or checkpoint.experiment_id != metadata.experiment_id:
+        raise IntegrityError("checkpoint.json does not match this run.")
+    if checkpoint.sequence <= len(events):
+        expected = (
+            digest(canonical_json(events[checkpoint.sequence - 1])) if checkpoint.sequence else None
+        )
+        if checkpoint.event_hash != expected:
+            raise IntegrityError("checkpoint.json event hash does not match the journal.")
+    return checkpoint
 
 
 class RunJournal:
@@ -261,10 +287,20 @@ class RunStore:
 
     def summarize(self, identifier: str, *, limit: int) -> JournalPrefix:
         metadata = self.read_metadata(identifier)
-        path = self.root / "runs" / metadata.run_id / "events.jsonl"
-        events, read, truncated = _read_prefix(path, limit=limit)
+        path = self.root / "runs" / metadata.run_id
+        events, read, truncated = _read_prefix(path / "events.jsonl", limit=limit)
+        checkpoint = None
+        if truncated:
+            snapshot = _bounded_snapshot(path / "checkpoint.json", limit=limit)
+            if snapshot:
+                checkpoint = _prefix_checkpoint(snapshot, metadata, events)
+                read += len(snapshot)
         return JournalPrefix(
-            metadata=metadata, events=tuple(events), bytes_read=read, truncated=truncated
+            metadata=metadata,
+            events=tuple(events),
+            bytes_read=read,
+            truncated=truncated,
+            checkpoint=checkpoint,
         )
 
     def inspect(self, identifier: str, *, limit: int | None = None) -> RunJournal:

@@ -112,7 +112,12 @@ only `runs/<run-id>/metadata.json`. `RunStore.summarize(run_id, limit=...)` adds
 bounded, hash-chained prefix of `events.jsonl` without copying events: it stops at
 the last complete line inside the limit and reports `bytes_read` and `truncated`,
 so a truncated summary's event count is a lower bound and not the durable
-sequence. Cheap bounded listings use it; anything needing the complete durable
+sequence. It reads the journal prefix against the full limit first and only reads
+`checkpoint.json` — charged against the same limit — when that prefix is truncated,
+so a journal that fits is never charged for a checkpoint it will not return. That
+checkpoint is identity-checked against the metadata and hash-checked when its
+sequence falls inside the prefix; past the prefix its hash cannot be checked, so it
+serves only bounded displays. Cheap bounded listings use it; anything needing the complete durable
 prefix uses `inspect`, whose optional `limit=` lowers the read ceiling below
 `MAX_JOURNAL_BYTES` so a caller refuses an oversized journal with `limit_exceeded`
 before parsing it; `report_run(..., journal_limit=...)` passes the same ceiling
@@ -149,6 +154,30 @@ in-memory sequence used for later hash chaining.
 `events_since(sequence)` returns defensive copies of the subsequent events and
 rejects cursors outside the current prefix. Assessment indexes use that suffix
 to observe appends while preserving the read-only report's original prefix.
+
+Process ownership is journaled as `owned-processes` attempt events whose data is
+`{"identities": [ProcessIdentity, ...]}`: one to 1,024 identities that the attempt
+has not recorded before, so the event count grows with publications rather than
+with observed processes. `ProcessOwner.publish` hands every unpublished identity
+to its callback as one batch. A forced publication, used when a command's direct
+child is claimed, when the terminal reports its launch, before every simulator
+call, and before and after cleanup, is written before the caller continues.
+Polling publications are throttled to one
+batch per second, so an attempt's ownership events stay bounded by its duration
+and its forced publications. A descendant observed between throttled polls stays
+in its owner and reaches the journal at the next due or forced publication. If
+the runner dies in that window, reconciliation reaches it only through a recorded
+ancestor that is still running, so a descendant orphaned within the last second
+before a crash can be missed. Reconciliation stops every recorded identity whose creation time still
+matches. Older journals hold one `owned-process` event per identity, with the
+`ProcessIdentity` itself as data; both forms replay into `AttemptState.owned` in
+journal order, and either marks the attempt unreconciled until its next cleanup
+event. Existing journals are not rewritten.
+
+`ExecutionJournal.save` checkpoints `{"attempts": {attempt_id: stage}}` after each
+attempt-state event. Run-list rows whose journal exceeds the row budget take their
+attempt counts from that checkpoint, overlaid with later `attempt-state` events in
+the prefix, and report the sequence the counts are exact through.
 
 Assessment events (`criterion-intent`, `criterion-result`, `check-result`,
 `metrics-intent`, `metrics-result`, `judge-intent`, `judge-result`) written by a

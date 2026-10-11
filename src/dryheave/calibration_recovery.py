@@ -63,10 +63,13 @@ class CalibrationOwnership:
     def save(self) -> None:
         atomic_write(self.root / "operation.json", canonical_json(self.state))
 
-    def own(self, identity: ProcessIdentity) -> None:
-        if identity not in self.state.owned:
+    def own(self, identities: tuple[ProcessIdentity, ...]) -> None:
+        fresh = tuple(
+            dict.fromkeys(identity for identity in identities if identity not in self.state.owned)
+        )
+        if fresh:
             self.state = self.state.model_copy(
-                update={"owned": (*self.state.owned, identity), "cleanup": None}
+                update={"owned": (*self.state.owned, *fresh), "cleanup": None}
             )
             self.save()
 
@@ -83,10 +86,10 @@ class CalibrationOwnership:
                     continue
                 except psutil.AccessDenied:
                     errors.append("recovery_process_visibility_denied")
-            owner.publish(self.own)
+            owner.publish(self.own, force=True)
         finally:
             report = owner.stop(timeout=3, terminal_closed=True)
-            owner.publish(self.own)
+            owner.publish(self.own, force=True)
         cleanup = report.model_copy(
             update={
                 "known_writers_stopped": report.known_writers_stopped and not errors,

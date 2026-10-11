@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  attemptEligibility,
   attemptFacets,
   filterAttempts,
   filterCalibrations,
@@ -17,6 +16,7 @@ import {
 const attempts = [
   {
     attempt_id: "a1",
+    eligibility: "eligible",
     trial_id: "t1",
     variant: "haiku",
     stage: "finished",
@@ -34,6 +34,7 @@ const attempts = [
   },
   {
     attempt_id: "a2",
+    eligibility: "excluded",
     trial_id: "t1",
     variant: "sonnet",
     stage: "finished",
@@ -51,6 +52,7 @@ const attempts = [
   },
   {
     attempt_id: "a3",
+    eligibility: "unassessed",
     trial_id: "t2",
     variant: null,
     stage: "preparing",
@@ -90,37 +92,14 @@ test("filterRuns matches run id, mode and truncation", () => {
   assert.equal(filterRuns(rows, "").length, 3);
 });
 
-test("attemptEligibility separates eligible, excluded and unassessed attempts", () => {
-  assert.equal(attemptEligibility(attempts[0]), "eligible");
-  assert.equal(attemptEligibility(attempts[1]), "excluded");
-  assert.equal(attemptEligibility(attempts[2]), "unassessed");
-  assert.equal(
-    attemptEligibility({ result: { eligible: true }, current_exclusions: ["late-exclusion"] }),
-    "excluded",
-  );
-});
-
-test("attemptEligibility reports an audited but ungraded attempt as ungraded", () => {
-  assert.equal(
-    attemptEligibility({
-      current_exclusions: [],
-      result: { phase: "audited", eligible: false, exclusion_reasons: [] },
-    }),
-    "ungraded",
-  );
-  assert.equal(
-    attemptEligibility({
-      current_exclusions: [],
-      result: { phase: "audited", eligible: false, exclusion_reasons: ["capture_incomplete"] },
-    }),
-    "excluded",
-  );
+test("filterAttempts selects an audited but ungraded attempt by its reported eligibility", () => {
   assert.deepEqual(
     filterAttempts(
       [
         ...attempts,
         {
           attempt_id: "a4",
+          eligibility: "ungraded",
           trial_id: "t3",
           variant: null,
           stage: "grading",

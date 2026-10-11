@@ -6,20 +6,30 @@ from contextlib import suppress
 import psutil
 
 from dryheave.drivers.models import CleanupReport, ProcessIdentity
-from dryheave.errors import LimitError
+from dryheave.errors import DryheaveError, LimitError
+
+PUBLISH_INTERVAL = 1.0
 
 
 class ProcessOwner:
     def __init__(
-        self, *, max_processes: int = 256, max_observations: int = 20000, interval: float = 0.05
+        self,
+        *,
+        max_processes: int = 256,
+        max_observations: int = 20000,
+        interval: float = 0.05,
+        publish_interval: float = PUBLISH_INTERVAL,
     ) -> None:
         self.max_processes = max_processes
         self.max_observations = max_observations
         self.interval = interval
+        self.publish_interval = publish_interval
         self.processes: dict[ProcessIdentityKey, psutil.Process] = {}
         self.identities: dict[ProcessIdentityKey, ProcessIdentity] = {}
-        self.published: set[ProcessIdentityKey] = set()
+        self.unpublished: dict[ProcessIdentityKey, ProcessIdentity] = {}
+        self.published_at: float | None = None
         self.errors: set[str] = set()
+        self.publish_errors: set[str] = set()
         self.lock = threading.RLock()
         self.stopping = threading.Event()
         self.thread = threading.Thread(target=self._monitor, daemon=True)
@@ -41,18 +51,37 @@ class ProcessOwner:
                     raise LimitError("Owned process observation limit exceeded.")
                 self.processes[key] = process
                 self.identities[key] = identity
+                self.unpublished[key] = identity
             return identity
 
     def snapshot(self) -> tuple[ProcessIdentity, ...]:
         with self.lock:
             return tuple(self.identities.values())
 
-    def publish(self, on_identity: Callable[[ProcessIdentity], None]) -> None:
-        for identity in self.snapshot():
-            key = (identity.pid, identity.created)
-            if key not in self.published:
-                on_identity(identity)
-                self.published.add(key)
+    def publish(
+        self, on_identities: Callable[[tuple[ProcessIdentity, ...]], None], *, force: bool = False
+    ) -> None:
+        with self.lock:
+            due = (
+                force
+                or self.published_at is None
+                or time.monotonic() - self.published_at >= self.publish_interval
+            )
+            if not self.unpublished or not due:
+                return
+            batch = tuple(self.unpublished.values())
+        on_identities(batch)
+        with self.lock:
+            for identity in batch:
+                self.unpublished.pop((identity.pid, identity.created), None)
+            self.published_at = time.monotonic()
+
+    def flush(self, on_identities: Callable[[tuple[ProcessIdentity, ...]], None]) -> None:
+        try:
+            self.publish(on_identities, force=True)
+        except (DryheaveError, OSError):
+            with self.lock:
+                self.publish_errors.add("process_identity_publish_failed")
 
     def scan(self) -> None:
         with self.lock:
@@ -145,7 +174,7 @@ class ProcessOwner:
                 known_writers_stopped=not survivors and not self.errors,
                 owned=tuple(self.identities.values()),
                 survivors=tuple(self.identities[key] for key in survivors),
-                errors=tuple(sorted(self.errors)),
+                errors=tuple(sorted(self.errors | self.publish_errors)),
             )
 
 

@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -8,7 +9,13 @@ from dryheave.drivers.models import CleanupReport, ProcessIdentity
 from dryheave.errors import InputError
 from dryheave.journals import RunJournal
 from dryheave.models import JournalEvent, StrictModel, TrialStage
-from dryheave.runner_models import AttemptState, RunOptions
+from dryheave.runner_models import (
+    MAX_OWNED_PER_EVENT,
+    AttemptCheckpoint,
+    AttemptState,
+    OwnedProcesses,
+    RunOptions,
+)
 from dryheave.serialization import canonical_json, parse_model
 
 STAGE_TRANSITIONS = {
@@ -42,6 +49,15 @@ ASSESSMENT_EVENTS = frozenset(
     }
 )
 REGRADE_KEY = "regrade_id"
+LEGACY_OWNED_EVENT = "owned-process"
+OWNED_EVENT = "owned-processes"
+OWNERSHIP_EVENTS = frozenset({LEGACY_OWNED_EVENT, OWNED_EVENT})
+
+
+def _owned_identities(event: JournalEvent) -> tuple[ProcessIdentity, ...]:
+    if event.event == LEGACY_OWNED_EVENT:
+        return (parse_model(canonical_json(event.data), ProcessIdentity),)
+    return parse_model(canonical_json(event.data), OwnedProcesses).identities
 
 
 def _regrade_scope(event: JournalEvent) -> str | None:
@@ -81,13 +97,12 @@ class ExecutionJournal:
                     raise InputError("Attempt journal envelope differs from its payload.")
                 self._validate(state)
                 self.attempts[state.attempt_id] = state
-            elif event.event == "owned-process":
+            elif event.event in OWNERSHIP_EVENTS:
                 owned_state = self.attempts.get(event.attempt_id or "")
                 if owned_state is None or event.trial_id != owned_state.trial_id:
                     raise InputError("Process ownership event has no matching attempt.")
-                identity = parse_model(canonical_json(event.data), ProcessIdentity)
                 self.attempts[owned_state.attempt_id] = owned_state.model_copy(
-                    update={"owned": (*owned_state.owned, identity)}
+                    update={"owned": (*owned_state.owned, *_owned_identities(event))}
                 )
                 self.unreconciled.add(owned_state.attempt_id)
             elif event.event in CLEANUP_EVENTS:
@@ -129,16 +144,26 @@ class ExecutionJournal:
             attempt_id=state.attempt_id,
         )
 
-    def own(self, state: AttemptState, identity: ProcessIdentity) -> AttemptState:
-        self.journal.append(
-            "owned-process",
-            identity.model_dump(mode="json"),
-            trial_id=state.trial_id,
-            attempt_id=state.attempt_id,
+    def own(self, state: AttemptState, identities: Iterable[ProcessIdentity]) -> AttemptState:
+        known = {(identity.pid, identity.created) for identity in state.owned}
+        fresh = tuple(
+            {
+                (identity.pid, identity.created): identity
+                for identity in identities
+                if (identity.pid, identity.created) not in known
+            }.values()
         )
-        state = state.model_copy(update={"owned": (*state.owned, identity)})
-        self.attempts[state.attempt_id] = state
-        self.unreconciled.add(state.attempt_id)
+        for start in range(0, len(fresh), MAX_OWNED_PER_EVENT):
+            batch = fresh[start : start + MAX_OWNED_PER_EVENT]
+            self.journal.append(
+                OWNED_EVENT,
+                OwnedProcesses(identities=batch).model_dump(mode="json"),
+                trial_id=state.trial_id,
+                attempt_id=state.attempt_id,
+            )
+            state = state.model_copy(update={"owned": (*state.owned, *batch)})
+            self.attempts[state.attempt_id] = state
+            self.unreconciled.add(state.attempt_id)
         return state
 
     def _validate(self, state: AttemptState) -> None:
@@ -167,10 +192,7 @@ class ExecutionJournal:
         self._validate(state)
         previous = self.attempts.get(state.attempt_id)
         if previous is not None:
-            known = {(identity.pid, identity.created) for identity in previous.owned}
-            for identity in state.owned:
-                if (identity.pid, identity.created) not in known:
-                    previous = self.own(previous, identity)
+            self.own(previous, state.owned)
         self.journal.append(
             "attempt-state",
             state.model_dump(mode="json", exclude={"owned"}),
@@ -179,7 +201,9 @@ class ExecutionJournal:
         )
         self.attempts[state.attempt_id] = state
         self.journal.checkpoint(
-            {"attempts": {key: value.stage.value for key, value in self.attempts.items()}}
+            AttemptCheckpoint(
+                attempts={key: value.stage for key, value in self.attempts.items()}
+            ).model_dump(mode="json")
         )
 
     def reserve(self, trial_id: str) -> AttemptState:

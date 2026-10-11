@@ -68,10 +68,13 @@ class CriterionResult(StrictModel):
     error: str | None = None
 
 
+Answer = Literal["yes", "no", "unclear"]
+
+
 class CheckResult(StrictModel):
     check_id: Name
     outcome: Literal["pass", "fail", "not_applicable", "error"]
-    answer: Literal["yes", "no", "unclear"] | None = None
+    answer: Answer | None = None
 
 
 class HelpNeeded(StrictModel):

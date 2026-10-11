@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from conftest import judged_case_benchmark
 from dryheave.cli import main
 from dryheave.controller_models import ControllerRecipe
 from dryheave.experiments import create_experiment
@@ -44,7 +45,12 @@ def test_real_second_cli_status_reads_progress_while_writer_is_active(
 ):
     script = tmp_path / "controller.py"
     script.write_text(
-        'import pathlib,time\npathlib.Path("ready").write_text("ready")\ntime.sleep(3)\nprint(\'{"decision":{"action":"stop","reason":"fixture completed"}}\')\n'
+        "import pathlib,time\n"
+        'pathlib.Path("ready").write_text("ready")\n'
+        "deadline = time.monotonic() + 25\n"
+        'while not pathlib.Path("release").exists() and time.monotonic() < deadline:\n'
+        "    time.sleep(0.02)\n"
+        'print(\'{"decision":{"action":"stop","reason":"fixture completed"}}\')\n'
     )
     recipe = ControllerRecipe(
         kind="json-command",
@@ -73,16 +79,17 @@ def test_real_second_cli_status_reads_progress_while_writer_is_active(
         assert ready
         run_id = ready[0].relative_to(store.root / "runs").parts[0]
         status = subprocess.run(
-            [*command, "run", "--status", run_id], capture_output=True, timeout=2, check=False
+            [*command, "run", "--status", run_id], capture_output=True, timeout=20, check=False
         )
         assert status.returncode == 0, status.stderr.decode()
         state = json.loads(status.stdout)["data"]
         assert state["attempts"][0]["stage"] == "interacting"
         report = subprocess.run(
-            [*command, "report", run_id], capture_output=True, timeout=2, check=False
+            [*command, "report", run_id], capture_output=True, timeout=20, check=False
         )
         assert report.returncode == 0, report.stderr.decode()
         assert json.loads(report.stdout)["data"]["attempts"][0]["stage"] == "interacting"
+        (ready[0].parent / "release").write_text("release")
         stdout, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, stderr.decode()
         assert json.loads(stdout)["data"]["run_id"] == run_id
@@ -153,3 +160,136 @@ def test_cli_regrade_returns_its_regrade_id_and_the_chained_report(store, graded
     (regraded,) = data["assessment_ids"]
     attempt = data["report"]["attempts"][0]
     assert (attempt["assessment_id"], attempt["result"]["previous_id"]) == (regraded, original)
+
+
+@pytest.mark.integration
+def test_cli_report_html_writes_self_contained_file_and_refuses_overwrite(
+    store, graded_benchmark, tmp_path, capsys
+):
+    benchmark, case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    prefix = ["--store", str(store.root), "--json"]
+    identifier = create_experiment(store, benchmark)
+    assert main([*prefix, "run", identifier, "--mode", "offline-fixture"]) == 0
+    run_id = json.loads(capsys.readouterr().out)["data"]["run_id"]
+    assert main([*prefix, "assess", run_id]) == 0
+    capsys.readouterr()
+
+    plain = ["--store", str(store.root), "report", run_id, "--html"]
+    destination = tmp_path / "report.html"
+    assert main([*plain, str(destination)]) == 0
+    content = destination.read_text()
+    assert "<script" not in content
+    assert case_id in content
+    assert "reasoning not included" in content
+    assert "Judged quality." not in content
+
+    assert main([*plain, str(destination)]) == 1
+    assert destination.read_text() == content
+    assert main([*plain, str(destination), "--force"]) == 0
+
+    sensitive_destination = tmp_path / "sensitive-report.html"
+    assert (
+        main([*plain, str(sensitive_destination), "--include-sensitive", "assessment-evidence"])
+        == 0
+    )
+    assert "Judged quality." in sensitive_destination.read_text()
+
+
+@pytest.mark.integration
+def test_cli_report_html_renders_missing_case_without_aborting(
+    store, graded_benchmark, tmp_path, capsys, monkeypatch
+):
+    from dryheave.errors import NotFoundError
+    from dryheave.viewer import ViewerService
+
+    benchmark, case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    prefix = ["--store", str(store.root), "--json"]
+    identifier = create_experiment(store, benchmark)
+    assert main([*prefix, "run", identifier, "--mode", "offline-fixture"]) == 0
+    run_id = json.loads(capsys.readouterr().out)["data"]["run_id"]
+    assert main([*prefix, "assess", run_id]) == 0
+    capsys.readouterr()
+
+    def missing_case(_self, requested_case_id):
+        raise NotFoundError(f"Case not found: {requested_case_id}")
+
+    monkeypatch.setattr(ViewerService, "case", missing_case)
+    destination = tmp_path / "missing-case-report.html"
+    assert main(["--store", str(store.root), "report", run_id, "--html", str(destination)]) == 0
+    content = destination.read_text()
+    assert "case not available in this store" in content
+    assert case_id in content
+
+
+def test_report_rejects_force_or_include_sensitive_without_html(store, capsys):
+    run_id = "a" * 32
+    assert main(["--store", str(store.root), "report", run_id, "--force"]) == 2
+    assert capsys.readouterr().err == "dryheave: --force and --include-sensitive require --html.\n"
+    assert (
+        main(
+            [
+                "--store",
+                str(store.root),
+                "report",
+                run_id,
+                "--include-sensitive",
+                "assessment-evidence",
+            ]
+        )
+        == 2
+    )
+    assert capsys.readouterr().err == "dryheave: --force and --include-sensitive require --html.\n"
+
+
+def test_report_html_rejects_sensitive_classes_other_than_assessment_evidence(store, capsys):
+    run_id = "a" * 32
+    assert (
+        main(
+            [
+                "--store",
+                str(store.root),
+                "report",
+                run_id,
+                "--html",
+                "out.html",
+                "--include-sensitive",
+                "captures",
+            ]
+        )
+        == 2
+    )
+    assert "invalid choice" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_cli_report_html_reasoning_does_not_depend_on_the_request_journal_budget(
+    store, graded_benchmark, tmp_path, capsys, monkeypatch
+):
+    from dryheave import viewer as viewer_module
+
+    benchmark, _case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    prefix = ["--store", str(store.root), "--json"]
+    identifier = create_experiment(store, benchmark)
+    assert main([*prefix, "run", identifier, "--mode", "offline-fixture"]) == 0
+    run_id = json.loads(capsys.readouterr().out)["data"]["run_id"]
+    assert main([*prefix, "assess", run_id]) == 0
+    capsys.readouterr()
+
+    monkeypatch.setattr(viewer_module, "MAX_REQUEST_JOURNAL_BYTES", 1)
+    destination = tmp_path / "tight-budget-report.html"
+    assert (
+        main(
+            [
+                "--store",
+                str(store.root),
+                "report",
+                run_id,
+                "--html",
+                str(destination),
+                "--include-sensitive",
+                "assessment-evidence",
+            ]
+        )
+        == 0
+    )
+    assert "Judged quality." in destination.read_text()

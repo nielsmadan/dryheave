@@ -223,7 +223,7 @@ def test_claude_judge_uses_structured_protocol_and_provider_usage(
         deadline=time.monotonic() + 3,
         cancelled=threading.Event(),
         inherited={"CLAUDE_CODE_OAUTH_TOKEN": "synthetic-offline-value"},
-        on_identity=lambda _identity: None,
+        on_identities=lambda _identities: None,
         runtime_root=tmp_path / "runtime",
     )
     call, results, answers = invoke_judge(
@@ -461,6 +461,52 @@ def test_transcript_truncation_keeps_messages_and_first_and_last_actions():
         "Read file-5",
         "Finished",
     ]
+    assert three.instruction.endswith("every message is still present.")
+
+
+def test_transcript_emptied_to_fit_tells_the_judge_messages_were_omitted():
+    from dryheave.judges import (
+        EMPTIED_TRANSCRIPT_NOTE,
+        JUDGE_INSTRUCTION,
+        JudgeInput,
+        TranscriptEntry,
+        fit_transcript,
+    )
+    from dryheave.serialization import canonical_json
+
+    request = JudgeInput(
+        initial_prompt="Start",
+        criteria=(),
+        files={},
+        omitted_binary_files=(),
+        transcript=(
+            TranscriptEntry(role="user", text="Start" + "m" * 400),
+            TranscriptEntry(role="action", text="Read notes.md"),
+            TranscriptEntry(role="assistant", text="Finished" + "m" * 400),
+        ),
+    )
+    fitted = fit_transcript(request, len(canonical_json(request)) - 500)
+    assert (fitted.transcript, fitted.transcript_truncated) == ((), True)
+    assert fitted.instruction == JUDGE_INSTRUCTION + EMPTIED_TRANSCRIPT_NOTE
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("cd app\n/Users/someone/bin/run.sh", 'Bash: {"command": "cd app\\n<host path>"}'),
+        (
+            "docker run -v data:/var/lib/app image",
+            'Bash: {"command": "docker run -v data:<host path> image"}',
+        ),
+        ("cc -I/usr/include/sdl main.c", 'Bash: {"command": "cc -I<host path> main.c"}'),
+        ("ls src/lib/util.py", 'Bash: {"command": "ls src/lib/util.py"}'),
+    ],
+)
+def test_transcript_redacts_host_paths_after_escapes_colons_and_include_flags(command, expected):
+    from dryheave.judges import judge_transcript
+
+    transcript = judge_transcript(native_blobs(tool_use(1, "Bash", {"command": command})), (), ())
+    assert transcript[0].text == expected
 
 
 def test_check_answers_map_to_outcomes():
@@ -495,6 +541,12 @@ def test_check_answers_map_to_outcomes():
             only_if=CheckCondition(check_id="tested", answer="yes"),
         ),
         CaseCheck(check_id="silent", question="Did the agent stay silent?", expect="no"),
+        CaseCheck(
+            check_id="explained",
+            question="Did the agent explain its silence?",
+            expect="yes",
+            only_if=CheckCondition(check_id="silent", answer="yes"),
+        ),
     )
     answers = {
         "asked": "yes",
@@ -503,6 +555,7 @@ def test_check_answers_map_to_outcomes():
         "nested": "yes",
         "tested": "unclear",
         "followup": "yes",
+        "explained": "yes",
     }
     assert [
         (item.check_id, item.outcome, item.answer) for item in check_results(checks, answers)
@@ -512,8 +565,9 @@ def test_check_answers_map_to_outcomes():
         ("guessed", "not_applicable", "yes"),
         ("nested", "not_applicable", "yes"),
         ("tested", "error", "unclear"),
-        ("followup", "error", "yes"),
+        ("followup", "not_applicable", "yes"),
         ("silent", "error", None),
+        ("explained", "not_applicable", "yes"),
     ]
 
 

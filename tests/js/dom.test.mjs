@@ -9,6 +9,7 @@ const {
   badge,
   block,
   bullets,
+  caseLink,
   clear,
   definitions,
   el,
@@ -161,6 +162,31 @@ test("idChip reports an absent identity as unknown", () => {
   assert.equal(chip.className, "chip unknown");
   assert.equal(chip.textContent, "capture: unknown");
   assert.equal(chip.getAttribute("title"), null);
+});
+
+test("caseLink renders a clickable chip carrying the case id as data", () => {
+  const value = "c".repeat(64);
+  const link = caseLink(value, ["juggler"]);
+  assert.equal(link.nodeName, "BUTTON");
+  assert.equal(link.className, "chip");
+  assert.equal(link.getAttribute("type"), "button");
+  assert.equal(link.getAttribute("data-case"), value);
+  assert.deepEqual(
+    link.children.map((child) => [child.className, child.textContent]),
+    [
+      ["chip-label", "case"],
+      ["chip-name", "juggler"],
+      ["chip-id", value],
+    ],
+  );
+  assert.equal(link.getAttribute("title"), `case: ${value} (label juggler)`);
+});
+
+test("caseLink reports an absent case id as unknown and stays inert", () => {
+  const link = caseLink(null);
+  assert.equal(link.nodeName, "SPAN");
+  assert.equal(link.className, "chip unknown");
+  assert.equal(link.textContent, "case: unknown");
 });
 
 test("badge, heading, note and section carry their content as text", () => {

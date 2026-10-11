@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from conftest import HOSTILE
+from conftest import HOSTILE, judged_case_benchmark
 from dryheave import journals, viewer_http
 from dryheave.calibrations import calibrate_case
 from dryheave.constants import VERSION
@@ -465,6 +465,47 @@ def test_compare_route_serves_typed_comparisons(served):
     response, body = _get(server, f"/api/compare?before={run}&after={run}&before_variant=base")
     assert response.status == 400
     assert "both comparison variants" in json.loads(body)["error"]["message"]
+
+
+@pytest.mark.integration
+def test_case_route_serves_the_frozen_case_and_404s_for_unknown_ids(
+    store, graded_benchmark, tmp_path
+):
+    benchmark, case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    create_experiment(store, benchmark)
+    server = ViewerServer(ViewerService(store))
+    server.start()
+    try:
+        response, body = _get(server, f"/api/cases/{case_id}")
+        assert response.status == 200
+        payload = json.loads(body)
+        assert payload["case_id"] == case_id
+        assert payload["title"]
+        assert payload["reference_patch"] is True
+        rubrics = {item["criterion_id"]: item for item in payload["rubrics"]}
+        assert rubrics["quality"]["origin"] == "case"
+        assert rubrics["code-quality"]["origin"] == "default"
+        assert [item["metrics_id"] for item in payload["metrics"]] == ["greeting-metrics"]
+        response, body = _get(server, f"/api/cases/{'0' * 64}")
+        assert response.status == 404
+        response, body = _get(server, "/api/cases/not-a-case")
+        assert response.status == 404
+    finally:
+        server.stop()
+
+
+@pytest.mark.integration
+def test_judge_reasoning_route_serves_rationale_and_404s_for_unknown_attempts(served):
+    server, summary = served
+    attempt_id = summary.attempts[0].attempt_id
+    response, body = _get(server, f"/api/runs/{summary.run_id}/attempts/{attempt_id}/reasoning")
+    assert response.status == 200
+    payload = json.loads(body)
+    assert payload["status"] == "unavailable"
+    assert payload["criteria"] == []
+    assert payload["checks"] == []
+    response, body = _get(server, f"/api/runs/{summary.run_id}/attempts/a-unknown/reasoning")
+    assert response.status == 404
 
 
 @pytest.mark.integration

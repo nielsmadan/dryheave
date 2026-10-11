@@ -60,18 +60,6 @@ export function attemptFacets(attempts) {
   return { variants: [...variants].sort(), stages: [...stages].sort() };
 }
 
-export function attemptEligibility(attempt) {
-  const result = attempt.result;
-  if (!result) {
-    return "unassessed";
-  }
-  if (result.eligible && (attempt.current_exclusions ?? []).length === 0) {
-    return "eligible";
-  }
-  const excluded = [...(attempt.current_exclusions ?? []), ...(result.exclusion_reasons ?? [])];
-  return excluded.length === 0 ? "ungraded" : "excluded";
-}
-
 export function filterAttempts(attempts, criteria = {}) {
   const { query = "", variant = "", stage = "", eligibility = "" } = criteria;
   return (attempts ?? []).filter((attempt) => {
@@ -81,7 +69,7 @@ export function filterAttempts(attempts, criteria = {}) {
     if (stage && attempt.stage !== stage) {
       return false;
     }
-    if (eligibility && attemptEligibility(attempt) !== eligibility) {
+    if (eligibility && attempt.eligibility !== eligibility) {
       return false;
     }
     return matchesQuery(attemptFields(attempt), query);

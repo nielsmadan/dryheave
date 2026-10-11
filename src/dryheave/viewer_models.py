@@ -3,7 +3,9 @@ from typing import Literal
 from pydantic import AwareDatetime
 
 from dryheave.calibration_models import CalibrationStatus
+from dryheave.cases import CaseBudgets, CheckCondition
 from dryheave.models import (
+    CommandSpec,
     Name,
     NonnegativeInt,
     ObjectId,
@@ -39,6 +41,7 @@ class RunRow(StrictModel):
     durable_sequence: NonnegativeInt | None = None
     observed_events: NonnegativeInt | None = None
     truncated: bool = False
+    counted_through: NonnegativeInt | None = None
     mode: str | None = None
     attempts: NonnegativeInt | None = None
     finished: NonnegativeInt | None = None
@@ -172,3 +175,74 @@ class CaseCalibrationView(StrictModel):
     case_id: ObjectId
     calibrations: tuple[CalibrationEntry, ...]
     scan: CalibrationScan
+
+
+class CriterionReasoning(StrictModel):
+    criterion_id: Name
+    rationale: str | None = None
+
+
+class CheckReasoning(StrictModel):
+    check_id: Name
+    rationale: str | None = None
+
+
+class JudgeReasoningView(StrictModel):
+    attempt_id: Name
+    assessment_id: ObjectId | None
+    status: DetailStatus
+    reason: str | None = None
+    reason_code: str | None = None
+    criteria: tuple[CriterionReasoning, ...] = ()
+    checks: tuple[CheckReasoning, ...] = ()
+
+
+class CaseFactView(StrictModel):
+    fact_id: Name
+    text: str
+    disclosure: Literal["on_request", "proactive"]
+
+
+class CaseRubricView(StrictModel):
+    criterion_id: Name
+    required: bool
+    rubric: str
+    origin: Literal["case", "default", "overridden"]
+
+
+class CaseCheckView(StrictModel):
+    check_id: Name
+    question: str
+    expect: Literal["yes", "no"]
+    only_if: CheckCondition | None = None
+
+
+class CaseDeterministicView(StrictModel):
+    criterion_id: Name
+    description: str
+    required: bool
+    command: CommandSpec
+
+
+class CaseMetricsView(StrictModel):
+    metrics_id: Name
+    description: str
+    command: CommandSpec
+
+
+class CaseView(StrictModel):
+    case_id: ObjectId
+    title: str
+    initial_prompt: str
+    facts: tuple[CaseFactView, ...]
+    rubrics: tuple[CaseRubricView, ...]
+    disabled_rubrics: tuple[Name, ...]
+    deterministic: tuple[CaseDeterministicView, ...]
+    checks: tuple[CaseCheckView, ...]
+    metrics: tuple[CaseMetricsView, ...]
+    budgets: CaseBudgets
+    tool_requirements: tuple[str, ...]
+    repository_id: ObjectId
+    persona_id: ObjectId
+    baseline_commit: str | None
+    reference_patch: bool

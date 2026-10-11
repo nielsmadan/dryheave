@@ -91,7 +91,7 @@ def invoke(tmp_path, recipe, request, *, cancelled=None, duration=BUDGET_SECONDS
             "CLAUDE_CODE_OAUTH_TOKEN": "synthetic-offline-value",
             "ANTHROPIC_API_KEY": "must-not-inherit",
         },
-        on_identity=identities.append,
+        on_identities=identities.extend,
         runtime_root=tmp_path / "runtime",
     )
     writer = ArtifactWriter(tmp_path / "evidence", 1024 * 1024)

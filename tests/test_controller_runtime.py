@@ -109,7 +109,7 @@ def test_modern_codex_protocol_and_cleanup_are_versioned(store, benchmark, tmp_p
         deadline=time.monotonic() + 3,
         cancelled=threading.Event(),
         inherited={"SYNTHETIC_AUTH_PATH": str(tmp_path / "opaque")},
-        on_identity=lambda _identity: None,
+        on_identities=lambda _identities: None,
         runtime_root=tmp_path / "roles/call",
     )
     result = invoke_controller(recipe, request_for(store), writer, context)
@@ -142,7 +142,9 @@ def test_runtime_limits_cancel_controller_and_child_and_remove_auth_binding(
     child = (
         "import os,pathlib,time\n"
         "pathlib.Path('child.pid').write_text(str(os.getpid()))\n"
-        "time.sleep(0.3)\n"
+        "deadline = time.monotonic() + 3\n"
+        "while not pathlib.Path('observed').exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.05)\n"
         f"{mutation}\n"
         "time.sleep(30)\n"
     )
@@ -156,13 +158,22 @@ def test_runtime_limits_cancel_controller_and_child_and_remove_auth_binding(
     writer = ArtifactWriter(tmp_path / "evidence", 1000000)
     identities = []
     runtime = tmp_path / "roles/call"
+
+    def observe(batch):
+        identities.extend(batch)
+        pid_file = runtime / "work/child.pid"
+        if pid_file.exists() and any(
+            str(identity.pid) == pid_file.read_text() for identity in identities
+        ):
+            (runtime / "work/observed").touch()
+
     context = CallContext(
         call_id="codex-call",
         index=0,
         deadline=time.monotonic() + 10,
         cancelled=threading.Event(),
         inherited={"SYNTHETIC_AUTH_PATH": str(tmp_path / "nonexistent-opaque-source")},
-        on_identity=identities.append,
+        on_identities=observe,
         runtime_root=runtime,
     )
     started = time.monotonic()

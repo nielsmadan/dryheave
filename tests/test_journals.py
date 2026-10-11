@@ -124,6 +124,37 @@ def test_checkpoint_can_lag_but_not_lead_journal(tmp_path: Path) -> None:
         pytest.fail("checkpoint exceeded journal")
 
 
+def test_bounded_summary_reads_the_checkpoint_only_for_a_truncated_prefix(tmp_path: Path) -> None:
+    runs = RunStore(tmp_path)
+    identifier = runs.create("a" * 64)
+    with runs.open(identifier) as journal:
+        journal.append("reserved", {"padding": "x" * 400})
+        journal.checkpoint({"step": 1})
+        for _ in range(8):
+            journal.append("owned", {"padding": "x" * 400})
+        snapshot = journal.checkpoint({"step": 9})
+        path = journal.path / "checkpoint.json"
+    size = path.stat().st_size
+    events_size = (tmp_path / "runs" / identifier / "events.jsonl").stat().st_size
+    whole = runs.summarize(identifier, limit=1024 * 1024)
+    assert (whole.truncated, whole.checkpoint, len(whole.events)) == (False, None, 9)
+    assert whole.bytes_read == events_size
+    boundary = runs.summarize(identifier, limit=events_size)
+    assert (boundary.truncated, boundary.checkpoint, len(boundary.events)) == (False, None, 9)
+    assert boundary.bytes_read == events_size
+    prefix = runs.summarize(identifier, limit=size + 1500)
+    assert prefix.truncated is True
+    assert prefix.checkpoint == snapshot
+    assert len(prefix.events) < snapshot.sequence
+    assert prefix.bytes_read == (size + 1500) + size
+    assert runs.summarize(identifier, limit=size - 1).checkpoint is None
+    lagging = json.loads(path.read_bytes())
+    lagging.update(sequence=1, event_hash="b" * 64)
+    path.write_bytes(canonical_json(lagging))
+    with pytest.raises(IntegrityError, match="event hash"):
+        runs.summarize(identifier, limit=len(canonical_json(lagging)) + 1500)
+
+
 @pytest.mark.parametrize(
     "field,value", [("event_hash", "b" * 64), ("run_id", "b" * 32), ("schema_version", 2)]
 )

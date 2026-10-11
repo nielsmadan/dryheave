@@ -1,4 +1,7 @@
+import pytest
+
 from dryheave.drivers.models import ProcessIdentity
+from dryheave.errors import InputError
 from dryheave.experiments import create_experiment, load_experiment
 from dryheave.journals import RunStore
 from dryheave.models import TrialStage
@@ -32,24 +35,75 @@ def test_assessment_index_observes_new_durable_events_and_keeps_attempts_separat
         }
 
 
-def test_many_owned_identities_are_linear_journal_deltas(store, benchmark):
+def _owned_run(store, benchmark):
     identifier = create_experiment(store, benchmark)
     experiment = load_experiment(store, identifier)
     run_id = RunStore(store.root).create(identifier)
+    return run_id, experiment.trials[0].trial_id
+
+
+def test_many_owned_identities_are_batched_into_a_bounded_number_of_events(store, benchmark):
+    run_id, trial_id = _owned_run(store, benchmark)
+    identities = tuple(
+        ProcessIdentity(pid=10000 + index, created=float(index), parent_pid=1)
+        for index in range(2500)
+    )
     with RunStore(store.root).open(run_id) as journal:
         execution = ExecutionJournal(journal)
         execution.configure(RunOptions(mode="offline-fixture"))
-        state = execution.reserve(experiment.trials[0].trial_id)
-        for index in range(1000):
-            state = execution.own(state, ProcessIdentity(pid=10000 + index, created=float(index)))
+        state = execution.reserve(trial_id)
+        state = execution.own(state, identities[:2000])
+        state = execution.own(state, (*identities[:2000], *identities[2000:], identities[2400]))
         execution.save(state.model_copy(update={"stage": TrialStage.PREPARING}))
-        assert (journal.path / "events.jsonl").stat().st_size < 600000
-        assert len([event for event in journal.events if event.event == "owned-process"]) == 1000
+        batches = [event for event in journal.events if event.event == "owned-processes"]
+        assert [len(event.data["identities"]) for event in batches] == [1024, 976, 500]
+        assert (journal.path / "events.jsonl").stat().st_size < 250000
         assert len([event for event in journal.events if event.event == "attempt-state"]) == 2
+        sequence = journal.sequence
+        assert execution.own(state, identities[:10]) == state
+        assert journal.sequence == sequence
     with RunStore(store.root).open(run_id) as journal:
-        restored = ExecutionJournal(journal).attempts[state.attempt_id]
-        assert restored.owned == state.owned
-        assert restored.stage == TrialStage.PREPARING
+        restored = ExecutionJournal(journal)
+        assert restored.attempts[state.attempt_id].owned == identities
+        assert restored.attempts[state.attempt_id].stage == TrialStage.PREPARING
+        assert state.attempt_id in restored.unreconciled
+
+
+def test_legacy_per_process_ownership_events_still_replay(store, benchmark):
+    run_id, trial_id = _owned_run(store, benchmark)
+    legacy = tuple(ProcessIdentity(pid=20000 + index, created=float(index)) for index in range(3))
+    with RunStore(store.root).open(run_id) as journal:
+        execution = ExecutionJournal(journal)
+        state = execution.reserve(trial_id)
+        for identity in legacy[:2]:
+            journal.append(
+                "owned-process",
+                identity.model_dump(mode="json"),
+                trial_id=trial_id,
+                attempt_id=state.attempt_id,
+            )
+        restored = ExecutionJournal(journal)
+        state = restored.own(restored.attempts[state.attempt_id], legacy)
+        assert state.owned == legacy
+        assert [len(event.data["identities"]) for event in journal.events[-1:]] == [1]
+    with RunStore(store.root).open(run_id) as journal:
+        replayed = ExecutionJournal(journal)
+        assert replayed.attempts[state.attempt_id].owned == legacy
+        assert state.attempt_id in replayed.unreconciled
+
+
+def test_ownership_batch_with_unknown_fields_is_rejected_on_replay(store, benchmark):
+    run_id, trial_id = _owned_run(store, benchmark)
+    with RunStore(store.root).open(run_id) as journal:
+        state = ExecutionJournal(journal).reserve(trial_id)
+        journal.append(
+            "owned-processes",
+            {"identities": [{"pid": 1, "created": 1.0}], "extra": True},
+            trial_id=trial_id,
+            attempt_id=state.attempt_id,
+        )
+        with pytest.raises(InputError):
+            ExecutionJournal(journal)
 
 
 def test_regrade_scope_keeps_its_assessment_events_apart_from_the_normal_index(store):

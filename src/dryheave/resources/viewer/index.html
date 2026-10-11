@@ -43,10 +43,14 @@
         <div class="tabs" id="tabs" role="tablist" aria-label="Result sections">
           <button id="tab-overview" class="tab" type="button" role="tab"
                   aria-controls="panel-overview" aria-selected="true">Overview</button>
+          <button id="tab-results" class="tab" type="button" role="tab"
+                  aria-controls="panel-results" aria-selected="false" tabindex="-1">Results</button>
           <button id="tab-attempts" class="tab" type="button" role="tab"
                   aria-controls="panel-attempts" aria-selected="false" tabindex="-1">Attempts</button>
           <button id="tab-detail" class="tab" type="button" role="tab"
                   aria-controls="panel-detail" aria-selected="false" tabindex="-1">Attempt detail</button>
+          <button id="tab-case" class="tab" type="button" role="tab"
+                  aria-controls="panel-case" aria-selected="false" tabindex="-1">Case</button>
           <button id="tab-progress" class="tab" type="button" role="tab"
                   aria-controls="panel-progress" aria-selected="false" tabindex="-1">Progress</button>
           <button id="tab-calibration" class="tab" type="button" role="tab"
@@ -56,6 +60,8 @@
         </div>
         <section id="panel-overview" class="panel" role="tabpanel" aria-labelledby="tab-overview"
                  tabindex="0"></section>
+        <section id="panel-results" class="panel" role="tabpanel" aria-labelledby="tab-results"
+                 tabindex="0" hidden></section>
         <section id="panel-attempts" class="panel" role="tabpanel" aria-labelledby="tab-attempts"
                  tabindex="0" hidden>
           <form id="attempt-filters" class="filters">
@@ -84,6 +90,19 @@
         </section>
         <section id="panel-detail" class="panel" role="tabpanel" aria-labelledby="tab-detail"
                  tabindex="0" hidden></section>
+        <section id="panel-case" class="panel" role="tabpanel" aria-labelledby="tab-case"
+                 tabindex="0" hidden>
+          <form id="case-form" class="filters">
+            <p class="field-row">
+              <label class="field" for="case-tab-id">Look up a case</label>
+              <input id="case-tab-id" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="64-character case object ID">
+              <button id="case-tab-lookup" type="submit">Open case</button>
+            </p>
+            <p id="case-tab-status" class="run-status" role="status"></p>
+          </form>
+          <div id="case-tab-body"></div>
+        </section>
         <section id="panel-progress" class="panel" role="tabpanel" aria-labelledby="tab-progress"
                  tabindex="0" hidden></section>
         <section id="panel-calibration" class="panel" role="tabpanel"

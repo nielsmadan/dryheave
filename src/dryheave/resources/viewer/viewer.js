@@ -14,9 +14,11 @@ import {
   attemptDetail,
   attemptsTable,
   calibrationView,
+  caseDetail,
   compareView,
   overview,
   progressView,
+  resultsView,
   runList,
   stateCard,
   targetLine,
@@ -44,10 +46,13 @@ const state = {
   evidence: area(),
   evidenceFile: area(),
   evidenceName: null,
+  reasoning: area(),
   progress: area(),
   calibration: area(),
   calibrationQuery: "",
   caseId: "",
+  caseLookup: "",
+  caseView: area(),
   comparison: area(),
   tab: "overview",
   live: true,
@@ -73,11 +78,18 @@ function bind() {
     "report-status",
     "tabs",
     "panel-overview",
+    "panel-results",
     "panel-attempts",
     "panel-detail",
+    "panel-case",
     "panel-progress",
     "panel-calibration",
     "panel-compare",
+    "case-form",
+    "case-tab-id",
+    "case-tab-lookup",
+    "case-tab-status",
+    "case-tab-body",
     "attempt-search",
     "attempt-variant",
     "attempt-stage",
@@ -273,6 +285,21 @@ function paintOverview() {
   );
 }
 
+function renderResults() {
+  paint("results", `${slotKey(state.report)}|${state.labels.revision}`, paintResults);
+}
+
+function paintResults() {
+  replace(
+    nodes["panel-results"],
+    panelBody(
+      state.report,
+      (data) => resultsView(data, labelIndex()),
+      "Select a run to load its results.",
+    ),
+  );
+}
+
 function optionList(select, values, current, allLabel) {
   clear(select);
   select.append(el("option", { text: allLabel, attrs: { value: "" } }));
@@ -308,7 +335,7 @@ function paintAttempts() {
 }
 
 function detailKey() {
-  const slots = [state.dialogue, state.patch, state.evidence, state.evidenceFile];
+  const slots = [state.dialogue, state.patch, state.evidence, state.evidenceFile, state.reasoning];
   return [
     slotKey(state.report),
     state.attemptId ?? "",
@@ -338,6 +365,7 @@ function paintDetail() {
     ["patch", state.patch],
     ["evidence", state.evidence],
     ["evidence file", state.evidenceFile],
+    ["judge reasoning", state.reasoning],
   ]) {
     if (slot.error) {
       errors.push(stateCard("error", `Could not load the ${label}: ${slot.error}`));
@@ -352,6 +380,7 @@ function paintDetail() {
         patch: state.patch.data,
         evidence: state.evidence.data,
         evidenceFile: state.evidenceFile.data,
+        reasoning: state.reasoning.data,
       },
       labelIndex(),
     ),
@@ -423,6 +452,24 @@ function paintCompare() {
   );
 }
 
+function renderCaseTab() {
+  const key = `${slotKey(state.caseView)}|${state.caseLookup}|${state.labels.revision}`;
+  paint("case-tab", key, paintCaseTab);
+}
+
+function paintCaseTab() {
+  nodes["case-tab-id"].value = state.caseLookup;
+  nodes["case-tab-status"].textContent = state.caseView.loading ? "Looking up…" : "";
+  replace(
+    nodes["case-tab-body"],
+    panelBody(
+      state.caseView,
+      (data) => caseDetail(data, labelIndex()),
+      "Enter a case ID, or open a case chip, to look it up.",
+    ),
+  );
+}
+
 function renderTabs() {
   paint("tabs", state.tab, paintTabs);
 }
@@ -456,8 +503,10 @@ function render() {
   renderRuns();
   renderTabs();
   renderOverview();
+  renderResults();
   renderAttempts();
   renderDetail();
+  renderCaseTab();
   renderProgress();
   renderCalibration();
   renderCompare();
@@ -469,6 +518,7 @@ function resetDetails() {
   reset("patch");
   reset("evidence");
   reset("evidenceFile");
+  reset("reasoning");
   state.evidenceName = null;
 }
 
@@ -484,6 +534,7 @@ async function loadDetails() {
     load("dialogue", attemptPath(source, attemptId, "dialogue")),
     load("patch", attemptPath(source, attemptId, "patch")),
     load("evidence", attemptPath(source, attemptId, "evidence")),
+    load("reasoning", attemptPath(source, attemptId, "reasoning")),
   ]);
 }
 
@@ -536,6 +587,17 @@ async function continueCalibrations() {
   if (cursor) {
     await loadCalibrations(cursor);
   }
+}
+
+async function openCase(caseId) {
+  state.caseLookup = caseId;
+  reset("caseView");
+  if (!/^[0-9a-f]{64}$/.test(caseId)) {
+    state.caseView.error = "Enter a 64-character lowercase case object ID.";
+    render();
+    return;
+  }
+  await load("caseView", `/api/cases/${encodeURIComponent(caseId)}`);
 }
 
 async function selectRun(runId) {
@@ -695,6 +757,20 @@ function wireCalibration() {
   });
 }
 
+function wireCaseTab() {
+  nodes["case-form"].addEventListener("submit", (event) => {
+    event.preventDefault();
+    void openCase(nodes["case-tab-id"].value.trim());
+  });
+  nodes.main.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-case]");
+    if (button) {
+      focusTab("case");
+      void openCase(button.dataset.case);
+    }
+  });
+}
+
 function wireCompare() {
   nodes["compare-form"].addEventListener("submit", (event) => {
     event.preventDefault();
@@ -728,6 +804,7 @@ async function start() {
   wireTabs();
   wireRuns();
   wireAttempts();
+  wireCaseTab();
   wireCalibration();
   wireCompare();
   wireLive();

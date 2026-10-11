@@ -33,7 +33,7 @@ class VerifierContext:
     blobs: dict[str, bytes]
     root: Path
     original_workspace: Path | None
-    on_identity: Callable[[ProcessIdentity], None]
+    on_identities: Callable[[tuple[ProcessIdentity, ...]], None]
     cancelled: Event
 
 
@@ -104,10 +104,10 @@ def execute_check(
 
     def own(pid: int) -> None:
         owner.add(psutil.Process(pid))
-        publish()
+        publish(force=True)
 
-    def publish() -> None:
-        owner.publish(context.on_identity)
+    def publish(*, force: bool = False) -> None:
+        owner.publish(context.on_identities, force=force)
 
     try:
         if context.cancelled.is_set():
@@ -160,9 +160,10 @@ def execute_check(
             outcome="error", error=type(error).__name__, elapsed_seconds=time.monotonic() - started
         )
     finally:
+        owner.flush(context.on_identities)
         cleanup = owner.stop(timeout=3, terminal_closed=True)
         watch.close()
-        publish()
+        publish(force=True)
         artifacts.record("cleanup", cleanup)
     if not cleanup.known_writers_stopped or cleanup.errors or watch.error:
         execution = execution.model_copy(

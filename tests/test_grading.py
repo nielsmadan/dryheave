@@ -1,19 +1,22 @@
+import json
 import signal
 import sys
 import threading
+import time
+from contextlib import suppress
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from dryheave.cases import DeterministicCriterion
 from dryheave.drivers.artifacts import ArtifactWriter
+from dryheave.errors import LimitError
 from dryheave.grading import execute_check
 from dryheave.models import CommandSpec
 
 
 def test_subject_owned_executable_is_rejected_before_execution(tmp_path):
-    import json
-
     workspace, hidden = tmp_path / "workspace", tmp_path / "hidden"
     workspace.mkdir()
     hidden.mkdir()
@@ -34,7 +37,7 @@ def test_subject_owned_executable_is_rejected_before_execution(tmp_path):
     context = SimpleNamespace(
         cancelled=threading.Event(),
         original_workspace=tmp_path / "original",
-        on_identity=lambda _identity: None,
+        on_identities=lambda _identities: None,
     )
     evidence = ArtifactWriter(tmp_path / "evidence", 1000000)
     execution = execute_check(criterion, workspace, hidden, evidence, context)
@@ -87,7 +90,7 @@ def test_exit_codes_require_truthful_execution_evidence(
     context = SimpleNamespace(
         cancelled=threading.Event(),
         original_workspace=tmp_path / "original",
-        on_identity=identities.append,
+        on_identities=identities.extend,
     )
     execution = execute_check(
         criterion, workspace, hidden, ArtifactWriter(tmp_path / "evidence", 1000000), context
@@ -116,10 +119,68 @@ def test_one_byte_stream_limit_remains_independent_of_evidence_budget(tmp_path, 
         expected_stdout="P",
     )
     context = SimpleNamespace(
-        cancelled=threading.Event(), original_workspace=None, on_identity=lambda _identity: None
+        cancelled=threading.Event(), original_workspace=None, on_identities=lambda _identities: None
     )
     evidence = ArtifactWriter(tmp_path / "evidence", 65536)
     execution = execute_check(criterion, workspace, hidden, evidence, context)
     assert execution.outcome == "error"
     assert execution.process_outcome == "output_limit"
     assert (evidence.root / (stream + ".bin")).read_bytes() == b"P"
+
+
+@pytest.mark.integration
+def test_failed_pre_stop_publish_still_stops_the_owned_child(tmp_path):
+    workspace, hidden = tmp_path / "workspace", tmp_path / "hidden"
+    workspace.mkdir()
+    hidden.mkdir()
+    marker = tmp_path / "heartbeat"
+    child_code = "import pathlib,sys,time\np=pathlib.Path(sys.argv[1])\nend=time.monotonic()+10\nwhile time.monotonic()<end:\n with p.open('a') as f: f.write('beat\\n')\n time.sleep(.02)\n"
+    (hidden / "check.py").write_text(
+        "import pathlib,subprocess,sys,time\n"
+        f"child=subprocess.Popen([sys.executable,'-c',{child_code!r},{str(marker)!r}],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        f"while not pathlib.Path({str(marker)!r}).exists(): time.sleep(.01)\n"
+        "time.sleep(.3)\n"
+        "print(child.pid, 'CHECKS_PASSED')\n"
+    )
+    criterion = DeterministicCriterion(
+        criterion_id="check",
+        description="Stop owned processes even when the pre-stop identity flush fails.",
+        command=CommandSpec(argv=(sys.executable, "{verifier}/check.py")),
+        entrypoint="check.py",
+        expected_stdout="CHECKS_PASSED",
+    )
+    parent: list[psutil.Process] = []
+    failed: list[tuple[int, ...]] = []
+    identities = []
+
+    def on_identities(batch):
+        if not parent:
+            parent.append(psutil.Process(batch[0].pid))
+        if not failed and not parent[0].is_running():
+            failed.append(tuple(item.pid for item in batch))
+            raise LimitError("Journal exceeds the limit.")
+        identities.extend(batch)
+
+    context = SimpleNamespace(
+        cancelled=threading.Event(), original_workspace=None, on_identities=on_identities
+    )
+    evidence = ArtifactWriter(tmp_path / "evidence", 1000000)
+    execution = execute_check(criterion, workspace, hidden, evidence, context)
+    child = int((evidence.root / "stdout.bin").read_text().split()[0])
+    try:
+        assert child in failed[0]
+        assert (execution.outcome, execution.error) == ("error", "verifier_cleanup_failed")
+        cleanup = json.loads(next(evidence.root.glob("*-cleanup.json")).read_text())
+        assert cleanup["errors"] == ["process_identity_publish_failed"]
+        assert cleanup["known_writers_stopped"] is True
+        assert child in {item["pid"] for item in cleanup["owned"]}
+        assert child in {item.pid for item in identities}
+        assert (
+            not psutil.pid_exists(child) or psutil.Process(child).status() == psutil.STATUS_ZOMBIE
+        )
+        at_close = marker.read_bytes()
+        time.sleep(0.08)
+        assert marker.read_bytes() == at_close
+    finally:
+        with suppress(psutil.NoSuchProcess):
+            psutil.Process(child).kill()

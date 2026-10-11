@@ -197,10 +197,10 @@ def execute_metrics(
 
     def own(pid: int) -> None:
         owner.add(psutil.Process(pid))
-        publish()
+        publish(force=True)
 
-    def publish() -> None:
-        owner.publish(context.on_identity)
+    def publish(*, force: bool = False) -> None:
+        owner.publish(context.on_identities, force=force)
 
     result: CommandResult | None = None
     output: bytes | None = None
@@ -232,9 +232,10 @@ def execute_metrics(
         artifacts.record("error", {"type": type(error).__name__, "message": str(error)})
         failure = type(error).__name__
     finally:
+        owner.flush(context.on_identities)
         cleanup = owner.stop(timeout=3, terminal_closed=True)
         watch.close()
-        publish()
+        publish(force=True)
         artifacts.record("cleanup", cleanup)
     if context.cancelled.is_set():
         raise KeyboardInterrupt

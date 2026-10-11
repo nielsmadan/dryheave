@@ -8,10 +8,16 @@ from pydantic import JsonValue
 from dryheave.assessments import assess_run, regrade_run, review_assessment
 from dryheave.bundles import SENSITIVE_CLASSES, export_bundle, import_bundle
 from dryheave.commands import CommandRegistry
-from dryheave.errors import CancelledError, InputError
+from dryheave.errors import CancelledError, ConflictError, DryheaveError, InputError
+from dryheave.filesystem import atomic_write
+from dryheave.report_html import render_report_html
 from dryheave.reports import compare_runs, report_run
 from dryheave.result_models import AuditReview
 from dryheave.storage import ObjectStore
+from dryheave.viewer import AttemptIdentity, ViewerService
+from dryheave.viewer_models import CaseView
+
+REPORT_SENSITIVE_CLASSES = ("assessment-evidence",)
 
 
 def _assess(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
@@ -41,8 +47,53 @@ def _assess(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue
     }
 
 
+def _safe_case(service: ViewerService, case_id: str) -> CaseView | None:
+    try:
+        return service.case(case_id)
+    except DryheaveError:
+        return None
+
+
 def _report(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
-    return report_run(store, args.reference).model_dump(mode="json")
+    if args.html is None and (args.force or args.include_sensitive):
+        raise InputError("--force and --include-sensitive require --html.")
+    report = report_run(store, args.reference)
+    if args.html is None:
+        return report.model_dump(mode="json")
+    destination = args.html.absolute()
+    if not args.force and (destination.exists() or destination.is_symlink()):
+        raise ConflictError(
+            f"Report destination already exists: {destination}. Use --force to overwrite."
+        )
+    service = ViewerService(store)
+    case_ids = sorted(
+        {
+            case_id
+            for attempt in report.attempts
+            if attempt.result
+            for case_id in (attempt.result.case_id, attempt.result.graded_case_id)
+            if case_id is not None
+        }
+    )
+    cases = {case_id: _safe_case(service, case_id) for case_id in case_ids}
+    reasoning = {}
+    if "assessment-evidence" in args.include_sensitive:
+        reasoning = {
+            attempt.attempt_id: service.reasoning_for_identity(
+                report.run_id,
+                attempt.attempt_id,
+                AttemptIdentity(attempt.capture_id, attempt.quarantine_id, attempt.assessment_id),
+            )
+            for attempt in report.attempts
+        }
+    content = render_report_html(report, cases, reasoning)
+    try:
+        atomic_write(destination, content.encode("utf-8"), replace=args.force)
+    except FileExistsError as error:
+        raise ConflictError(
+            f"Report destination already exists: {destination}. Use --force to overwrite."
+        ) from error
+    return {"path": str(destination)}
 
 
 def _compare(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
@@ -107,6 +158,19 @@ def register_results(registry: CommandRegistry) -> None:
         help_text="Read durable run progress or an imported portable report without taking the writer lock.",
     )
     report.add_argument("reference")
+    report.add_argument(
+        "--html", type=Path, help="Write a self-contained shareable HTML report to this path."
+    )
+    report.add_argument(
+        "--force", action="store_true", help="With --html, overwrite an existing destination."
+    )
+    report.add_argument(
+        "--include-sensitive",
+        choices=REPORT_SENSITIVE_CLASSES,
+        action="append",
+        default=[],
+        help="With --html, include judge reasoning only when 'assessment-evidence' is given.",
+    )
     registry.handler(report, _report)
     compare = registry.add(
         "compare", help_text="Pair compatible retained results and show attrition and spending."

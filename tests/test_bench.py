@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+from conftest import judged_case_benchmark
 from dryheave.bench import (
     JUDGE_BUDGET,
     RoleChoice,
@@ -17,6 +18,7 @@ from dryheave.bench import (
     variant_recipe,
 )
 from dryheave.cli import main
+from dryheave.drivers.base import DeliveryUncertain
 from dryheave.errors import InputError
 from dryheave.experiment_models import ScoringConfig
 from dryheave.experiments import create_experiment, load_experiment, load_role
@@ -24,8 +26,21 @@ from dryheave.journals import RunStore
 from dryheave.models import ObjectKind
 from dryheave.pricing import builtin_price_table
 from dryheave.profiles import load_profile
-from dryheave.report_models import AttemptReport, RunReport
-from dryheave.result_models import Assessment, CriterionResult
+from dryheave.report_models import (
+    AttemptReport,
+    CheckSummary,
+    Distribution,
+    GroupMetrics,
+    MetricSummary,
+    RunReport,
+)
+from dryheave.result_models import (
+    Assessment,
+    CriterionResult,
+    HelpNeeded,
+    RoleMetrics,
+    UsageCharge,
+)
 
 
 def test_roles_and_variants_parse_model_effort_and_changes():
@@ -76,6 +91,54 @@ def test_role_command_timeout_follows_the_per_call_budget():
     assert (simulator.budget.max_calls, simulator.budget.total_seconds) == (14, 2520)
     assert simulator_budget(0).total_seconds == 180
     assert simulator_budget(30).total_seconds == 3600
+
+
+def test_check_case_refuses_checks_or_judge_criteria_without_judge(
+    store, graded_benchmark, tmp_path
+):
+    _benchmark, case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    with pytest.raises(InputError, match="--judge"):
+        check_case(store, case_id, judged=False)
+    assert check_case(store, case_id, judged=True) == case_id
+
+
+@pytest.mark.parametrize("kind", ["checks", "judge-criterion"])
+def test_check_case_refuses_a_checks_only_or_judge_criterion_only_case_without_judge(
+    store, graded_benchmark, kind
+):
+    from dryheave.cases import CaseCheck, RubricCriterion, load_frozen_case
+
+    case_id = graded_benchmark.cases[0]
+    case = load_frozen_case(store, case_id)
+    update = (
+        {
+            "checks": (
+                CaseCheck(
+                    check_id="asked",
+                    question="Did the agent ask which punctuation to use?",
+                    expect="yes",
+                ),
+            )
+        }
+        if kind == "checks"
+        else {
+            "criteria": (
+                *case.criteria,
+                RubricCriterion(
+                    criterion_id="quality", rubric="The greeting keeps its public interface."
+                ),
+            )
+        }
+    )
+    changed = store.put(
+        ObjectKind.CASE,
+        case.model_copy(update=update),
+        files=store.read_blobs(case_id),
+        references=(case.persona_id, case.repository_id),
+    )
+    assert check_case(store, case_id, judged=False) == case_id
+    with pytest.raises(InputError, match="--judge"):
+        check_case(store, changed, judged=False)
 
 
 def test_bench_experiment_is_content_addressed_and_resumable(store, benchmark):
@@ -132,19 +195,101 @@ def test_summary_counts_outcomes_per_variant_and_criterion():
             attempt("a1", "haiku", [("correctness", "fail"), ("tests", "pass")]),
             attempt("a2", "haiku", [("correctness", "pass"), ("tests", "pass")]),
             AttemptReport.model_construct(attempt_id="a3", variant="sonnet", result=None),
-        )
+        ),
+        groups=(),
     )
     summary = summarize(report, {"a1": "completed", "a2": "completed", "a3": "needs_input"})
     assert summary["haiku"]["criteria"] == {
         "correctness": {"fail": 1, "pass": 1},
         "tests": {"pass": 2},
     }
+    assert summary["haiku"]["measures"] == {}
     assert summary["sonnet"] == {
         "attempts": [
             {"attempt_id": "a3", "stop_reason": "needs_input", "completion": None, "exclusions": []}
         ],
         "criteria": {},
+        "measures": {},
     }
+
+
+def test_summary_includes_cost_tokens_checks_metrics_and_help_needed():
+    def whole(value):
+        return Distribution(
+            count=1, unknown=0, minimum=value, maximum=value, mean=value, median=value, stdev=0.0
+        )
+
+    role_records = (
+        UsageCharge.model_construct(
+            identity="subject",
+            usage=None,
+            cost=0.5,
+            price_version="anthropic-2026-10-07",
+            raw_evidence_sha256="a" * 64,
+            reason="observed",
+        ),
+    )
+    attempt = AttemptReport.model_construct(
+        attempt_id="a1",
+        trial_id="t1",
+        variant="haiku",
+        current_exclusions=(),
+        roles=(RoleMetrics.model_construct(role="subject", records=role_records),),
+        result=Assessment.model_construct(
+            completion="pass",
+            eligible=True,
+            exclusion_reasons=(),
+            criteria=(),
+            help_needed=HelpNeeded(
+                simulator_replies=2,
+                facts_disclosed=("punctuation",),
+                proactive_facts=("punctuation",),
+                on_request_facts=(),
+            ),
+        ),
+    )
+    group = GroupMetrics.model_construct(
+        variant="haiku",
+        costs=whole(0.5),
+        cost_by_role={"subject": whole(0.5)},
+        accepted_turns=whole(3),
+        durations=whole(42.0),
+        cache_read_tokens=whole(10),
+        cache_write_tokens=whole(5),
+        total_input_tokens=whole(100),
+        checks=(
+            CheckSummary(
+                case_id="b" * 64,
+                check_id="final-right-view",
+                passes=2,
+                fails=0,
+                not_applicable=0,
+                errors=0,
+                agreement=1.0,
+            ),
+        ),
+        metrics=(
+            MetricSummary(
+                case_id="b" * 64,
+                metric_id="tests_passed",
+                label="Tests passed",
+                unit="tests",
+                values=whole(12),
+            ),
+        ),
+    )
+    report = RunReport.model_construct(attempts=(attempt,), groups=(group,))
+    measures = summarize(report, {"a1": "completed"})["haiku"]["measures"]
+    assert measures["price_versions"] == ["anthropic-2026-10-07"]
+    assert measures["help_needed"] == {
+        "measured_attempts": 1,
+        "facts_disclosed": {"punctuation": 1},
+        "disclosed_proactively": {"punctuation": 1},
+        "disclosed_on_request": {},
+    }
+    assert measures["checks"][0]["agreement"] == 1.0
+    assert measures["metrics"][0]["label"] == "Tests passed"
+    assert measures["cost_by_role"]["subject"]["mean"] == 0.5
 
 
 def test_bench_requires_the_claude_credential_reference(
@@ -167,3 +312,80 @@ def test_bench_requires_the_claude_credential_reference(
     )
     assert code == 2
     assert "CLAUDE_CODE_OAUTH_TOKEN is not set" in capsys.readouterr().err
+
+
+class _ProbeTerminal:
+    def __init__(self, transport, runtime, *, limits, fail_on):
+        self.limits = limits
+        self.fail_on = fail_on
+
+    def paste(self, text):
+        if self.fail_on == "paste":
+            raise DeliveryUncertain("Terminal command ended without a delivery acknowledgement.")
+
+    def clear_line(self):
+        if self.fail_on == "clear":
+            raise DeliveryUncertain("Terminal command ended without a delivery acknowledgement.")
+
+    def state(self):
+        from dryheave.drivers.models import Screen
+
+        return Screen(text="> dryheave launch check", exited=None, ready=True)
+
+
+@pytest.mark.parametrize("fail_on", ["paste", "clear"])
+def test_launch_check_reports_a_lost_probe_acknowledgement_as_unsupported(
+    store, tmp_path, monkeypatch, fail_on
+):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from dryheave import bench
+    from dryheave.drivers.models import Observation
+    from dryheave.models import AgentKind
+
+    terminals = []
+
+    def terminal(*args, **kwargs):
+        terminals.append(_ProbeTerminal(*args, **kwargs, fail_on=fail_on))
+        return terminals[-1]
+
+    class Session:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def start(self, plan, environment):
+            return Observation(state="ready", reason="Composer is empty.", text="> ")
+
+    plan = SimpleNamespace(
+        launchable=True, issues=(), config_roots={"config": str(tmp_path)}, agent=AgentKind.CLAUDE
+    )
+    monkeypatch.setattr(bench, "materialize_profile", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(bench, "RuntimeBindings", lambda *args: nullcontext())
+    monkeypatch.setattr(bench, "launch_environment", lambda *args: {})
+    monkeypatch.setattr(bench, "NativeLogSource", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bench, "DriverSession", Session)
+    monkeypatch.setattr(bench, "TuiTestTerminal", terminal)
+    monkeypatch.setattr(bench, "_settles", lambda terminal, condition: condition(terminal.state()))
+    monkeypatch.setattr(bench, "composer_matches", lambda agent, screen, text: True)
+    observation = bench.launch_check(
+        store,
+        "a" * 64,
+        tmp_path / "checks",
+        runtime_root=tmp_path / "rt",
+        transport=tmp_path / "tui-test",
+        environment={},
+    )
+    assert terminals[0].limits.duration_seconds == bench.LAUNCH_CHECK_SECONDS == 180
+    assert (observation.state, observation.reason, observation.text) == (
+        "unsupported",
+        "The typing probe lost its terminal acknowledgement: "
+        "Terminal command ended without a delivery acknowledgement.",
+        "> ",
+    )

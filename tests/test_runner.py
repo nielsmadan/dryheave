@@ -430,3 +430,47 @@ def test_attempt_errors_name_their_type_and_origin():
     assert described.startswith(
         "PermissionError: [Errno 1] Operation not permitted (test_runner.py:"
     )
+
+
+@pytest.mark.integration
+def test_setup_spawning_many_processes_journals_a_bounded_number_of_ownership_events(
+    store, benchmark
+):
+    import math
+    import sys
+
+    from dryheave.cases import load_frozen_case
+    from dryheave.models import CommandSpec
+    from dryheave.process_ownership import PUBLISH_INTERVAL
+
+    case_id = store.resolve("task")
+    case = load_frozen_case(store, case_id)
+    script = (
+        "import subprocess,sys,time\n"
+        "children=[]\n"
+        "for _ in range(60):\n"
+        " children.append(subprocess.Popen(['sleep','2']))\n"
+        " time.sleep(.03)\n"
+        "[child.wait() for child in children]\n"
+    )
+    frozen = store.put(
+        ObjectKind.CASE,
+        case.model_copy(
+            update={
+                "setup": (CommandSpec(argv=(sys.executable, "-c", script), timeout_seconds=30),)
+            }
+        ),
+        files=store.read_blobs(case_id),
+        references=(case.persona_id, case.repository_id),
+    )
+    identifier = create_experiment(store, benchmark.model_copy(update={"cases": (frozen,)}))
+    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    journal = RunStore(store.root).inspect(result.run_id)
+    owned = ExecutionJournal(journal).attempts[result.attempts[0].attempt_id].owned
+    batches = [event for event in journal.events if event.event == "owned-processes"]
+    span = (batches[-1].timestamp - batches[0].timestamp).total_seconds()
+    assert len(owned) >= 20
+    assert len({(item.pid, item.created) for item in owned}) == len(owned)
+    assert len(batches) <= 3 + math.ceil(span / PUBLISH_INTERVAL)
+    assert len(batches) < len(owned)
+    assert not any(event.event == "owned-process" for event in journal.events)

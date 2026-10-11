@@ -80,7 +80,7 @@ def _reserve(store, experiment_id, *, mode="offline-fixture"):
 
 
 def _record_subject(execution, attempt_id, identity):
-    state = execution.own(execution.attempts[attempt_id], identity)
+    state = execution.own(execution.attempts[attempt_id], (identity,))
     launch = LaunchObservation(
         transport="disposable-subprocess-fixture",
         transport_version="fixture",
@@ -217,7 +217,7 @@ def test_new_owned_process_invalidates_successful_cleanup_in_memory_and_replay(
                 "ownership-reconciled",
                 CleanupReport(terminal_closed=True, known_writers_stopped=True),
             )
-            execution.own(state, identity)
+            execution.own(state, (identity,))
             assert attempt_id in execution.unreconciled
             restored = ExecutionJournal(journal)
             assert attempt_id in restored.unreconciled
@@ -321,3 +321,51 @@ def test_setup_descendant_is_durable_before_cleanup_and_survives_parent_exit(
             if _alive(identity):
                 with suppress(psutil.NoSuchProcess):
                     psutil.Process(identity.pid).kill()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("legacy", [False, True])
+def test_reconciliation_stops_every_recorded_identity_across_batches(
+    store, benchmark, tmp_path, legacy
+):
+    experiment_id = create_experiment(store, benchmark)
+    run_id, attempt_id = _reserve(store, experiment_id)
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    with (
+        _writer(tmp_path / "first") as (first, first_identity),
+        _writer(tmp_path / "second") as (second, second_identity),
+    ):
+        exited = tuple(
+            ProcessIdentity(pid=4_000_000 + index, created=float(index)) for index in range(1500)
+        )
+        recorded = (first_identity, *exited, second_identity)
+        with RunStore(store.root).open(run_id) as journal:
+            execution = ExecutionJournal(journal)
+            state = execution.attempts[attempt_id]
+            if legacy:
+                for identity in recorded:
+                    journal.append(
+                        "owned-process",
+                        identity.model_dump(mode="json"),
+                        trial_id=state.trial_id,
+                        attempt_id=attempt_id,
+                    )
+            else:
+                execution.own(state, recorded)
+                assert [
+                    len(event.data["identities"])
+                    for event in journal.events
+                    if event.event == "owned-processes"
+                ] == [1024, 478]
+        with RunStore(store.root).open(run_id) as journal:
+            restored = ExecutionJournal(journal)
+            assert restored.attempts[attempt_id].owned == recorded
+            reconcile_execution(restored)
+            first.wait(timeout=3)
+            second.wait(timeout=3)
+            assert not _alive(first_identity)
+            assert not _alive(second_identity)
+            cleanup = ExecutionJournal(journal).cleanup_reports[attempt_id]
+            assert cleanup.known_writers_stopped
+            assert {first_identity, second_identity} <= set(cleanup.owned)

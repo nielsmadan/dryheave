@@ -1,20 +1,35 @@
 import base64
 import re
 from dataclasses import dataclass, field
-
-from pydantic import JsonValue
+from typing import Literal
 
 from dryheave.calibration_models import CaseCalibration
 from dryheave.calibrations import load_calibration
+from dryheave.cases import DEFAULT_RUBRIC_IDS, DeterministicCriterion, FrozenCase
 from dryheave.errors import DryheaveError, InputError, IntegrityError, LimitError, NotFoundError
 from dryheave.experiment_models import FrozenExperiment
 from dryheave.filesystem import directory_names
 from dryheave.journals import RunStore
-from dryheave.models import JournalEvent, ObjectKind, TrialStage, validate_relative_path
+from dryheave.judges import JudgeResponse
+from dryheave.models import (
+    JournalEvent,
+    ObjectKind,
+    RunCheckpoint,
+    TrialStage,
+    validate_relative_path,
+)
 from dryheave.report_models import Comparison, RunReport
 from dryheave.reports import compare_runs, report_run
+from dryheave.repositories import load_repository
 from dryheave.result_models import Assessment, AssessmentEvidence
-from dryheave.runner_models import AttemptState, CapturedAttempt, QuarantinedCapture, RunOptions
+from dryheave.rubrics import effective_rubrics
+from dryheave.runner_models import (
+    AttemptCheckpoint,
+    AttemptState,
+    CapturedAttempt,
+    QuarantinedCapture,
+    RunOptions,
+)
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json, digest, parse_model
 from dryheave.storage import ObjectStore
@@ -25,12 +40,21 @@ from dryheave.viewer_models import (
     CalibrationView,
     CaptureOmissionView,
     CaseCalibrationView,
+    CaseCheckView,
+    CaseDeterministicView,
+    CaseFactView,
+    CaseMetricsView,
+    CaseRubricView,
+    CaseView,
+    CheckReasoning,
     ContentEncoding,
+    CriterionReasoning,
     DetailStatus,
     DialogueLine,
     DialogueView,
     EvidenceFileView,
     EvidenceListing,
+    JudgeReasoningView,
     LabelIndex,
     PatchView,
     RunListing,
@@ -42,6 +66,7 @@ from dryheave.viewer_models import (
 
 RUN_ID_PATTERN = r"[0-9a-f]{32}"
 OBJECT_ID_PATTERN = r"[0-9a-f]{64}"
+JUDGE_RESPONSE_FILE = re.compile(r"/judge/([^/]+)/\d{6}-response\.json$")
 MAX_LIST_LIMIT = 100
 MAX_DETAIL_BYTES = 4 * 1024 * 1024
 MAX_ROW_JOURNAL_BYTES = 256 * 1024
@@ -82,7 +107,17 @@ class CaptureView:
 
 
 @dataclass(frozen=True)
+class AssessmentRecord:
+    assessment: Assessment | None
+    assessment_id: str | None
+    status: DetailStatus
+    reason: str | None = None
+    reason_code: str | None = None
+
+
+@dataclass(frozen=True)
 class EvidenceView:
+    assessment: Assessment | None
     evidence: AssessmentEvidence | None
     evidence_id: str | None
     assessment_id: str | None
@@ -113,15 +148,48 @@ class CalibrationCandidates:
     cursor: str | None = None
 
 
-def _stages(events: tuple[JournalEvent, ...]) -> tuple[str | None, list[TrialStage]]:
+def _stages(
+    events: tuple[JournalEvent, ...], checkpoint: RunCheckpoint | None
+) -> tuple[str | None, dict[str, TrialStage]]:
     mode: str | None = None
-    latest: dict[str, dict[str, JsonValue]] = {}
+    stages = (
+        dict(parse_model(canonical_json(checkpoint.state), AttemptCheckpoint).attempts)
+        if checkpoint is not None
+        else {}
+    )
+    after = checkpoint.sequence if checkpoint is not None else 0
     for event in events:
         if event.event == "run-options":
             mode = parse_model(canonical_json(event.data), RunOptions).mode
-        elif event.event == "attempt-state" and event.attempt_id is not None:
-            latest[event.attempt_id] = event.data
-    return mode, [parse_model(canonical_json(data), AttemptState).stage for data in latest.values()]
+        elif (
+            event.event == "attempt-state"
+            and event.attempt_id is not None
+            and event.sequence > after
+        ):
+            stages[event.attempt_id] = parse_model(canonical_json(event.data), AttemptState).stage
+    return mode, stages
+
+
+def _rubric_views(case: FrozenCase) -> tuple[CaseRubricView, ...]:
+    declared = {item.criterion_id for item in case.criteria}
+    views = []
+    for item in effective_rubrics(case):
+        origin: Literal["case", "default", "overridden"]
+        if item.criterion_id not in DEFAULT_RUBRIC_IDS:
+            origin = "case"
+        elif item.criterion_id in declared:
+            origin = "overridden"
+        else:
+            origin = "default"
+        views.append(
+            CaseRubricView(
+                criterion_id=item.criterion_id,
+                required=item.required,
+                rubric=item.rubric,
+                origin=origin,
+            )
+        )
+    return tuple(views)
 
 
 def resolve_target(store: ObjectStore, reference: str) -> ViewerTarget:
@@ -178,7 +246,7 @@ class ViewerService:
         budget = self.max_request_journal_bytes
         rows = []
         for run_id in identifiers[offset : offset + limit]:
-            row, used = self._row(runs, run_id, min(MAX_ROW_JOURNAL_BYTES, budget))
+            row, used = self._row(runs, run_id, max(0, min(MAX_ROW_JOURNAL_BYTES, budget)))
             budget -= used
             rows.append(row)
         return RunListing(runs=tuple(rows), offset=offset, limit=limit, total=len(identifiers))
@@ -186,7 +254,7 @@ class ViewerService:
     def _row(self, runs: RunStore, run_id: str, allowance: int) -> tuple[RunRow, int]:
         try:
             prefix = runs.summarize(run_id, limit=allowance)
-            mode, stages = _stages(prefix.events)
+            mode, stages = _stages(prefix.events, prefix.checkpoint)
         except DryheaveError as error:
             return RunRow(run_id=run_id, error=_failure(error)[0]), 0
         except OSError:
@@ -198,9 +266,12 @@ class ViewerService:
             durable_sequence=None if prefix.truncated else len(prefix.events),
             observed_events=len(prefix.events),
             truncated=prefix.truncated,
+            counted_through=None
+            if prefix.checkpoint is None
+            else max(prefix.checkpoint.sequence, len(prefix.events)),
             mode=mode,
             attempts=len(stages),
-            finished=sum(stage == TrialStage.FINISHED for stage in stages),
+            finished=sum(stage == TrialStage.FINISHED for stage in stages.values()),
         ), prefix.bytes_read
 
     def progress(self, run_id: str) -> RunProgress:
@@ -443,53 +514,218 @@ class ViewerService:
             )
         return self._read_detail(identifier, name)
 
-    def _evidence(self, run_id: str, attempt_id: str, identity: AttemptIdentity) -> EvidenceView:
+    def _assessment_record(
+        self, run_id: str, attempt_id: str, identity: AttemptIdentity
+    ) -> AssessmentRecord:
         if identity.assessment_id is None:
-            return EvidenceView(
-                evidence=None,
-                evidence_id=None,
+            return AssessmentRecord(
+                assessment=None,
                 assessment_id=None,
                 status="unavailable",
                 reason="No finished assessment.",
                 reason_code="not_retained",
             )
-        evidence_id: str | None = None
         try:
             assessment = self.store.read_payload(
                 identity.assessment_id, Assessment, kind=ObjectKind.RESULT
             )
             if (assessment.run_id, assessment.attempt_id) != (run_id, attempt_id):
                 raise IntegrityError("Assessment identity differs from the retained attempt.")
-            if assessment.evidence_id is None:
-                return EvidenceView(
-                    evidence=None,
-                    evidence_id=None,
-                    assessment_id=identity.assessment_id,
-                    status="unavailable",
-                    reason="The assessment retained no verifier evidence.",
-                    reason_code="not_retained",
-                )
-            evidence_id = assessment.evidence_id
+        except DryheaveError as error:
+            code, reason = _failure(error)
+            return AssessmentRecord(
+                assessment=None,
+                assessment_id=identity.assessment_id,
+                status="unavailable" if isinstance(error, NotFoundError) else "invalid",
+                reason=reason,
+                reason_code=code,
+            )
+        return AssessmentRecord(
+            assessment=assessment, assessment_id=identity.assessment_id, status="ok"
+        )
+
+    def _evidence(self, run_id: str, attempt_id: str, identity: AttemptIdentity) -> EvidenceView:
+        record = self._assessment_record(run_id, attempt_id, identity)
+        if record.assessment is None:
+            return EvidenceView(
+                assessment=None,
+                evidence=None,
+                evidence_id=None,
+                assessment_id=record.assessment_id,
+                status=record.status,
+                reason=record.reason,
+                reason_code=record.reason_code,
+            )
+        assessment = record.assessment
+        if assessment.evidence_id is None:
+            return EvidenceView(
+                assessment=assessment,
+                evidence=None,
+                evidence_id=None,
+                assessment_id=record.assessment_id,
+                status="unavailable",
+                reason="The assessment retained no verifier evidence.",
+                reason_code="not_retained",
+            )
+        try:
             evidence = self.store.read_payload(
-                evidence_id, AssessmentEvidence, kind=ObjectKind.ASSESSMENT_EVIDENCE
+                assessment.evidence_id, AssessmentEvidence, kind=ObjectKind.ASSESSMENT_EVIDENCE
             )
             if (evidence.run_id, evidence.attempt_id) != (run_id, attempt_id):
                 raise IntegrityError("Evidence identity differs from the retained attempt.")
         except DryheaveError as error:
             code, reason = _failure(error)
             return EvidenceView(
+                assessment=assessment,
                 evidence=None,
-                evidence_id=evidence_id,
-                assessment_id=identity.assessment_id,
+                evidence_id=assessment.evidence_id,
+                assessment_id=record.assessment_id,
                 status="unavailable" if isinstance(error, NotFoundError) else "invalid",
                 reason=reason,
                 reason_code=code,
             )
         return EvidenceView(
+            assessment=assessment,
             evidence=evidence,
-            evidence_id=evidence_id,
-            assessment_id=identity.assessment_id,
+            evidence_id=assessment.evidence_id,
+            assessment_id=record.assessment_id,
             status="ok",
+        )
+
+    def _latest_judge_response(
+        self, evidence_id: str, evidence: AssessmentEvidence, judge_calls: list[str]
+    ) -> JudgeResponse | None:
+        by_call: dict[str, str] = {}
+        for name in evidence.files:
+            match = JUDGE_RESPONSE_FILE.search(name)
+            if match:
+                by_call[match.group(1)] = name
+        for call_id in reversed(judge_calls):
+            response_name = by_call.get(call_id)
+            if response_name is None:
+                continue
+            try:
+                content = self.store.read_blob_bounded(
+                    evidence_id, response_name, limit=self.max_detail_bytes
+                )
+                return parse_model(content, JudgeResponse)
+            except DryheaveError:
+                continue
+        return None
+
+    def reasoning(self, kind: str, source_id: str, attempt_id: str) -> JudgeReasoningView:
+        run_id, identity = self._attempt(kind, source_id, attempt_id)
+        return self.reasoning_for_identity(run_id, attempt_id, identity)
+
+    def reasoning_for_identity(
+        self, run_id: str, attempt_id: str, identity: AttemptIdentity
+    ) -> JudgeReasoningView:
+        view = self._evidence(run_id, attempt_id, identity)
+        if view.assessment is None or view.evidence is None or view.evidence_id is None:
+            return JudgeReasoningView(
+                attempt_id=attempt_id,
+                assessment_id=view.assessment_id,
+                status=view.status,
+                reason=view.reason,
+                reason_code=view.reason_code,
+            )
+        assessment = view.assessment
+        judge_calls = [
+            charge.identity
+            for role in assessment.roles
+            if role.role == "judge"
+            for charge in role.records
+        ]
+        response = self._latest_judge_response(view.evidence_id, view.evidence, judge_calls)
+        if response is None:
+            return JudgeReasoningView(
+                attempt_id=attempt_id,
+                assessment_id=view.assessment_id,
+                status="unavailable",
+                reason="No judge reasoning was retained for this assessment.",
+                reason_code="not_retained",
+            )
+        criterion_rationale = {item.criterion_id: item.rationale for item in response.judgments}
+        check_rationale = {item.check_id: item.rationale for item in response.checks}
+        return JudgeReasoningView(
+            attempt_id=attempt_id,
+            assessment_id=view.assessment_id,
+            status="ok",
+            criteria=tuple(
+                CriterionReasoning(
+                    criterion_id=item.criterion_id,
+                    rationale=criterion_rationale.get(item.criterion_id),
+                )
+                for item in assessment.criteria
+            ),
+            checks=tuple(
+                CheckReasoning(check_id=item.check_id, rationale=check_rationale.get(item.check_id))
+                for item in assessment.checks
+            ),
+        )
+
+    def _frozen_case_for_view(self, store: ObjectStore, case_id: str) -> FrozenCase:
+        case = store.load(case_id, FrozenCase, kind=ObjectKind.CASE)
+        manifest = store.get(case_id, kind=ObjectKind.CASE)
+        if manifest.references != tuple(sorted({case.repository_id, case.persona_id})):
+            raise InputError("Frozen case reference closure does not match its runtime inputs.")
+        expected = set(case.hidden_files.values())
+        if case.reference_patch_file:
+            expected.add(case.reference_patch_file)
+        if set(manifest.files) != expected:
+            raise InputError("Frozen case blob map does not match its declared hidden inputs.")
+        return case
+
+    def case(self, case_id: str) -> CaseView:
+        if not re.fullmatch(OBJECT_ID_PATTERN, case_id):
+            raise InputError("Expected a lowercase SHA-256 case ID.")
+        bounded = ObjectStore(self.store.root, read_budget=self.max_detail_bytes)
+        case = self._frozen_case_for_view(bounded, case_id)
+        try:
+            baseline_commit = load_repository(bounded, case.repository_id).commit
+        except DryheaveError:
+            baseline_commit = None
+        return CaseView(
+            case_id=case_id,
+            title=case.title,
+            initial_prompt=case.initial_prompt,
+            facts=tuple(
+                CaseFactView(fact_id=item.fact_id, text=item.text, disclosure=item.disclosure)
+                for item in case.allowed_facts
+            ),
+            rubrics=_rubric_views(case),
+            disabled_rubrics=case.disabled_rubrics,
+            deterministic=tuple(
+                CaseDeterministicView(
+                    criterion_id=item.criterion_id,
+                    description=item.description,
+                    required=item.required,
+                    command=item.command,
+                )
+                for item in case.criteria
+                if isinstance(item, DeterministicCriterion)
+            ),
+            checks=tuple(
+                CaseCheckView(
+                    check_id=item.check_id,
+                    question=item.question,
+                    expect=item.expect,
+                    only_if=item.only_if,
+                )
+                for item in case.checks
+            ),
+            metrics=tuple(
+                CaseMetricsView(
+                    metrics_id=item.metrics_id, description=item.description, command=item.command
+                )
+                for item in case.metrics
+            ),
+            budgets=case.budgets,
+            tool_requirements=case.tool_requirements,
+            repository_id=case.repository_id,
+            persona_id=case.persona_id,
+            baseline_commit=baseline_commit,
+            reference_patch=case.reference_patch_file is not None,
         )
 
     def evidence(self, kind: str, source_id: str, attempt_id: str) -> EvidenceListing:

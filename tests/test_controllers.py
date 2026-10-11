@@ -67,7 +67,7 @@ def invoke(recipe, request, tmp_path, *, duration=3, cancelled=None):
         deadline=time.monotonic() + duration,
         cancelled=cancelled or threading.Event(),
         inherited={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
-        on_identity=identities.append,
+        on_identities=identities.extend,
     )
     writer = ArtifactWriter(tmp_path / "call", 1024 * 1024)
     return invoke_controller(recipe, request, writer, context), identities

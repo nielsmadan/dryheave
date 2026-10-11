@@ -134,7 +134,8 @@ export function groupDefinitions(group) {
     ["Subject total output tokens (eligible)", formatDistribution(group?.output_tokens, whole)],
     ["Accepted turns (eligible)", formatDistribution(group?.accepted_turns, whole)],
     [
-      "Per-attempt cost across every role (single currency, complete telemetry only)",
+      "Per-attempt cost (API-equivalent estimate) across every role "
+        + "(single currency, complete telemetry only)",
       formatDistribution(group?.costs, (value) => formatNumber(value, 4)),
     ],
   ];
@@ -164,7 +165,7 @@ export function describeRole(role) {
   }
   const tokens = role.known_tokens ?? null;
   return [
-    `known cost ${formatMoney(role.known_cost, role.currency)}`,
+    `known cost (API-equivalent estimate) ${formatMoney(role.known_cost, role.currency)}`,
     `output ${formatCount(tokens?.output)}`,
     `reasoning ${formatCount(tokens?.reasoning)} of that output`,
     `coverage ${describeCoverage(role.coverage)}`,
@@ -302,7 +303,7 @@ export function describeRoleTotal(total) {
     .join(", ");
   return [
     `${total.attempts} attempt-role record set(s)`,
-    `spend ${formatSpend(total.spend)}`,
+    `spend (API-equivalent estimate) ${formatSpend(total.spend)}`,
     `${total.unknownCostRecords} usage record(s) with unknown cost`,
     `input ${total.knownInput}${missing(total.unknownInput)}`,
     `output ${total.knownOutput}${missing(total.unknownOutput)}`,
@@ -318,7 +319,9 @@ export function describeRunRow(row) {
   if (row.error) {
     return `Unreadable row: ${row.error}`;
   }
-  const bound = row.truncated ? "at least " : "";
+  const snapshot = row.truncated && row.counted_through != null;
+  const bound = row.truncated && !snapshot ? "at least " : "";
+  const asOf = snapshot ? ` as of event ${formatCount(row.counted_through)}` : "";
   const prefix =
     row.observed_events === 0
       ? "no complete event fit the row budget"
@@ -327,7 +330,7 @@ export function describeRunRow(row) {
     ? `durable sequence unknown; ${prefix}`
     : `durable sequence ${formatCount(row.durable_sequence)}`;
   return [
-    `${bound}${formatCount(row.finished)} of ${bound}${formatCount(row.attempts)} attempt(s) finished`,
+    `${bound}${formatCount(row.finished)} of ${bound}${formatCount(row.attempts)} attempt(s) finished${asOf}`,
     `mode ${row.mode ?? UNKNOWN}`,
     sequence,
   ].join(" · ");
@@ -455,6 +458,26 @@ export function contentNotes(view) {
   return view && view.encoding === "base64" ? [BASE64_NOTE] : [];
 }
 
+export function reasoningMap(items, idField) {
+  const map = new Map();
+  for (const item of items ?? []) {
+    if (typeof item.rationale === "string" && item.rationale !== "") {
+      map.set(item[idField], item.rationale);
+    }
+  }
+  return map;
+}
+
+export function formatMetricValue(value) {
+  if (value === null || value === undefined) {
+    return UNKNOWN;
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  return String(value);
+}
+
 export function labelNames(index, value) {
   if (!index || typeof value !== "string" || value === "") {
     return [];
@@ -470,4 +493,51 @@ export function labelledId(value, names) {
 
 export function chipTitle(label, value, names) {
   return `${label}: ${labelledId(value, names)}`;
+}
+
+export const CHECK_MARKS = { pass: "✓", fail: "✗", not_applicable: "–", error: "?" };
+
+export const TOPLINE_LEGEND =
+  "✓ the outcome the case wants · ✗ the opposite · – not applicable · ? no clear answer. " +
+  "Turns, time, tokens and cost are the agent's alone, without the simulated user and the " +
+  "judge; tokens include cache reads and writes, and cost is an API list-price estimate. " +
+  "Variant rows average the attempts below them; retried attempts are left out.";
+
+export function checkLabel(checkId) {
+  const words = checkId.replaceAll("-", " ").replaceAll("_", " ").toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+export function formatDuration(value) {
+  if (!isNumber(value)) {
+    return UNKNOWN;
+  }
+  const total = Math.round(value);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes ? `${minutes}m ${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
+}
+
+export function formatTokens(value) {
+  if (!isNumber(value)) {
+    return UNKNOWN;
+  }
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(2)}M`;
+  }
+  return value >= 1_000 ? `${(value / 1_000).toFixed(1)}k` : value.toFixed(0);
+}
+
+export function formatCost(value, currency) {
+  if (!isNumber(value)) {
+    return UNKNOWN;
+  }
+  return currency === "USD" ? `$${value.toFixed(2)}` : `${value.toFixed(2)} ${currency ?? ""}`.trim();
+}
+
+export function formatTurns(value) {
+  if (!isNumber(value)) {
+    return UNKNOWN;
+  }
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }

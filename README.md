@@ -72,7 +72,12 @@ Follow the packaged [real workflow](src/dryheave/resources/examples/real-workflo
    an explicitly verified historical SHA. Curate facts, persona and hidden checks,
    then `case validate/freeze` and `case calibrate CASE_ID --json` before subject
    spend. Inspect the standalone record with `case calibration CALIBRATION_ID`;
-   `demonstrated` requires observed baseline failure and reference success.
+   `demonstrated` requires observed baseline failure and reference success. A
+   case may also declare judged yes/no `checks` (with a conditional `only_if`)
+   and `metrics` commands measuring things a script can count, such as a
+   test run; both need a judge, and the three default rubrics (`code-quality`,
+   `codebase-consistency`, `test-quality`) can be overridden by id or dropped
+   via `disabled_rubrics`. See [case authoring](docs/tech/authoring.md).
 2. `profile create NAME --agent codex|claude --model MODEL` freezes selected
    inputs without a JSON spec; legacy `profile capture` remains supported.
    Both freeze explicitly selected native config, instruction,
@@ -85,14 +90,22 @@ Follow the packaged [real workflow](src/dryheave/resources/examples/real-workflo
    `run --resume` reconciles durable
    progress, and explicit retries preserve all earlier attempts.
 4. `assess` audits stopped outputs and runs hidden verifiers and optional judges.
-   `report` and `compare` show eligible performance alongside attrition and
-   spending for subject, simulator and judge roles.
+   `report` and `compare` show eligible performance, cost by role and total
+   (an API-equivalent estimate with its price table version), tokens including
+   cache, turns, time, help needed and per-case check/metric summaries
+   (checks include cross-repetition agreement) alongside attrition and
+   spending for subject, simulator and judge roles. `assess RUN_ID --regrade
+   [--case CASE]` re-grades existing captures without relaunching subjects,
+   optionally against a replacement case.
 5. `view [RUN_OR_REPORT]` serves those results as a read-only local website. It
    binds loopback on an OS-selected port, prints the URL before opening anything,
    and runs in the foreground until Ctrl-C; `--open` also launches a browser.
    The packaged page covers runs, variant groups, attempts and retries, attempt
-   detail with dialogue, patches, criteria, calibration and audits, plus role
-   usage and cost. Viewing never runs, assesses, grades or calls a model.
+   detail with dialogue, patches, criteria, checks, metrics, help needed,
+   calibration, audits and judge reasoning in a Results tab (per-variant
+   comparison) and a Case tab (the frozen case), plus role usage and cost.
+   `report RUN_ID --html PATH` writes the same results as one self-contained
+   file. Viewing never runs, assesses, grades or calls a model.
 6. `export/import` transports curated inputs and structured results. Raw captures,
    source sessions and grading artifacts require explicit sensitive-class flags.
 

@@ -24,8 +24,8 @@ def test_native_wiring_builds_log_source_before_launch_and_preserves_plan(
     launched = []
 
     class Owner:
-        def snapshot(self):
-            return ()
+        def publish(self, on_identities, *, force=False):
+            return None
 
     class Terminal(FixtureTerminal):
         def __init__(self, executable, runtime, *, limits):
@@ -93,8 +93,8 @@ def test_lost_launch_acknowledgement_requires_terminal_reconciliation(
     launches = []
 
     class Owner:
-        def snapshot(self):
-            return ()
+        def publish(self, on_identities, *, force=False):
+            return None
 
     class Terminal(FixtureTerminal):
         def __init__(self, executable, runtime, *, limits):
@@ -147,3 +147,50 @@ def test_lost_launch_acknowledgement_requires_terminal_reconciliation(
         assert captured.evidence_omissions == ("cleanup_unresolved",)
         with pytest.raises(InputError, match="reconciliation before another subject launch"):
             run_experiment(store, resume=result.run_id)
+
+
+@pytest.mark.integration
+def test_terminal_owner_publishes_pending_identities_before_each_simulator_call(
+    store, benchmark, monkeypatch
+):
+    source = FakeEventSource([])
+    events: list[tuple[str, bool]] = []
+
+    class Owner:
+        def publish(self, on_identities, *, force=False):
+            events.append(("publish", force))
+
+    class Terminal(FixtureTerminal):
+        def __init__(self, executable, runtime, *, limits):
+            super().__init__(benchmark.fixture, source, AgentKind.CODEX)
+            self.artifacts = ArtifactWriter(runtime, limits.max_artifact_bytes)
+            self.owner = Owner()
+            self.session = "owner-publish-fixture"
+
+    import dryheave.runner_attempt as runner_attempt_module
+
+    real_invoke_controller = runner_attempt_module.invoke_controller
+
+    def recording_invoke_controller(*args, **kwargs):
+        events.append(("invoke", False))
+        return real_invoke_controller(*args, **kwargs)
+
+    monkeypatch.setattr("dryheave.runner_attempt.TuiTestTerminal", Terminal)
+    monkeypatch.setattr("dryheave.runner_attempt.NativeLogSource", lambda *a, **k: source)
+    monkeypatch.setattr("dryheave.runner_attempt.invoke_controller", recording_invoke_controller)
+    identifier = create_experiment(store, benchmark)
+    result = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(
+            mode="native",
+            runtime_root=str(Path(".cache") / ("o" + uuid4().hex[:3])),
+            transport=".tools/tui-test/tui-test",
+        ),
+    )
+    captured = load_capture(store, result.pending_assessment[0])
+    assert captured.accepted_turns == 2
+    invoked = [index for index, (name, _) in enumerate(events) if name == "invoke"]
+    assert invoked
+    for index in invoked:
+        assert events[index - 1] == ("publish", True)

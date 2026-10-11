@@ -3,8 +3,9 @@ import re
 
 import pytest
 
-from conftest import HOSTILE
+from conftest import HOSTILE, judged_case_benchmark
 from dryheave import journals, storage, viewer
+from dryheave.assessments import assess_run
 from dryheave.bundles import export_bundle, import_bundle
 from dryheave.calibrations import calibrate_case
 from dryheave.errors import InputError, LimitError, NotFoundError
@@ -256,6 +257,10 @@ def test_portable_report_with_omitted_captures_is_a_degraded_view(store, assesse
     evidence = service.evidence("report", report_id, attempt_id)
     assert evidence.status == "unavailable"
     assert evidence.files == ()
+    reasoning = service.reasoning("report", report_id, attempt_id)
+    assert reasoning.status == "unavailable"
+    assert reasoning.criteria == ()
+    assert reasoning.checks == ()
     with pytest.raises(NotFoundError, match="no retained attempt"):
         service.dialogue("report", report_id, "a-unknown")
     with pytest.raises(InputError, match="SHA-256"):
@@ -493,6 +498,31 @@ def test_listing_bounds_the_journal_bytes_it_reads(store, assessed):
     assert bounded.error is None
 
 
+def test_listing_counts_attempts_from_the_checkpoint_beyond_the_row_budget(
+    store, assessed, monkeypatch
+):
+    exact = ViewerService(store).runs().runs[0]
+    assert exact.finished == exact.attempts >= 1
+    assert exact.counted_through is None
+    monkeypatch.setattr(viewer, "MAX_ROW_JOURNAL_BYTES", 2048)
+    row = ViewerService(store).runs().runs[0]
+    assert row.truncated is True
+    assert row.durable_sequence is None
+    assert (row.attempts, row.finished, row.mode) == (exact.attempts, exact.finished, exact.mode)
+    assert exact.durable_sequence is not None
+    assert row.observed_events is not None
+    assert row.observed_events < (row.counted_through or 0) <= exact.durable_sequence
+    checkpoint = store.root / "runs" / assessed.run_id / "checkpoint.json"
+    original = checkpoint.read_bytes()
+    checkpoint.write_bytes(original.replace(assessed.run_id.encode(), b"f" * 32))
+    assert ViewerService(store).runs().runs[0].error == "integrity_error"
+    checkpoint.unlink()
+    fallback = ViewerService(store).runs().runs[0]
+    assert fallback.error is None
+    assert fallback.counted_through is None
+    assert fallback.truncated is True
+
+
 def test_detail_routes_bound_the_journal_bytes_they_read(store, assessed):
     service = ViewerService(store)
     attempt_id = service.progress(assessed.run_id).attempts[0].attempt_id
@@ -537,6 +567,29 @@ def test_listing_charges_every_row_for_the_prefix_bytes_it_read(
     assert sum(read) <= 100
     assert all(row.truncated for row in listing.runs)
     assert all(row.observed_events == 0 for row in listing.runs)
+
+
+@pytest.mark.integration
+def test_listing_never_reads_with_a_negative_allowance_once_the_budget_is_spent(
+    store, graded_benchmark, monkeypatch
+):
+    experiment = create_experiment(store, graded_benchmark)
+    first = run_experiment(store, experiment, options=RunOptions(mode="offline-fixture"))
+    second = run_experiment(store, experiment, options=RunOptions(mode="offline-fixture"))
+    original = journals.read_prefix
+    limits = []
+
+    def spy(path, *, limit):
+        limits.append(limit)
+        return original(path, limit=limit)
+
+    monkeypatch.setattr(journals, "read_prefix", spy)
+    monkeypatch.setattr(viewer, "MAX_ROW_JOURNAL_BYTES", 2048)
+    listing = ViewerService(store, max_request_journal_bytes=2100).runs(limit=2)
+    assert {row.run_id for row in listing.runs} == {first.run_id, second.run_id}
+    assert limits == [2048, 0]
+    spent = listing.runs[1]
+    assert (spent.error, spent.truncated, spent.observed_events) == (None, True, 0)
 
 
 def test_listing_and_detail_routes_agree_on_the_run_metadata_limit(store, assessed):
@@ -651,3 +704,139 @@ def test_alias_index_is_served_as_human_labels_for_immutable_ids(store, assessed
     assert all(re.fullmatch(r"[0-9a-f]{64}", identifier) for identifier in labels)
     assert assessed.run_id not in labels
     assert ViewerService(ObjectStore(store.root / "empty")).labels().labels == {}
+
+
+@pytest.mark.integration
+def test_case_route_serves_the_frozen_case_as_data(store, graded_benchmark, tmp_path):
+    benchmark, case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    create_experiment(store, benchmark)
+    service = ViewerService(store)
+    view = service.case(case_id)
+    assert view.case_id == case_id
+    assert view.title and view.initial_prompt
+    rubrics = {item.criterion_id: item for item in view.rubrics}
+    assert rubrics["quality"].origin == "case"
+    assert rubrics["code-quality"].origin == "default"
+    assert rubrics["codebase-consistency"].origin == "default"
+    assert "test-quality" not in rubrics
+    assert view.disabled_rubrics == ("test-quality",)
+    (deterministic,) = view.deterministic
+    assert deterministic.criterion_id == "greeting"
+    assert deterministic.required is True
+    assert deterministic.description == "Validate punctuation and correct name handling."
+    assert deterministic.command.argv[-1] == "{verifier}/hidden.py"
+    checks = {item.check_id: item for item in view.checks}
+    assert checks["asked"].expect == "yes"
+    assert checks["asked"].only_if is None
+    assert checks["confirmed"].only_if is not None
+    assert (checks["confirmed"].only_if.check_id, checks["confirmed"].only_if.answer) == (
+        "asked",
+        "yes",
+    )
+    (metrics,) = view.metrics
+    assert metrics.metrics_id == "greeting-metrics"
+    assert metrics.command.argv[-1].endswith("measure.py")
+    assert view.budgets.max_turns > 0
+    assert view.repository_id and view.persona_id
+    assert view.baseline_commit
+    assert view.reference_patch is True
+    with pytest.raises(NotFoundError):
+        service.case("0" * 64)
+    with pytest.raises(InputError, match="SHA-256 case ID"):
+        service.case("not-a-case")
+
+
+@pytest.mark.integration
+def test_judge_reasoning_is_served_for_the_current_assessment(store, graded_benchmark, tmp_path):
+    benchmark, _ = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    summary = run_experiment(
+        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+    )
+    (assessment_id,) = assess_run(store, summary.run_id)
+    attempt_id = summary.attempts[0].attempt_id
+    service = ViewerService(store)
+    view = service.reasoning("run", summary.run_id, attempt_id)
+    assert view.status == "ok"
+    assert view.assessment_id == assessment_id
+    rationale = {item.criterion_id: item.rationale for item in view.criteria}
+    assert rationale["quality"] == "Judged quality."
+    assert rationale["code-quality"] == "Judged code quality."
+    assert rationale["codebase-consistency"] == "Judged consistency."
+    assert rationale["greeting"] is None
+    check_rationale = {item.check_id: item.rationale for item in view.checks}
+    assert check_rationale == {
+        "asked": "Asked about punctuation.",
+        "confirmed": "Confirmed before finishing.",
+    }
+    with pytest.raises(NotFoundError, match="no retained attempt"):
+        service.reasoning("run", summary.run_id, "a-unknown")
+
+
+def test_judge_reasoning_is_unavailable_without_a_judge(store, assessed):
+    service = ViewerService(store)
+    attempt_id = assessed.attempts[0].attempt_id
+    view = service.reasoning("run", assessed.run_id, attempt_id)
+    assert view.status == "unavailable"
+    assert view.reason_code == "not_retained"
+    assert view.criteria == ()
+    assert view.checks == ()
+
+
+@pytest.mark.integration
+def test_regraded_judge_reasoning_ignores_the_superseded_assessment(
+    store, graded_benchmark, tmp_path
+):
+    import json
+
+    from dryheave.assessments import regrade_run
+
+    benchmark, case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    summary = run_experiment(
+        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+    )
+    (first_assessment_id,) = assess_run(store, summary.run_id)
+    attempt_id = summary.attempts[0].attempt_id
+
+    (tmp_path / "response.json").write_text(
+        json.dumps(
+            {
+                "judgments": [
+                    {
+                        "criterion_id": "quality",
+                        "outcome": "pass",
+                        "rationale": "Regraded quality.",
+                    },
+                    {
+                        "criterion_id": "code-quality",
+                        "outcome": "pass",
+                        "rationale": "Regraded code quality.",
+                    },
+                    {
+                        "criterion_id": "codebase-consistency",
+                        "outcome": "pass",
+                        "rationale": "Regraded consistency.",
+                    },
+                ],
+                "checks": [
+                    {"check_id": "asked", "answer": "yes", "rationale": "Regraded: asked."},
+                    {
+                        "check_id": "confirmed",
+                        "answer": "yes",
+                        "rationale": "Regraded: confirmed.",
+                    },
+                ],
+            }
+        )
+    )
+    _, (second_assessment_id,) = regrade_run(store, summary.run_id, case=case_id)
+    assert second_assessment_id != first_assessment_id
+
+    service = ViewerService(store)
+    view = service.reasoning("run", summary.run_id, attempt_id)
+    assert view.status == "ok"
+    assert view.assessment_id == second_assessment_id
+    rationale = {item.criterion_id: item.rationale for item in view.criteria}
+    assert rationale["quality"] == "Regraded quality."
+    check_rationale = {item.check_id: item.rationale for item in view.checks}
+    assert check_rationale["asked"] == "Regraded: asked."
+    assert check_rationale["confirmed"] == "Regraded: confirmed."

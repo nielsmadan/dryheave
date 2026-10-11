@@ -23,6 +23,17 @@ class RunOptions(StrictModel):
     transport: str | None = None
 
 
+MAX_OWNED_PER_EVENT = 1024
+
+
+class OwnedProcesses(StrictModel):
+    identities: tuple[ProcessIdentity, ...] = Field(min_length=1, max_length=MAX_OWNED_PER_EVENT)
+
+
+class AttemptCheckpoint(StrictModel):
+    attempts: dict[Name, TrialStage]
+
+
 class AttemptState(StrictModel):
     attempt_id: Name
     trial_id: Name

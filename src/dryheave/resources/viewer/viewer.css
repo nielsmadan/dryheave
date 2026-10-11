@@ -8,6 +8,7 @@
   --accent: light-dark(#1a4fa0, #8fb6ff);
   --warn: light-dark(#7a4a00, #ffcc7a);
   --bad: light-dark(#8c1f1f, #ff9c9c);
+  --good: light-dark(#1a6b32, #7ee2a0);
   --focus: light-dark(#1a4fa0, #8fb6ff);
 }
 
@@ -369,6 +370,43 @@ button[disabled] {
 
 .scroller {
   overflow-x: auto;
+}
+
+table.topline th {
+  white-space: normal;
+}
+
+table.topline td.number {
+  text-align: right;
+  white-space: nowrap;
+}
+
+table.topline td.check {
+  font-weight: 600;
+  text-align: center;
+}
+
+table.topline td.pass {
+  color: var(--good);
+}
+
+table.topline td.fail {
+  color: var(--bad);
+}
+
+table.topline tr.variant td {
+  border-top: 2px solid var(--line);
+  font-weight: 600;
+}
+
+table.topline td.attempt {
+  font-family: ui-monospace, monospace;
+  padding-left: 1.5rem;
+  white-space: nowrap;
+}
+
+table.topline tr.variant td:first-child {
+  white-space: nowrap;
 }
 
 table {

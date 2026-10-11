@@ -83,7 +83,6 @@ class TrialExecution:
             raise InputError("Run execution options are missing.")
         self.store, self.journal, self.experiment, self.trial = store, journal, experiment, trial
         self.state, self.cancelled, self.options = state, cancelled, journal.options
-        self.known_processes = {(identity.pid, identity.created) for identity in state.owned}
         self.root = journal.attempt_root(state)
         self.workspace = Path(state.workspace)
         self.case = load_frozen_case(store, trial.case_id)
@@ -116,18 +115,14 @@ class TrialExecution:
         self.state = self.state.model_copy(update=changes)
         self.journal.save(self.state)
 
-    def identity(self, identity: ProcessIdentity) -> None:
-        key = (identity.pid, identity.created)
-        if key not in self.known_processes:
-            self.state = self.journal.own(self.state, identity)
-            self.known_processes.add(key)
+    def own(self, identities: tuple[ProcessIdentity, ...]) -> None:
+        self.state = self.journal.own(self.state, identities)
 
     def _transport_event(self, name: str, model: StrictModel | dict[str, JsonValue]) -> None:
         if name == "launch-observed" and isinstance(model, LaunchObservation):
             self.update(launch=model)
         if self.terminal is not None:
-            for identity in self.terminal.owner.snapshot():
-                self.identity(identity)
+            self.terminal.owner.publish(self.own, force=name == "launch-observed")
 
     def _setup(self, inherited: Mapping[str, str]) -> None:
         started = time.monotonic()
@@ -137,10 +132,10 @@ class TrialExecution:
 
         def claim(pid: int) -> None:
             owner.add(psutil.Process(pid))
-            publish()
+            publish(force=True)
 
-        def publish() -> None:
-            owner.publish(self.identity)
+        def publish(*, force: bool = False) -> None:
+            owner.publish(self.own, force=force)
 
         try:
             for command in self.case.setup:
@@ -181,10 +176,11 @@ class TrialExecution:
                     )
         finally:
             self.setup_seconds = time.monotonic() - started
+            owner.flush(self.own)
             self.cleanup = owner.stop(timeout=3, terminal_closed=True).model_copy(
                 update={"logs_drained": True}
             )
-            publish()
+            publish(force=True)
             evidence.record("cleanup", self.cleanup)
             if not self.cleanup.known_writers_stopped:
                 raise InputError("Setup cleanup could not stop every known writer.")
@@ -359,9 +355,11 @@ class TrialExecution:
             deadline=deadline,
             cancelled=self.cancelled,
             inherited=inherited,
-            on_identity=self.identity,
+            on_identities=self.own,
             runtime_root=self.root / "role-runtime" / call_id,
         )
+        if self.terminal is not None:
+            self.terminal.owner.publish(self.own, force=True)
         try:
             call = invoke_controller(self.recipe, request, artifacts, context)
         finally:
@@ -415,8 +413,7 @@ class TrialExecution:
                 self.cleanup,
                 *(call.cleanup for call in self.state.calls if call.cleanup is not None),
             )
-        for identity in self.cleanup.owned:
-            self.identity(identity)
+        self.own(self.cleanup.owned)
         self.journal.evidence(self.state, "cleanup", self.cleanup)
         self.update(stop_reason=self.state.stop_reason or "interrupted")
 

@@ -57,6 +57,25 @@ export function idChip(label, value, names = []) {
   return el("span", { className: "chip", attrs: { title: chipTitle(label, value, names) } }, children);
 }
 
+export function caseLink(value, names = []) {
+  if (!value) {
+    return el("span", { className: "chip unknown", text: "case: unknown" });
+  }
+  const children = [el("span", { className: "chip-label", text: "case" })];
+  if (names.length > 0) {
+    children.push(el("span", { className: "chip-name", text: names.join(", ") }));
+  }
+  children.push(el("code", { className: "chip-id", text: value }));
+  return el(
+    "button",
+    {
+      className: "chip",
+      attrs: { type: "button", "data-case": value, title: chipTitle("case", value, names) },
+    },
+    children,
+  );
+}
+
 export function badge(value, tone = "") {
   return el("span", { className: tone ? `badge ${tone}` : "badge", text: value });
 }

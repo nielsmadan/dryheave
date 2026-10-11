@@ -50,13 +50,14 @@ SECURITY_HEADERS = (
 
 _SOURCE = r"(runs/([0-9a-f]{32})|reports/([0-9a-f]{64}))"
 _ATTEMPT = r"/attempts/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})"
-_DETAIL_ROUTE = re.compile("^/api/" + _SOURCE + _ATTEMPT + r"/(dialogue|patch|evidence)$")
+_DETAIL_ROUTE = re.compile("^/api/" + _SOURCE + _ATTEMPT + r"/(dialogue|patch|evidence|reasoning)$")
 _EVIDENCE_ROUTE = re.compile("^/api/" + _SOURCE + _ATTEMPT + r"/evidence/(.+)$")
 _REPORT_ROUTE = re.compile(r"^/api/reports/([0-9a-f]{64})$")
 _RUN_ROUTE = re.compile(r"^/api/runs/([0-9a-f]{32})$")
 _PROGRESS_ROUTE = re.compile(r"^/api/runs/([0-9a-f]{32})/progress$")
 _CALIBRATIONS_ROUTE = re.compile(r"^/api/runs/([0-9a-f]{32})/calibrations$")
 _CASE_CALIBRATIONS_ROUTE = re.compile(r"^/api/cases/([0-9a-f]{64})/calibrations$")
+_CASE_ROUTE = re.compile(r"^/api/cases/([0-9a-f]{64})$")
 
 type RequestType = socket.socket | tuple[bytes, socket.socket]
 
@@ -373,6 +374,8 @@ class _ViewerHandler(BaseHTTPRequestHandler):
                 after=params.get("after") or None,
                 limit=_optional_integer(params, "limit"),
             )
+        if match := _CASE_ROUTE.fullmatch(path):
+            return service.case(match.group(1))
         if match := _RUN_ROUTE.fullmatch(path):
             return service.run_report(match.group(1))
         if match := _REPORT_ROUTE.fullmatch(path):
@@ -392,6 +395,8 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             return service.dialogue(kind, source, attempt_id)
         if detail == "patch":
             return service.patch(kind, source, attempt_id)
+        if detail == "reasoning":
+            return service.reasoning(kind, source, attempt_id)
         return service.evidence(kind, source, attempt_id)
 
     def _respond(self, status: int, body: bytes, content_type: str = JSON_MIME) -> None:

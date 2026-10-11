@@ -193,7 +193,7 @@ def test_grading_recovery_preserves_reused_process_identity(store):
         with RunStore(store.root).open(run_id) as journal:
             execution = ExecutionJournal(journal)
             state = execution.reserve("trial")
-            state = execution.own(state, stale)
+            state = execution.own(state, (stale,))
             reconcile_grading(execution, state)
             assert journal.events[-1].data["owned"] == []
             assert journal.events[-1].data["known_writers_stopped"] is True

@@ -213,7 +213,7 @@ class CallContext:
     deadline: float
     cancelled: Event
     inherited: Mapping[str, str]
-    on_identity: Callable[[ProcessIdentity], None]
+    on_identities: Callable[[tuple[ProcessIdentity, ...]], None]
     cleanup: CleanupReport | None = None
     runtime_root: Path | None = None
 
@@ -398,10 +398,10 @@ def run_role_command(
 
     def claim(pid: int) -> None:
         owner.add(psutil.Process(pid))
-        publish()
+        publish(force=True)
 
-    def publish() -> None:
-        owner.publish(context.on_identity)
+    def publish(*, force: bool = False) -> None:
+        owner.publish(context.on_identities, force=force)
 
     control = CommandControl(
         deadline=min(
@@ -460,6 +460,7 @@ def run_role_command(
             "command-result", {"returncode": result.returncode, "outcome": result.outcome}
         )
     finally:
+        owner.flush(context.on_identities)
         cleanup = owner.stop(timeout=3, terminal_closed=True)
         context.cleanup = cleanup
         watch.close()
@@ -480,7 +481,7 @@ def run_role_command(
             }
         )
         context.cleanup = cleanup
-        publish()
+        publish(force=True)
         artifacts.record("cleanup", cleanup)
         if not cleanup.known_writers_stopped or watch.error is not None or binding_errors:
             raise InputError(watch.error or "Controller cleanup could not stop every known writer.")

@@ -1,7 +1,10 @@
-import { badge, block, bullets, definitions, el, heading, idChip, note, section, table } from "./dom.mjs";
-import { NO_VARIANT, attemptEligibility } from "./filters.mjs";
+import { badge, block, bullets, caseLink, definitions, el, heading, idChip, note, section, table } from "./dom.mjs";
+import { NO_VARIANT } from "./filters.mjs";
 import {
+  CHECK_MARKS,
+  TOPLINE_LEGEND,
   UNKNOWN,
+  checkLabel,
   describeAudit,
   describeCalibration,
   describeCompletion,
@@ -18,16 +21,24 @@ import {
   attemptRoles,
   contentNotes,
   formatBytes,
+  formatCost,
   formatCount,
+  formatDistribution,
+  formatDuration,
+  formatMetricValue,
   formatMoney,
   formatNumber,
+  formatRate,
   formatSeconds,
   formatTimestamp,
+  formatTokens,
+  formatTurns,
   groupDefinitions,
   groupLabel,
   labelNames,
   labelledId,
   priceBasis,
+  reasoningMap,
   roleTotals,
   shortId,
   tokenLines,
@@ -190,6 +201,281 @@ export function overview(report, labels) {
   return children;
 }
 
+function sortCaseId(left, right) {
+  if (left[0] !== right[0]) {
+    return left[0] < right[0] ? -1 : 1;
+  }
+  return left[1] < right[1] ? -1 : left[1] > right[1] ? 1 : 0;
+}
+
+function unionCaseKeys(groups, name, idField) {
+  const keys = new Map();
+  for (const group of groups) {
+    for (const item of group[name] ?? []) {
+      keys.set(JSON.stringify([item.case_id, item[idField]]), [item.case_id, item[idField]]);
+    }
+  }
+  return [...keys.values()].sort(sortCaseId);
+}
+
+function findByCaseAndId(items, caseId, id, idField) {
+  return (items ?? []).find((item) => item.case_id === caseId && item[idField] === id) ?? null;
+}
+
+function resultsSummaryTable(groups) {
+  const whole = (value) => formatNumber(value, 0);
+  const money = (value) => formatNumber(value, 4);
+  const currencySuffix = (group, dist) => {
+    if (!dist || dist.count === 0) {
+      return "";
+    }
+    const currencies = group.price_basis?.currencies ?? [];
+    return currencies.length === 0 ? "" : ` ${currencies.join("/")}`;
+  };
+  const moneyCell = (selector) => (group) => {
+    const dist = selector(group);
+    return `${formatDistribution(dist, money)}${currencySuffix(group, dist)}`;
+  };
+  const RETAINED = "all retained attempts, retries included";
+  const ELIGIBLE = "eligible attempts only";
+  const measures = [
+    [
+      `Cost (API-equivalent estimate) total (${RETAINED})`,
+      moneyCell((group) => group.costs),
+    ],
+    [
+      `Cost by role: subject (API-equivalent estimate, ${RETAINED})`,
+      moneyCell((group) => group.cost_by_role?.subject),
+    ],
+    [
+      `Cost by role: simulator (API-equivalent estimate, ${RETAINED})`,
+      moneyCell((group) => group.cost_by_role?.simulator),
+    ],
+    [
+      `Cost by role: judge (API-equivalent estimate, ${RETAINED})`,
+      moneyCell((group) => group.cost_by_role?.judge),
+    ],
+    [
+      `Price basis (${RETAINED})`,
+      (group) => describePriceBasis(group.price_basis),
+    ],
+    [
+      `Total input tokens (${RETAINED})`,
+      (group) => formatDistribution(group.total_input_tokens, whole),
+    ],
+    [
+      `Cache read tokens (${RETAINED})`,
+      (group) => formatDistribution(group.cache_read_tokens, whole),
+    ],
+    [
+      `Cache write tokens (${RETAINED})`,
+      (group) => formatDistribution(group.cache_write_tokens, whole),
+    ],
+    [`Subject output tokens (${ELIGIBLE})`, (group) => formatDistribution(group.output_tokens, whole)],
+    [`Accepted turns (${ELIGIBLE})`, (group) => formatDistribution(group.accepted_turns, whole)],
+    [`Subject duration (${ELIGIBLE})`, (group) => formatDistribution(group.durations, formatSeconds)],
+    [
+      `Simulator replies, help needed (${ELIGIBLE})`,
+      (group) => formatDistribution(group.simulator_replies, whole),
+    ],
+  ];
+  return table(
+    "Cost is an API-equivalent estimate from a dated price table, not a provider invoice; "
+      + "each row's label states whether it covers every retained attempt (retries included) "
+      + "or eligible attempts only.",
+    ["Measure", ...groups.map(groupLabel)],
+    measures.map(([label, render]) => [label, ...groups.map((group) => render(group))]),
+  );
+}
+
+function factsDisclosedText(summary) {
+  if (!summary) {
+    return "not measured";
+  }
+  const facts = summary.facts ?? [];
+  const suffix = summary.unmeasured ? ` (${summary.unmeasured} attempt(s) not measured)` : "";
+  if (facts.length === 0) {
+    return `none disclosed${suffix}`;
+  }
+  return `${facts.map((item) => `${item.fact_id} (${item.kind} ×${item.count})`).join(", ")}${suffix}`;
+}
+
+function helpNeededTable(groups) {
+  return table(
+    "Simulator replies and facts disclosed by variant, among eligible attempts.",
+    ["Variant", "Simulator replies", "Facts disclosed"],
+    groups.map((group) => [
+      groupLabel(group),
+      formatDistribution(group.simulator_replies, (value) => formatNumber(value, 0)),
+      factsDisclosedText(group.help_needed),
+    ]),
+  );
+}
+
+function criteriaResultsTable(groups, labels) {
+  const keys = unionCaseKeys(groups, "criteria", "criterion_id");
+  if (keys.length === 0) {
+    return note("No criterion results are retained for any variant.");
+  }
+  return table(
+    "Per-criterion pass rate and mean score by variant, among eligible attempts.",
+    ["Case", "Criterion", ...groups.map(groupLabel)],
+    keys.map(([caseId, criterionId]) => [
+      caseLink(caseId, labelNames(labels, caseId)),
+      criterionId,
+      ...groups.map((group) => {
+        const item = findByCaseAndId(group.criteria, caseId, criterionId, "criterion_id");
+        if (!item) {
+          return "not measured";
+        }
+        return `${formatCount(item.passes)}/${formatCount(item.graded)} pass · mean score ${formatNumber(item.scores.mean, 2)}`;
+      }),
+    ]),
+  );
+}
+
+function checksResultsTable(groups, labels) {
+  const keys = unionCaseKeys(groups, "checks", "check_id");
+  if (keys.length === 0) {
+    return note("No case checks are retained for any variant.");
+  }
+  return table(
+    "Per-check outcomes and agreement across repetitions by variant, among eligible attempts.",
+    ["Case", "Check", ...groups.map(groupLabel)],
+    keys.map(([caseId, checkId]) => [
+      caseLink(caseId, labelNames(labels, caseId)),
+      checkId,
+      ...groups.map((group) => {
+        const item = findByCaseAndId(group.checks, caseId, checkId, "check_id");
+        if (!item) {
+          return "not measured";
+        }
+        return [
+          `pass ${formatCount(item.passes)}`,
+          `fail ${formatCount(item.fails)}`,
+          `n/a ${formatCount(item.not_applicable)}`,
+          `error ${formatCount(item.errors)}`,
+          `agreement ${item.agreement === null ? UNKNOWN : formatRate(item.agreement)}`,
+        ].join(" · ");
+      }),
+    ]),
+  );
+}
+
+function metricsResultsTable(groups, labels) {
+  const keys = unionCaseKeys(groups, "metrics", "metric_id");
+  if (keys.length === 0) {
+    return note("No case metrics are retained for any variant.");
+  }
+  return table(
+    "Per-metric value distribution by variant, among eligible attempts.",
+    ["Case", "Metric", "Unit", ...groups.map(groupLabel)],
+    keys.map(([caseId, metricId]) => {
+      const sample = groups
+        .map((group) => findByCaseAndId(group.metrics, caseId, metricId, "metric_id"))
+        .find(Boolean);
+      return [
+        caseLink(caseId, labelNames(labels, caseId)),
+        sample ? sample.label : metricId,
+        sample?.unit ?? UNKNOWN,
+        ...groups.map((group) => {
+          const item = findByCaseAndId(group.metrics, caseId, metricId, "metric_id");
+          return item ? formatDistribution(item.values) : "not measured";
+        }),
+      ];
+    }),
+  );
+}
+
+function toplineCell(text, className = "") {
+  return el("td", { className, text });
+}
+
+function measureCells(item) {
+  return [
+    formatTurns(item.turns),
+    formatDuration(item.seconds),
+    formatTokens(item.tokens),
+    formatCost(item.cost, item.currency),
+  ].map((text) => toplineCell(text, "number"));
+}
+
+function groupCheckCell(topline, checkId) {
+  const tally = (topline.checks ?? []).find((item) => item.check_id === checkId);
+  if (!tally || tally.answered === 0) {
+    return toplineCell("–");
+  }
+  const tone = tally.passes === tally.answered ? "pass" : tally.passes === 0 ? "fail" : "";
+  return toplineCell(`${tally.passes}/${tally.answered}`, `check ${tone}`.trim());
+}
+
+function attemptCheckCell(checks, checkId) {
+  const outcome = (checks ?? []).find((item) => item.check_id === checkId)?.outcome;
+  return outcome ? toplineCell(CHECK_MARKS[outcome] ?? "?", `check ${outcome}`) : toplineCell("");
+}
+
+function toplineTable(report) {
+  const groups = (report.groups ?? []).filter((group) => group.topline);
+  if (groups.length === 0) {
+    return null;
+  }
+  const checkIds = [
+    ...new Set(groups.flatMap((group) => (group.topline.checks ?? []).map((item) => item.check_id))),
+  ];
+  const head = el(
+    "tr",
+    {},
+    ["Variant / attempt", "Turns", "Time", "Tokens", "Cost", ...checkIds.map(checkLabel)].map(
+      (text) => el("th", { text, attrs: { scope: "col" } }),
+    ),
+  );
+  const rows = groups.flatMap((group) => {
+    const variant = group.variant || NO_VARIANT;
+    const members = (report.attempts ?? []).filter(
+      (attempt) => attempt.topline?.latest && (attempt.variant || NO_VARIANT) === variant,
+    );
+    return [
+      el("tr", { className: "variant" }, [
+        toplineCell(`${variant} · mean of ${group.topline.attempts}`),
+        ...measureCells(group.topline),
+        ...checkIds.map((checkId) => groupCheckCell(group.topline, checkId)),
+      ]),
+      ...members.map((attempt) =>
+        el("tr", {}, [
+          el("td", { className: "attempt", text: shortId(attempt.attempt_id, 10), attrs: { title: attempt.attempt_id } }),
+          ...measureCells(attempt.topline),
+          ...checkIds.map((checkId) => attemptCheckCell(attempt.topline.checks, checkId)),
+        ]),
+      ),
+    ];
+  });
+  return el("div", { className: "scroller" }, [
+    el("table", { className: "topline" }, [
+      el("caption", { text: "Per variant and attempt, agent only." }),
+      el("thead", {}, [head]),
+      el("tbody", {}, rows),
+    ]),
+  ]);
+}
+
+export function resultsView(report, labels) {
+  const groups = report.groups ?? [];
+  if (groups.length === 0) {
+    return [stateCard("empty", "This report has no variant groups to compare.")];
+  }
+  const topline = toplineTable(report);
+  return [
+    topline ? section("Summary", [topline, note(TOPLINE_LEGEND)]) : null,
+    section("Results", [
+      resultsSummaryTable(groups),
+    ]),
+    section("Help needed", [helpNeededTable(groups)]),
+    section("Criteria", [criteriaResultsTable(groups, labels)]),
+    section("Checks", [checksResultsTable(groups, labels)]),
+    section("Metrics", [metricsResultsTable(groups, labels)]),
+  ];
+}
+
 export function attemptsTable(attempts, selectedId) {
   if (attempts.length === 0) {
     return stateCard("empty", "No attempt matches the current filter.");
@@ -216,7 +502,7 @@ export function attemptsTable(attempts, selectedId) {
       attempt.stage,
       attempt.mode ?? UNKNOWN,
       attempt.result?.completion ?? "no assessment",
-      attemptEligibility(attempt),
+      attempt.eligibility ?? UNKNOWN,
       exclusions.length === 0 ? "none" : exclusions.join(", "),
       attempt.raw_evidence,
     ];
@@ -238,14 +524,15 @@ export function attemptsTable(attempts, selectedId) {
   );
 }
 
-function criteriaCard(result) {
+function criteriaCard(result, reasoning) {
   if (!result || result.criteria.length === 0) {
     return section("Criteria", [note("No criterion results are retained.")]);
   }
+  const rationale = reasoningMap(reasoning?.criteria, "criterion_id");
   return section("Criteria", [
     table(
-      "Criterion outcomes with their calibration evidence.",
-      ["Criterion", "Kind", "Required", "Outcome", "Score", "Calibration", "Error"],
+      "Criterion outcomes with their calibration evidence and the judge's reasoning.",
+      ["Criterion", "Kind", "Required", "Outcome", "Score", "Calibration", "Error", "Rationale"],
       result.criteria.map((criterion) => [
         criterion.criterion_id,
         criterion.kind,
@@ -254,6 +541,8 @@ function criteriaCard(result) {
         criterion.score === null ? UNKNOWN : formatNumber(criterion.score, 3),
         describeCalibration(criterion.calibration),
         criterion.error ?? "none",
+        rationale.get(criterion.criterion_id)
+          ?? (criterion.kind === "deterministic" ? "not judged (deterministic)" : "reasoning not included"),
       ]),
     ),
     table(
@@ -272,6 +561,69 @@ function criteriaCard(result) {
         ];
       }),
     ),
+  ]);
+}
+
+function checksCard(result, reasoning) {
+  const checks = result?.checks ?? [];
+  if (checks.length === 0) {
+    return section("Checks", [note("No case checks are retained for this attempt.")]);
+  }
+  const rationale = reasoningMap(reasoning?.checks, "check_id");
+  return section("Checks", [
+    table(
+      "Case-declared check outcomes with the judge's reasoning.",
+      ["Check", "Outcome", "Answer", "Rationale"],
+      checks.map((check) => [
+        check.check_id,
+        check.outcome,
+        check.answer ?? UNKNOWN,
+        rationale.get(check.check_id) ?? "reasoning not included",
+      ]),
+    ),
+  ]);
+}
+
+function metricsCard(result) {
+  const metrics = result?.metrics ?? [];
+  if (metrics.length === 0) {
+    return section("Metrics", [note("No case metrics are retained for this attempt.")]);
+  }
+  return section(
+    "Metrics",
+    metrics.flatMap((item) => [
+      heading(4, item.metrics_id),
+      note(`outcome ${item.outcome}${item.error ? ` · ${item.error}` : ""}`),
+      item.values.length === 0
+        ? note("No metric values recorded.")
+        : table(
+            `Metric values for ${item.metrics_id}.`,
+            ["Metric", "Label", "Value", "Unit", "Better"],
+            item.values.map((value) => [
+              value.metric_id,
+              value.label,
+              formatMetricValue(value.value),
+              value.unit ?? UNKNOWN,
+              value.better ?? UNKNOWN,
+            ]),
+          ),
+    ]),
+  );
+}
+
+function helpNeededCard(result) {
+  const help = result?.help_needed;
+  if (!help) {
+    return section("Help needed", [note("No help-needed accounting is retained for this attempt.")]);
+  }
+  const list = (values) => (values.length === 0 ? "none" : values.join(", "));
+  return section("Help needed", [
+    definitions([
+      ["Simulator replies", formatCount(help.simulator_replies)],
+      ["Facts disclosed", list(help.facts_disclosed)],
+      ["Disclosed proactively", list(help.proactive_facts)],
+      ["Disclosed on request", list(help.on_request_facts)],
+    ]),
   ]);
 }
 
@@ -345,7 +697,7 @@ function rolesCard(attempt) {
               "Observed model",
               "Requested model",
               "Model basis",
-              "Cost",
+              "Cost (API-equivalent estimate)",
               "Cost kind",
               "Price table",
               "Price date",
@@ -510,6 +862,7 @@ function evidenceCard(listing, file) {
 export function attemptDetail(attempt, details, labels) {
   const result = attempt.result;
   const chip = (label, value) => idChip(label, value, labelNames(labels, value));
+  const gradedCaseId = result?.graded_case_id ?? result?.case_id ?? null;
   return [
     section(`Attempt ${attempt.attempt_id}`, [
       el("p", { className: "chips" }, [
@@ -519,7 +872,9 @@ export function attemptDetail(attempt, details, labels) {
         chip("quarantine", attempt.quarantine_id),
         chip("assessment", attempt.assessment_id),
         chip("pairing", attempt.pairing_id),
-        chip("case", result?.case_id),
+        gradedCaseId
+          ? caseLink(gradedCaseId, labelNames(labels, gradedCaseId))
+          : chip("case", null),
         chip("profile", result?.profile_id),
         chip("simulator", result?.simulator_id),
         chip("scoring", result?.scoring_id),
@@ -537,13 +892,21 @@ export function attemptDetail(attempt, details, labels) {
         ["Subject seconds", formatSeconds(result?.subject_seconds)],
         ["Setup seconds", formatSeconds(result?.setup_seconds)],
         ["Previous assessment", shortId(result?.previous_id)],
+        [
+          "Graded case",
+          result?.graded_case_id ? result.graded_case_id : "same as captured case (not regraded)",
+        ],
+        ["Rubric set", result?.rubric_set ?? UNKNOWN],
       ]),
       result && result.limitations.length > 0
         ? el("div", {}, [heading(4, "Assessment limitations"), bullets(result.limitations)])
         : null,
     ]),
     auditCard(result),
-    criteriaCard(result),
+    criteriaCard(result, details.reasoning),
+    checksCard(result, details.reasoning),
+    metricsCard(result),
+    helpNeededCard(result),
     rolesCard(attempt),
     dialogueCard(details.dialogue),
     patchCard(details.patch),
@@ -679,6 +1042,115 @@ export function compareView(comparison, labels) {
     metrics("Before metrics", comparison.before_metrics),
     metrics("After metrics", comparison.after_metrics),
     section("Limitations", [bullets(comparison.limitations)]),
+  ];
+}
+
+export function caseDetail(view, labels) {
+  if (!view) {
+    return [stateCard("empty", "Enter a case ID, or open a case chip, to look it up.")];
+  }
+  const chip = (label, value) => idChip(label, value, labelNames(labels, value));
+  return [
+    section(`Case ${view.title}`, [
+      el("p", { className: "chips" }, [
+        chip("case", view.case_id),
+        chip("repository", view.repository_id),
+        chip("persona", view.persona_id),
+      ]),
+      definitions([
+        ["Baseline commit", view.baseline_commit ?? UNKNOWN],
+        ["Reference patch", view.reference_patch ? "present" : "none"],
+        ["Max turns", formatCount(view.budgets.max_turns)],
+        ["Subject seconds", formatSeconds(view.budgets.subject_seconds)],
+        ["Setup seconds", formatSeconds(view.budgets.setup_seconds)],
+        [
+          "Tool requirements",
+          view.tool_requirements.length === 0 ? "none" : view.tool_requirements.join(", "),
+        ],
+      ]),
+      heading(4, "Initial prompt"),
+      block(view.initial_prompt),
+    ]),
+    section(
+      "Facts",
+      view.facts.length === 0
+        ? [note("No allowed facts are recorded for this case.")]
+        : [
+            table(
+              "Facts the subject may be given, and how they may be disclosed.",
+              ["Fact", "Disclosure", "Text"],
+              view.facts.map((fact) => [fact.fact_id, fact.disclosure, fact.text]),
+            ),
+          ],
+    ),
+    section("Rubrics", [
+      view.disabled_rubrics.length === 0
+        ? note("No default rubrics are disabled for this case.")
+        : note(`Disabled default rubrics: ${view.disabled_rubrics.join(", ")}.`),
+      view.rubrics.length === 0
+        ? note("No rubric criteria are retained for this case.")
+        : table(
+            "Effective judge rubrics, marking case-authored, default and overridden criteria.",
+            ["Criterion", "Origin", "Required", "Rubric"],
+            view.rubrics.map((item) => [
+              item.criterion_id,
+              item.origin,
+              item.required ? "required" : "optional",
+              item.rubric,
+            ]),
+          ),
+    ]),
+    section(
+      "Deterministic criteria",
+      view.deterministic.length === 0
+        ? [note("No deterministic (hidden-verifier) criteria are retained for this case.")]
+        : [
+            table(
+              "Hidden-verifier criteria, by description, required flag and command argv; "
+                + "the hidden entrypoint's content is never shown.",
+              ["Criterion", "Required", "Command", "Description"],
+              view.deterministic.map((item) => [
+                item.criterion_id,
+                item.required ? "required" : "optional",
+                item.command.argv.join(" "),
+                item.description,
+              ]),
+            ),
+          ],
+    ),
+    section(
+      "Checks",
+      view.checks.length === 0
+        ? [note("No case-declared checks are retained.")]
+        : [
+            table(
+              "Case-declared yes/no checks the judge answers from the transcript and files.",
+              ["Check", "Expect", "Only if", "Question"],
+              view.checks.map((item) => [
+                item.check_id,
+                item.expect,
+                item.only_if ? `${item.only_if.check_id} = ${item.only_if.answer}` : "none",
+                item.question,
+              ]),
+            ),
+          ],
+    ),
+    section(
+      "Metrics commands",
+      view.metrics.length === 0
+        ? [note("No case metrics commands are retained.")]
+        : [
+            table(
+              "Case-supplied metrics commands run against the final workspace.",
+              ["Metrics", "Description", "Command"],
+              view.metrics.map((item) => [
+                item.metrics_id,
+                item.description,
+                item.command.argv.join(" "),
+              ]),
+            ),
+          ],
+    ),
   ];
 }
 

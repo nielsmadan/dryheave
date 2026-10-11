@@ -30,7 +30,44 @@ description: Curate Dryheave case and persona JSON, freeze historical repositori
    there. Keep imports/setup outside that wrapper. Missing runtime, syntax/import
    errors or absent markers must remain errors. A rubric criterion uses
    `kind: "judge"`, `criterion_id`, `required` and a substantive `rubric`.
-5. Run `dryheave --store STORE case validate case.json --json`, then
+5. Add optional `checks` for binary journey/end-state outcomes a rubric score
+   does not capture: each needs a unique `check_id`, a yes/no `question`
+   (judged from the final files plus a transcript of the subject's turns and
+   tool actions; each action carries at most the first 600 characters of its
+   input, and over the judge's input bound actions from the middle, then all
+   entries, are dropped), `expect` (`"yes"` or `"no"`), and an optional
+   `only_if` naming an earlier check's `check_id` and `answer` so a later check
+   only applies when that answer was given (any other answer, including
+   `unclear` or none, reports `not_applicable`). The judge receives only each check's `check_id` and
+   `question`, never its `expect` or `only_if`. A case with checks (or judge
+   criteria) needs a judge: `bench` refuses to run one without
+   `--judge MODEL[@EFFORT]`.
+   Add `metrics` entries (`MetricsCommand`, each with a unique `metrics_id`)
+   to measure things a script can count instead of judging them, e.g. a test
+   run or a line count. Give each a substantive `description`, `entrypoint` mapped in
+   `hidden_files` like a verifier, and `command.argv` containing the exact
+   element `{verifier}/ENTRYPOINT`. The frozen command runs in a copy of the
+   captured final files (paths the capture policy excludes are absent) with the
+   case's declared environment references, `HOME`, `PATH`,
+   `DRYHEAVE_BASELINE_DIR` (a read-only copy of the baseline, for diffing) and
+   `DRYHEAVE_METRICS_OUTPUT` (a file path) in its environment. The script writes exactly one JSON
+   object to the file at `$DRYHEAVE_METRICS_OUTPUT`:
+   `{"metrics": [{"metric_id": "tests_passed", "label": "Tests passed",
+   "value": 12, "unit": "tests", "better": "higher"}, ...]}` — at most 64
+   entries, labels of at most 200 characters, string values of at most 500,
+   metric IDs unique across all of the case's metrics commands; `value` is a number, boolean or string, `unit` and `better`
+   (`"higher"`/`"lower"`/omitted) are optional. stdout/stderr are free-form
+   logs only. A non-zero exit, timeout, invalid JSON or a contract violation
+   is recorded as a metrics error and never crashes the assessment, so a
+   failing build can still report `build_succeeded: false` deliberately
+   rather than erroring.
+   Three default rubrics (`code-quality`, `codebase-consistency`,
+   `test-quality`) grade every case once it has a judge, with no entry needed.
+   Override one's text for this case by adding a `RubricCriterion` with the
+   same `criterion_id`; this case's `required` then applies instead of the
+   default. Drop one entirely by listing its id in `disabled_rubrics` (only
+   those three ids are accepted there).
+6. Run `dryheave --store STORE case validate case.json --json`, then
    `case freeze case.json --json` and `case inspect CASE_ID --json`. Save immutable
    IDs. Run `case calibrate CASE_ID --json` before subject spend. Inspect
    `data.calibration.status` and save `data.id` as CALIBRATION_ID. `demonstrated`
@@ -41,7 +78,7 @@ description: Curate Dryheave case and persona JSON, freeze historical repositori
    `files` map to inspect outputs. Fix errors or ineffective criteria, freeze a
    new case and calibrate again. Verifier copies do not execute `case.setup`:
    required tools and declared environment references must already be available.
-6. Copy the public examples with `dryheave example write --target FRESH_DIRECTORY`.
+7. Copy the public examples with `dryheave example write --target FRESH_DIRECTORY`.
    Follow its `real-workflow.md` to select actual config, instructions and skill
    resources explicitly, then `profile capture NAME --spec capture.json --json`.
    Inspect frozen hashes and preflight issues. Derive one actual behavior change;
@@ -62,6 +99,18 @@ separate reference patch for calibration. Capture the baseline instructions and
 derive a variant replacing only their clarification policy, then freeze both
 profile IDs into one experiment.
 
+For a task that adds a parser function and its tests, keep the default
+`code-quality` and `test-quality` rubrics, override `codebase-consistency`
+with this project's specific naming/layout conventions, and add two checks:
+`error-path-handled` ("Does the final code handle a malformed input without
+raising?", expect `"yes"`) and `tests-cover-error-path` (`only_if`
+`error-path-handled` = `"yes"`, "Do the added tests exercise the malformed
+input?", expect `"yes"`). Add one `metrics` entry whose hidden script runs the
+project's test command and reports `tests_passed`/`tests_failed` counts parsed
+from its output, with `better: "higher"`/`"lower"` set accordingly; freeze and
+calibrate, then run `bench CASE --variant base=MODEL --judge MODEL` so the
+checks and rubrics are graded.
+
 ## Troubleshooting
 
 - Validation reports unresolved intent/facts/persona: review the actual evidence;
@@ -71,3 +120,12 @@ profile IDs into one experiment.
   repository as an implicit authoring step.
 - Preflight reports ambient sources or auth/permission uncertainty: retain those
   fidelity limits. `--strict` refuses them; it cannot prove full host isolation.
+- Validation rejects a duplicate check id, an `only_if` referencing a check not
+  declared earlier, or a `disabled_rubrics` id outside `code-quality`,
+  `codebase-consistency`, `test-quality`: fix the declaration rather than
+  removing the check or rubric. A metrics command that does not invoke its
+  `entrypoint` with `{verifier}/ENTRYPOINT`, or whose description reads as a
+  placeholder, is rejected the same way.
+- `bench` refuses a case with checks or judge criteria when no `--judge` was
+  given: pass `--judge MODEL[@EFFORT]` rather than dropping the checks, so
+  they are not silently skipped.

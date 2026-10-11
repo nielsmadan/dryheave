@@ -25,6 +25,7 @@ from dryheave.bench import (
     summarize,
 )
 from dryheave.commands import CommandRegistry
+from dryheave.drivers.base import TransportError
 from dryheave.errors import InputError
 from dryheave.experiments import create_experiment
 from dryheave.journals import RunStore
@@ -65,14 +66,20 @@ def _launch_checks(
     check_removals(manifest, tuple(map(parse_variant, args.variant)))
     for name, profile in profiles.items():
         _progress(f"launch check {name}: starting the subject without a prompt")
-        observation = launch_check(
-            store,
-            profile,
-            root,
-            runtime_root=paths[0],
-            transport=paths[1],
-            environment=os.environ,
-        )
+        try:
+            observation = launch_check(
+                store,
+                profile,
+                root,
+                runtime_root=paths[0],
+                transport=paths[1],
+                environment=os.environ,
+            )
+        except TransportError as error:
+            raise InputError(
+                f"Variant {name} launch check lost its terminal transport ({error}). "
+                f"Nothing was sent to a model. Evidence: {root}"
+            ) from error
         if observation.state != "ready":
             raise InputError(
                 f"Variant {name} did not reach an empty prompt ({observation.state}: "
@@ -152,7 +159,7 @@ def _bench(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]
             report_run(store, run_id),
             {state.attempt_id: state.stop_reason for state in status.attempts},
         ),
-        "next": f"dryheave view --open   # or: dryheave report {run_id}",
+        "next": (f"dryheave view --open   # or: dryheave report {run_id} --html report.html"),
     }
 
 

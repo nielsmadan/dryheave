@@ -143,3 +143,57 @@ def test_a_protected_child_limits_visibility_without_failing_the_scan(monkeypatc
     assert "process_visibility_denied" in report.errors
     assert {item.pid for item in report.owned} == {42, 43}
     assert visible.signals == ["terminate"]
+
+
+def test_publish_batches_new_identities_and_throttles_unforced_polls(monkeypatch):
+    monkeypatch.setattr(psutil, "wait_procs", lambda processes, timeout: (processes, []))
+    owner = ProcessOwner(publish_interval=3600)
+    batches = []
+    owner.add(FakeProcess(pid=42))
+    owner.add(FakeProcess(pid=43))
+    owner.publish(batches.append)
+    owner.add(FakeProcess(pid=44))
+    owner.publish(batches.append)
+    assert [[item.pid for item in batch] for batch in batches] == [[42, 43]]
+    owner.publish(batches.append, force=True)
+    owner.publish(batches.append, force=True)
+    owner.publish_interval = 0
+    owner.add(FakeProcess(pid=45))
+    owner.publish(batches.append)
+    assert [[item.pid for item in batch] for batch in batches] == [[42, 43], [44], [45]]
+    owner.stop(timeout=0.1, terminal_closed=True)
+
+
+def test_failed_publish_keeps_its_identities_for_the_next_attempt(monkeypatch):
+    monkeypatch.setattr(psutil, "wait_procs", lambda processes, timeout: (processes, []))
+    owner = ProcessOwner()
+    owner.add(FakeProcess(pid=42))
+
+    def fail(_batch):
+        raise OSError("journal unavailable")
+
+    with pytest.raises(OSError):
+        owner.publish(fail)
+    batches = []
+    owner.publish(batches.append)
+    assert [[item.pid for item in batch] for batch in batches] == [[42]]
+    owner.stop(timeout=0.1, terminal_closed=True)
+
+
+def test_failed_flush_is_reported_and_still_lets_stop_signal_the_process(monkeypatch):
+    monkeypatch.setattr(psutil, "wait_procs", lambda processes, timeout: (processes, []))
+    owner = ProcessOwner()
+    process = FakeProcess(pid=42)
+    owner.add(process)
+
+    def fail(_batch):
+        raise LimitError("journal full")
+
+    owner.flush(fail)
+    report = owner.stop(timeout=0.1, terminal_closed=True)
+    assert process.signals == ["terminate"]
+    assert report.known_writers_stopped
+    assert report.errors == ("process_identity_publish_failed",)
+    batches = []
+    owner.publish(batches.append, force=True)
+    assert [[item.pid for item in batch] for batch in batches] == [[42]]

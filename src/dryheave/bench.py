@@ -2,7 +2,7 @@ import re
 import shutil
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -14,6 +14,7 @@ from dryheave.cases import load_frozen_case
 from dryheave.controller_models import ClaudeControllerRuntime, ControllerRecipe, RoleBudget
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.auth import RuntimeBindings
+from dryheave.drivers.base import TransportError
 from dryheave.drivers.dialogs import composer, composer_matches
 from dryheave.drivers.log_source import NativeLogSource, native_log_root
 from dryheave.drivers.models import DriverLimits, Observation, Screen
@@ -28,13 +29,14 @@ from dryheave.pricing import builtin_price_table
 from dryheave.profile_launch import LaunchOptions, launch_environment, materialize_profile
 from dryheave.profile_models import CaptureSpec, LiveConfigManifest, NativeRecipe
 from dryheave.profiles import capture_profile
-from dryheave.report_models import AttemptReport, RunReport
+from dryheave.report_models import AttemptReport, GroupMetrics, RunReport
 from dryheave.runner import run_status
 from dryheave.skills import SKILL_NAMES
 from dryheave.storage import ObjectStore
 
 AUTH_REFERENCE = "CLAUDE_CODE_OAUTH_TOKEN"
 PROBE = "dryheave launch check"
+LAUNCH_CHECK_SECONDS = 180.0
 ROLE = re.compile(r"^([^@,\s]+)(?:@([a-z]+))?$")
 VARIANT = re.compile(r"^([a-zA-Z0-9][a-zA-Z0-9_.-]{0,127})=([^,]+)((?:,[^,]+)*)$")
 SIMULATOR_CALL_SECONDS = 180
@@ -164,8 +166,9 @@ def capture_variants(
 def check_case(store: ObjectStore, reference: str, *, judged: bool) -> str:
     case_id = store.resolve(reference)
     case = load_frozen_case(store, case_id)
-    if not judged and any(criterion.kind == "judge" for criterion in case.criteria):
-        raise InputError("This case has judge criteria; pass --judge MODEL[@EFFORT].")
+    needs_judge = case.checks or any(criterion.kind == "judge" for criterion in case.criteria)
+    if not judged and needs_judge:
+        raise InputError("This case has checks or judge criteria; pass --judge MODEL[@EFFORT].")
     return case_id
 
 
@@ -203,7 +206,7 @@ def launch_check(
         raise InputError(
             "Variant profile is not launchable: " + ", ".join(item.code for item in plan.issues)
         )
-    limits = DriverLimits(duration_seconds=60.0)
+    limits = DriverLimits.for_duration(LAUNCH_CHECK_SECONDS)
     artifacts = ArtifactWriter(workspace.parent / "driver", limits.max_artifact_bytes)
     terminal = TuiTestTerminal(transport, runtime_root / uuid4().hex[:10], limits=limits)
     source = NativeLogSource(
@@ -219,14 +222,25 @@ def launch_check(
         observation = session.start(plan, launch_environment(plan, environment))
         if observation.state != "ready":
             return observation
-        terminal.paste(PROBE)
-        if not _settles(terminal, lambda screen: composer_matches(plan.agent, screen, PROBE)):
-            return _unsupported(terminal, "Typed text did not appear in the input box as typed.")
-        for _ in range(4):
-            terminal.clear_line()
-            if _settles(terminal, lambda screen: composer(plan.agent, screen) == ""):
-                return observation
-        return _unsupported(terminal, "The input box could not be cleared after typing.")
+        try:
+            return _probe(terminal, plan.agent, observation)
+        except TransportError as error:
+            return Observation(
+                state="unsupported",
+                reason=f"The typing probe lost its terminal acknowledgement: {error}",
+                text=observation.text,
+            )
+
+
+def _probe(terminal: TuiTestTerminal, agent: AgentKind, ready: Observation) -> Observation:
+    terminal.paste(PROBE)
+    if not _settles(terminal, lambda screen: composer_matches(agent, screen, PROBE)):
+        return _unsupported(terminal, "Typed text did not appear in the input box as typed.")
+    for _ in range(4):
+        terminal.clear_line()
+        if _settles(terminal, lambda screen: composer(agent, screen) == ""):
+            return ready
+    return _unsupported(terminal, "The input box could not be cleared after typing.")
 
 
 def _settles(terminal: TuiTestTerminal, condition: Callable[[Screen], bool]) -> bool:
@@ -272,9 +286,60 @@ def resumable_run(store: ObjectStore, experiment_id: str) -> PreviousRun | None:
     )
 
 
+def _price_versions(attempts: Sequence[AttemptReport]) -> list[str]:
+    return sorted(
+        {
+            record.price_version
+            for attempt in attempts
+            for role in (attempt.roles or (attempt.result.roles if attempt.result else ()))
+            for record in role.records
+            if record.price_version
+        }
+    )
+
+
+def _help_needed_summary(attempts: Sequence[AttemptReport]) -> dict[str, JsonValue]:
+    disclosed: Counter[str] = Counter()
+    proactive: Counter[str] = Counter()
+    on_request: Counter[str] = Counter()
+    measured = 0
+    latest = {attempt.trial_id: attempt for attempt in attempts}
+    for attempt in latest.values():
+        result = attempt.result
+        if result is None or not result.eligible or attempt.current_exclusions:
+            continue
+        help_needed = result.help_needed
+        if help_needed is None:
+            continue
+        measured += 1
+        disclosed.update(help_needed.facts_disclosed)
+        proactive.update(help_needed.proactive_facts)
+        on_request.update(help_needed.on_request_facts)
+    return {
+        "measured_attempts": measured,
+        "facts_disclosed": dict(disclosed),
+        "disclosed_proactively": dict(proactive),
+        "disclosed_on_request": dict(on_request),
+    }
+
+
+def _group_measures(
+    group: GroupMetrics | None, attempts: Sequence[AttemptReport]
+) -> dict[str, JsonValue]:
+    if group is None:
+        return {}
+    payload = group.model_dump(mode="json", exclude={"variant"})
+    payload["price_versions"] = _price_versions(attempts)
+    payload["help_needed"] = _help_needed_summary(attempts)
+    return payload
+
+
 def summarize(report: RunReport, stop_reasons: Mapping[str, str | None]) -> dict[str, JsonValue]:
     def attempts(name: str) -> list[AttemptReport]:
         return [attempt for attempt in report.attempts if (attempt.variant or "unknown") == name]
+
+    def group(name: str) -> GroupMetrics | None:
+        return next((item for item in report.groups if item.variant == name), None)
 
     def outcomes(name: str) -> dict[str, JsonValue]:
         results = [
@@ -302,6 +367,7 @@ def summarize(report: RunReport, stop_reasons: Mapping[str, str | None]) -> dict
                 for attempt in attempts(name)
             ],
             "criteria": outcomes(name),
+            "measures": _group_measures(group(name), attempts(name)),
         }
         for name in sorted({attempt.variant or "unknown" for attempt in report.attempts})
     }

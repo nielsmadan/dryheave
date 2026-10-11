@@ -250,8 +250,8 @@ def _judge(
     call = RoleCall(call_id=call_id, role="judge", status="intent")
     execution.evidence(state, "judge-intent", call)
 
-    def own(identity: ProcessIdentity) -> None:
-        execution.own(execution.attempts[state.attempt_id], identity)
+    def own(identities: tuple[ProcessIdentity, ...]) -> None:
+        execution.own(execution.attempts[state.attempt_id], identities)
 
     context = CallContext(
         call_id=call_id,
@@ -259,7 +259,7 @@ def _judge(
         deadline=time.monotonic() + min(recipe.budget.call_seconds, recipe.budget.total_seconds),
         cancelled=cancelled,
         inherited=os.environ,
-        on_identity=own,
+        on_identities=own,
         runtime_root=execution.attempt_root(state) / "role-runtime" / call_id,
     )
     workspace = str(Path(state.workspace))
@@ -303,8 +303,8 @@ def _grade(
     root = execution.assessment_root(state) / uuid4().hex
     hidden = store.read_blobs(hidden_case_id or inputs.capture.case_id)
 
-    def own(identity: ProcessIdentity) -> None:
-        execution.own(execution.attempts[state.attempt_id], identity)
+    def own(identities: tuple[ProcessIdentity, ...]) -> None:
+        execution.own(execution.attempts[state.attempt_id], identities)
 
     context = GradingContext(
         store,

@@ -353,6 +353,102 @@ prove that a curator's program tests the intended behavior. Criteria remain
 explicitly uncalibrated in immutable case objects. Standalone calibration records
 and later assessment records establish observed calibration without mutating inputs.
 
+A case can also declare `checks` and `metrics` commands, both optional; checks
+are graded only when the experiment has a judge:
+
+```json
+{
+  "checks": [
+    {
+      "check_id": "error-path-handled",
+      "question": "Does the final code handle a malformed input without raising?",
+      "expect": "yes"
+    },
+    {
+      "check_id": "tests-cover-error-path",
+      "question": "Do the added tests exercise the malformed input?",
+      "expect": "yes",
+      "only_if": {"check_id": "error-path-handled", "answer": "yes"}
+    }
+  ],
+  "metrics": [
+    {
+      "metrics_id": "test-run",
+      "description": "Runs the project's test command and parses pass/fail counts.",
+      "entrypoint": "metrics.py",
+      "command": {"argv": ["python3", "{verifier}/metrics.py"], "timeout_seconds": 1800}
+    }
+  ],
+  "disabled_rubrics": ["test-quality"]
+}
+```
+
+Each `CaseCheck` needs a unique `check_id` and a substantive yes/no `question`
+(10-4000 characters); `expect` is the answer that counts as a pass. An
+optional `only_if` names an earlier check's `check_id` and expected `answer`;
+validation rejects a duplicate ID or an `only_if` that references a check not
+already declared earlier in the list. The judge is sent only `check_id` and
+`question` for every check — never `expect` or `only_if` — and judges the
+journey from a transcript of the subject's turns and tool actions plus the
+end state from the final files. The transcript carries every user and
+assistant message, but each tool action only as its tool name, target path
+and at most the first 600 characters of its input, so intermediate file
+contents cannot be reconstructed from it. When the projection exceeds the
+judge's input bound, actions are dropped from the middle of the session; if
+the messages alone still do not fit, the transcript is sent empty. Either way
+`transcript_truncated` is true. Its answer maps to a `CheckResult`: when
+`only_if` is declared and the earlier check was `not_applicable` or answered
+anything other than the named `answer` (including `unclear` or no answer),
+the outcome is `not_applicable`; otherwise `answer == expect` is `pass`,
+`unclear` is `error`, and anything else is `fail`.
+
+A `MetricsCommand` measures things a script can count instead of judging
+them, e.g. a test run, a coverage diff or a line count. `metrics_id` must be
+unique among metrics entries, `description` must be substantive (not a
+placeholder), `entrypoint` is mapped in `hidden_files` exactly like a
+deterministic verifier's, and `command.argv` must contain the exact element
+`{verifier}/ENTRYPOINT`. The frozen command runs once, on its own copy of the
+captured final files with a separate read-only baseline copy. Paths the case's
+`capture_policy` excludes are absent from that copy, so a script that needs
+them must restore them from the baseline itself. It never runs through
+`check_copy`/`execute_check`'s fixed verifier environment: it receives `HOME`,
+`PATH`, `DRYHEAVE_BASELINE_DIR` (the baseline copy's path, for diffing) and
+`DRYHEAVE_METRICS_OUTPUT` (a file path) alongside the case's own declared
+environment references. The script must write exactly one JSON object to the
+file at `$DRYHEAVE_METRICS_OUTPUT`:
+
+```json
+{"metrics": [
+  {"metric_id": "tests_passed", "label": "Tests passed", "value": 12, "unit": "tests", "better": "higher"},
+  {"metric_id": "build_succeeded", "label": "Build succeeded", "value": true}
+]}
+```
+
+At most 64 entries, each with a unique `metric_id`, a `label` of at most 200
+characters, a `value` that is a number, boolean or string (strings at most
+500 characters), and optional `unit` and `better` (`"higher"`, `"lower"` or
+omitted). Reports summarise metrics per case and `metric_id` across all of
+the case's metrics commands, taking the label and unit from the first value
+seen, so a `metric_id` must also be unique across those commands and keep the
+same meaning, label and unit. stdout/stderr are kept as free-form evidence,
+not parsed. A
+non-zero exit, timeout, invalid JSON or any contract violation produces a
+`MetricsResult` with `outcome: "error"` and a reason instead of raising, so a
+script can deliberately report a failed build as a metric value rather than
+erroring, and a crash never aborts the rest of the assessment. Metrics never
+affect `completion` or eligibility.
+
+Three default rubrics — `code-quality`, `codebase-consistency` and
+`test-quality` (`rubrics.DEFAULT_RUBRIC_SET`, currently `default-v1`) — are
+applied to every case automatically, but only when the experiment has a
+judge; without one, no default criteria are added. A case overrides one by
+declaring a `RubricCriterion` whose `criterion_id` matches a default id: its
+`rubric` text replaces the default's, and the case's own `required` applies
+instead of the default's. `disabled_rubrics` lists default ids to drop
+entirely for this case; validation rejects any id there that is not one of
+the three default ids. `Assessment.rubric_set` records which default version
+graded a given attempt.
+
 `calibrations.calibrate_case` uses the neutral `VerifierContext` and shared
 `grading.check_copy`/`execute_check` operations. Each baseline/reference side is an
 independent repository copy. Non-null suite IDs share a copy only within that side,

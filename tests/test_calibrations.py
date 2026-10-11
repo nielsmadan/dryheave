@@ -491,15 +491,15 @@ def test_interrupted_verifier_stops_owned_writers_and_retains_recovery_evidence(
     timers = []
 
     def cancel(context, criterion, side):
-        own = context.on_identity
+        own = context.on_identities
 
-        def cancel_after_launch(identity):
-            own(identity)
+        def cancel_after_launch(identities):
+            own(identities)
             timer = threading.Timer(0.2, context.cancelled.set)
             timers.append(timer)
             timer.start()
 
-        context.on_identity = cancel_after_launch
+        context.on_identities = cancel_after_launch
         return check(context, criterion, side)
 
     monkeypatch.setattr(calibrations, "check_copy", cancel)
@@ -557,7 +557,7 @@ def test_recovery_stops_only_matching_recorded_process_identities(
                 pid=process.pid,
                 created=psutil.Process(process.pid).create_time() + (0 if matching else 1),
             )
-            ownership.own(identity)
+            ownership.own((identity,))
             with store.native_lock():
                 reconcile_calibrations(store)
             if matching:
@@ -612,7 +612,7 @@ def test_unresolved_calibration_recovery_guards_all_native_entrypoints(
         store.root / "calibrations" / ("b" * 32), graded_benchmark.cases[0]
     )
     current = psutil.Process()
-    ownership.own(ProcessIdentity(pid=current.pid, created=current.create_time()))
+    ownership.own((ProcessIdentity(pid=current.pid, created=current.create_time()),))
     process = psutil.Process
 
     def denied(pid=None):
