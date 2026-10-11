@@ -11,3 +11,7 @@ def next_workflow_action(steps: tuple[WorkflowStep, ...], position: int) -> Work
     if position >= len(steps):
         return "complete"
     return "deliver_prompt" if isinstance(steps[position], PromptStep) else "inspect"
+
+
+def dialog_source(steps: tuple[WorkflowStep, ...], end: int) -> PromptStep | None:
+    return next((step for step in reversed(steps[:end]) if isinstance(step, PromptStep)), None)

@@ -3,10 +3,12 @@ import threading
 
 import pytest
 
-from conftest import workflow_benchmark
+from conftest import AskedQuestion, ClaudeQuestionUI, workflow_benchmark
 from dryheave.cli import main
+from dryheave.drivers.models import Screen
 from dryheave.errors import ConflictError, InputError, NotFoundError
 from dryheave.experiments import create_experiment, load_experiment
+from dryheave.fixture_subject import FixtureTerminal
 from dryheave.journals import RunStore
 from dryheave.models import ObjectKind, TrialStage
 from dryheave.runner import load_capture, run_experiment, run_status
@@ -284,6 +286,25 @@ def test_permission_dialog_stops_without_a_simulator_call(store, benchmark):
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "needs_input"
     assert capture.controller_calls == ()
+
+
+@pytest.mark.integration
+def test_a_codex_structured_input_dialog_stops_without_a_simulator_call(
+    store, benchmark, monkeypatch
+):
+    from pathlib import Path
+
+    structured_input = json.loads(Path("tests/fixtures/codex-dialogs.json").read_text())["freeform"]
+    terminals = dialog_fixture(monkeypatch, {benchmark.fixture[0].prompt.strip(): structured_input})
+    result = run_experiment(
+        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert (capture.stop_reason, capture.last_observation.state) == (
+        "needs_input",
+        "structured_input",
+    )
+    assert (capture.controller_calls, terminals[0].keys) == ((), [])
 
 
 @pytest.mark.integration
@@ -1033,3 +1054,299 @@ def test_the_inspections_cap_stops_a_workflow_of_passing_inspect_steps(
     assert workflow_events(capture) == [("inspect", "passed")] * 4
     assert len(list(inspector.glob("request-*.json"))) == 4
     assert capture.workflow.position == 4
+
+
+class DialogFixtureTerminal(FixtureTerminal):
+    def __init__(self, turns, source, agent, *, dialogs, startup=None):
+        super().__init__(turns, source, agent)
+        self.dialogs, self.startup = dialogs, startup
+        self.showing = None
+        self.held = []
+        self.typed = []
+
+    def state(self):
+        if self.startup is not None:
+            return Screen(text=self.startup, exited=None)
+        if isinstance(self.showing, str):
+            return Screen(text=self.showing, exited=None)
+        if self.showing is not None and self.showing.open:
+            return Screen(text=self.showing.render(), exited=None)
+        return super().state()
+
+    def enter(self):
+        super().enter()
+        shown = self.dialogs.get(self.pastes[-1])
+        if shown is not None:
+            batch = self.source.batches.pop()
+            self.source.batches.append(batch[:3])
+            self.held, self.showing = batch[3:], shown
+
+    def press(self, key):
+        super().press(key)
+        if isinstance(self.showing, ClaudeQuestionUI) and self.showing.open:
+            self.showing.press(key)
+            if not self.showing.open:
+                self.source.batches.append(self.held)
+
+    def paste(self, text):
+        if isinstance(self.showing, ClaudeQuestionUI) and self.showing.open:
+            self.typed.append(text)
+            self.showing.type(text)
+            return
+        super().paste(text)
+
+
+SCOPE = AskedQuestion(
+    "Scope",
+    "Which findings should I fix?",
+    (("Everything", "All findings"), ("Critical only", "Just the blockers")),
+)
+AUTH = AskedQuestion("Auth", "Which auth method?", (("OAuth", "Flow"), ("API key", "Static")))
+PERMISSION = "Bash command\n\n  rm -rf build\n\nDo you want to proceed?\n\u276f 1. Yes\n  2. No\n\nEsc to cancel"
+TRUST = (
+    " Accessing workspace:\n\n Quick safety check: Is this a project you created or one you trust?"
+    "\n\n \u276f No, exit\n   Yes, I trust this folder\n\n Enter to confirm \u00b7 Esc to cancel"
+)
+
+
+def dialog_fixture(monkeypatch, dialogs, *, startup=None):
+    terminals = []
+
+    def build(turns, source, agent):
+        terminal = DialogFixtureTerminal(turns, source, agent, dialogs=dialogs, startup=startup)
+        terminals.append(terminal)
+        return terminal
+
+    monkeypatch.setattr("dryheave.runner_attempt.FixtureTerminal", build)
+    return terminals
+
+
+def dialog_reply(*choices, text=""):
+    from dryheave.controller_models import SimulatorDecision
+
+    return SimulatorDecision(
+        action="reply", choices=choices, text=text, reason="Answering as the user would."
+    )
+
+
+def claude_draft(store, draft, *script):
+    from dryheave.controller_models import RoleBudget
+    from dryheave.experiment_models import VariantSpec
+
+    return draft.model_copy(
+        update={
+            "variants": (VariantSpec(name="claude", profile=claude_profile(store)),),
+            "simulator": draft.simulator.model_copy(
+                update={"script": script, "budget": RoleBudget(max_calls=len(script))}
+            ),
+        }
+    )
+
+
+@pytest.mark.integration
+def test_a_prompt_step_dialog_is_answered_and_the_workflow_completes(
+    store, graded_benchmark, tmp_path, monkeypatch
+):
+    from dryheave.cases import InspectStep, PromptStep
+    from dryheave.controller_models import DIALOG_INSTRUCTION, ScriptStep, SimulatorDecision
+    from dryheave.experiment_models import FixtureTurn
+
+    hint = "Fix only the critical findings."
+    draft, _ = workflow_benchmark(
+        store,
+        graded_benchmark,
+        tmp_path,
+        workflow=(
+            PromptStep(step_id="review", prompt="Review the greeting.", answer_hint=hint),
+            InspectStep(step_id="check", criteria=("greeting",)),
+        ),
+    )
+    draft = claude_draft(
+        store,
+        draft.model_copy(
+            update={
+                "fixture": (
+                    *draft.fixture,
+                    FixtureTurn(
+                        prompt="Review the greeting.", assistant="Fixed the critical findings."
+                    ),
+                )
+            }
+        ),
+        *draft.simulator.script,
+        ScriptStep(assistant=SCOPE.question, decision=dialog_reply("Critical only")),
+        ScriptStep(
+            assistant="Fixed the critical findings.",
+            decision=SimulatorDecision(action="stop", reason="Reviewed."),
+        ),
+    )
+    ui = ClaudeQuestionUI((SCOPE,))
+    terminals = dialog_fixture(monkeypatch, {"Review the greeting.": ui})
+    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "workflow_complete"
+    assert workflow_events(capture) == [
+        ("prompt", "sent"),
+        ("dialog", "answered"),
+        ("inspect", "passed"),
+    ]
+    asked = capture.controller_calls[2]
+    answered = capture.workflow.events[1]
+    assert (answered.step_id, answered.turn, answered.call_ids) == ("review", 3, (asked.call_id,))
+    assert (terminals[0].keys, ui.answers) == (["Down", "Enter"], {0: "Critical only"})
+    assert capture.accepted_turns == 3
+    assert [item.text for item in capture.dialogue[-2:]] == [
+        "Review the greeting.",
+        "Fixed the critical findings.",
+    ]
+    blobs = store.read_blobs(result.pending_assessment[0])
+    request = json.loads(blobs[f"evidence/controller/{asked.call_id}/000001-request.json"])
+    assert request["instruction"] == DIALOG_INSTRUCTION
+    assert request["answer_hint"] == hint
+    assert request["dialog"] == {
+        "question": "Which findings should I fix?",
+        "options": ["Everything", "Critical only"],
+        "multi_select": False,
+        "allows_text": True,
+    }
+    assert request["dialogue"][-1] == {"role": "user", "text": "Review the greeting."}
+
+
+@pytest.mark.integration
+def test_dialogs_are_answered_and_counted_without_a_workflow(store, benchmark, monkeypatch):
+    from dryheave.controller_models import ScriptStep
+    from dryheave.runner_models import WorkflowEvent, WorkflowProgress
+
+    prompt = benchmark.fixture[0].prompt.strip()
+    draft = claude_draft(
+        store,
+        benchmark,
+        ScriptStep(assistant=AUTH.question, decision=dialog_reply(text="Use mutual TLS")),
+        *benchmark.simulator.script,
+    )
+    ui = ClaudeQuestionUI((AUTH,))
+    terminals = dialog_fixture(monkeypatch, {prompt: ui})
+    result = run_experiment(
+        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert (capture.stop_reason, capture.accepted_turns) == ("simulator_stop", 2)
+    asked = capture.controller_calls[0]
+    assert capture.workflow == WorkflowProgress(
+        steps=(),
+        position=0,
+        events=(
+            WorkflowEvent(
+                step_id="dialog",
+                kind="dialog",
+                outcome="answered",
+                turn=1,
+                call_ids=(asked.call_id,),
+            ),
+        ),
+    )
+    assert (terminals[0].keys, terminals[0].typed) == (
+        ["Down", "Down", "Enter"],
+        ["Use mutual TLS"],
+    )
+    assert ui.answers == {0: "Use mutual TLS"}
+    request = json.loads(
+        store.read_blob(
+            result.pending_assessment[0], f"evidence/controller/{asked.call_id}/000001-request.json"
+        )
+    )
+    assert "answer_hint" not in request
+    assert request["dialogue"] == [{"role": "user", "text": prompt}]
+
+
+@pytest.mark.integration
+def test_an_invalid_dialog_answer_is_retried_once_then_needs_input(store, benchmark, monkeypatch):
+    from dryheave.controller_models import ScriptStep
+
+    draft = claude_draft(
+        store,
+        benchmark,
+        ScriptStep(assistant=AUTH.question, decision=dialog_reply("Passwords")),
+        ScriptStep(assistant=AUTH.question, decision=dialog_reply("OAuth", "API key")),
+    )
+    ui = ClaudeQuestionUI((AUTH,))
+    terminals = dialog_fixture(monkeypatch, {benchmark.fixture[0].prompt.strip(): ui})
+    result = run_experiment(
+        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "needs_input"
+    assert [(call.status, call.error) for call in capture.controller_calls] == [
+        ("failed", "invalid_dialog_answer"),
+        ("failed", "invalid_dialog_answer"),
+    ]
+    assert (terminals[0].keys, ui.answers, capture.workflow) == ([], {}, None)
+
+
+class DialogBeforeAcceptanceTerminal(FixtureTerminal):
+    def __init__(self, turns, source, agent, *, dialog_text, trigger_paste):
+        super().__init__(turns, source, agent)
+        self.dialog_text, self.trigger_paste = dialog_text, trigger_paste
+        self.showing_dialog = False
+
+    def paste(self, text):
+        super().paste(text)
+        if text == self.trigger_paste:
+            self.showing_dialog = True
+
+    def state(self):
+        if self.showing_dialog:
+            return Screen(text=self.dialog_text, exited=None)
+        return super().state()
+
+
+@pytest.mark.integration
+def test_a_dialog_shown_before_enter_is_accepted_is_not_answered(store, benchmark, monkeypatch):
+    draft = claude_draft(store, benchmark, *benchmark.simulator.script)
+    ui = ClaudeQuestionUI((AUTH,))
+    prompt = benchmark.fixture[0].prompt.strip()
+    terminals = []
+
+    def build(turns, source, agent):
+        terminal = DialogBeforeAcceptanceTerminal(
+            turns, source, agent, dialog_text=ui.render(), trigger_paste=prompt
+        )
+        terminals.append(terminal)
+        return terminal
+
+    monkeypatch.setattr("dryheave.runner_attempt.FixtureTerminal", build)
+    result = run_experiment(
+        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert (capture.stop_reason, capture.last_observation.state) == (
+        "needs_input",
+        "structured_input",
+    )
+    assert (capture.controller_calls, terminals[0].keys, terminals[0].enters) == ((), [], 0)
+
+
+@pytest.mark.integration
+def test_a_claude_permission_dialog_still_stops_without_a_simulator_call(
+    store, benchmark, monkeypatch
+):
+    draft = claude_draft(store, benchmark, *benchmark.simulator.script)
+    terminals = dialog_fixture(monkeypatch, {benchmark.fixture[0].prompt.strip(): PERMISSION})
+    result = run_experiment(
+        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert (capture.stop_reason, capture.last_observation.state) == ("needs_input", "approval")
+    assert (capture.controller_calls, terminals[0].keys) == ((), [])
+
+
+@pytest.mark.integration
+def test_a_startup_trust_prompt_never_reaches_the_simulator(store, benchmark, monkeypatch):
+    draft = claude_draft(store, benchmark, *benchmark.simulator.script)
+    terminals = dialog_fixture(monkeypatch, {}, startup=TRUST)
+    result = run_experiment(
+        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert (capture.stop_reason, capture.last_observation.state) == ("needs_input", "approval")
+    assert (capture.controller_calls, terminals[0].keys, terminals[0].pastes) == ((), [], [])

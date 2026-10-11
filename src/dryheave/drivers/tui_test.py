@@ -34,6 +34,7 @@ from dryheave.profile_models import LaunchPlan
 from dryheave.serialization import parse_json
 
 DAEMON_ABSENT_EXIT = 3
+DIALOG_KEYS = frozenset({"Up", "Down", "Space", "Enter"})
 
 
 class TuiTestTerminal:
@@ -272,13 +273,28 @@ class TuiTestTerminal:
                 self._call("type", "--", line)
 
     def clear_line(self) -> None:
-        self._call("key", "press", "Ctrl+U")
+        try:
+            self._call("key", "press", "Ctrl+U")
+        except (TransportError, InputError, OSError) as error:
+            raise DeliveryUncertain(
+                "Clear-line delivery needs native-log reconciliation."
+            ) from error
 
     def enter(self) -> None:
         try:
             self._call("key", "press", "Enter")
         except (TransportError, InputError, OSError) as error:
             raise DeliveryUncertain("Enter delivery needs native-log reconciliation.") from error
+
+    def press(self, key: str) -> None:
+        if key not in DIALOG_KEYS:
+            raise InputError("Terminal key is not an allowed dialog key.")
+        try:
+            self._call("key", "press", key)
+        except (TransportError, InputError, OSError) as error:
+            raise DeliveryUncertain(
+                "Dialog key delivery needs native-log reconciliation."
+            ) from error
 
     def _watch(self) -> None:
         while not self.watchdog_stop.wait(self.limits.poll_seconds):

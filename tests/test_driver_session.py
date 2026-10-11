@@ -1,13 +1,16 @@
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
+from conftest import AskedQuestion, ClaudeQuestionUI
 from dryheave.drivers.artifacts import ArtifactWriter
+from dryheave.drivers.base import DeliveryUncertain
 from dryheave.drivers.claude import ClaudeAdapter
 from dryheave.drivers.fake import FakeEventSource, FakeTerminal
-from dryheave.drivers.models import DriverLimits, NativeEvent, Screen
+from dryheave.drivers.models import DialogSelection, DriverLimits, NativeEvent, Screen
 from dryheave.drivers.session import DriverSession
 from dryheave.errors import InputError
 from dryheave.models import AgentKind
@@ -548,3 +551,269 @@ def test_claude_slash_command_is_not_entered_while_the_menu_highlights_another(
             "The command menu did not highlight the typed command; Enter was not sent.",
         )
         assert (terminal.pastes, terminal.enters) == (["/review"], 0)
+
+
+class QuestionTerminal(FakeTerminal):
+    def __init__(self, ui, *, ignored=()):
+        super().__init__([])
+        self.current = Screen(text="\u276f", exited=None)
+        self.ui, self.ignored = ui, set(ignored)
+        self.shown = False
+        self.typed = []
+        self.on_close = None
+
+    def state(self):
+        if self.shown and self.ui.open:
+            return Screen(text=self.ui.render(), exited=None)
+        return self.current
+
+    def paste(self, text):
+        if self.shown and self.ui.open:
+            self.typed.append(text)
+            self.ui.type(text)
+            return
+        self.pastes.append(text)
+        self.current = Screen(text="\u276f " + text, exited=None)
+
+    def clear_line(self):
+        super().clear_line()
+        if self.shown and self.ui.open:
+            self.ui.typed[self.ui.index] = ""
+
+    def enter(self):
+        self.enters += 1
+        self.shown = True
+        self.current = Screen(text="Done.\n\n\u276f", exited=None)
+
+    def press(self, key):
+        super().press(key)
+        if key in self.ignored or not self.ui.open:
+            return
+        self.ui.press(key)
+        if not self.ui.open and self.on_close is not None:
+            self.on_close()
+
+
+AUTH = AskedQuestion(
+    "Auth",
+    "Which auth method should we use?",
+    (("OAuth", "Use the provider flow"), ("API key", "Static key in config")),
+)
+STORE = AskedQuestion("Store", "Where do sessions live?", (("Redis", "Fast"), ("SQL", "Durable")))
+FEATURES = AskedQuestion(
+    "Features",
+    "Which features ship first?",
+    (("Search", "Full text"), ("Export", "CSV"), ("Sharing", "Links")),
+    multi=True,
+)
+
+
+def asking_session(tmp_path, plan, ui, *, ignored=(), cancelled=None, terminal=None):
+    plan = plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal = terminal or QuestionTerminal(ui, ignored=ignored)
+    source = FakeEventSource([])
+    session = DriverSession(
+        terminal,
+        source,
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        agent=AgentKind.CLAUDE,
+        limits=DriverLimits(
+            duration_seconds=5, max_polls=400, poll_seconds=0.01, command_seconds=0.3
+        ),
+        cancelled=cancelled,
+    )
+    session.__enter__()
+    assert session.start(plan, {}).state == "ready"
+    intent = session.prepare("Add login")
+    source.batches.append(
+        [
+            metadata(plan),
+            native("started"),
+            native("accepted", text="Add login", native_id="user"),
+        ]
+    )
+    terminal.on_close = lambda: source.batches.append(
+        [native("assistant", text="Added."), native("completed", text="Added.")]
+    )
+    assert session.deliver(intent).state == "structured_input"
+    return session, terminal
+
+
+def test_single_choice_moves_the_highlight_verifies_it_then_continues_the_turn(
+    tmp_path, driver_plan
+):
+    ui = ClaudeQuestionUI((AUTH,))
+    session, terminal = asking_session(tmp_path, driver_plan, ui)
+    with session:
+        asked = session.question()
+        assert (asked.question, asked.options) == (AUTH.question, ("OAuth", "API key"))
+        result = session.answer(asked, DialogSelection(choices=("API key",)))
+        assert (result.state, result.text) == ("completed", "Added.")
+        assert (terminal.keys, ui.answers, session.answered) == (
+            ["Down", "Enter"],
+            {0: "API key"},
+            1,
+        )
+        assert (terminal.enters, session.accepted_count) == (1, 1)
+
+
+def test_multi_select_toggles_each_choice_submits_and_confirms_the_review(tmp_path, driver_plan):
+    ui = ClaudeQuestionUI((FEATURES,))
+    session, terminal = asking_session(tmp_path, driver_plan, ui)
+    with session:
+        result = session.answer(session.question(), DialogSelection(choices=("Search", "Sharing")))
+        assert result.state == "completed"
+        assert terminal.keys == ["Space", "Down", "Down", "Space", "Down", "Down", "Enter", "Enter"]
+        assert (ui.answers, ui.result) == ({0: "Search, Sharing"}, "submitted")
+
+
+def test_free_text_is_typed_into_the_other_option(tmp_path, driver_plan):
+    ui = ClaudeQuestionUI((AUTH,))
+    session, terminal = asking_session(tmp_path, driver_plan, ui)
+    with session:
+        result = session.answer(session.question(), DialogSelection(text="Use mutual TLS"))
+        assert result.state == "completed"
+        assert (terminal.keys, terminal.typed) == (["Down", "Down", "Enter"], ["Use mutual TLS"])
+        assert ui.answers == {0: "Use mutual TLS"}
+
+
+def test_free_text_wrapped_across_rows_is_still_confirmed(tmp_path, driver_plan):
+    ui = ClaudeQuestionUI((AUTH,), wrap_width=20)
+    session, terminal = asking_session(tmp_path, driver_plan, ui)
+    with session:
+        text = "Use mutual TLS with a hardware token"
+        result = session.answer(session.question(), DialogSelection(text=text))
+        assert result.state == "completed"
+        assert (terminal.keys, terminal.typed) == (["Down", "Down", "Enter"], [text])
+        assert ui.answers == {0: text}
+
+
+class DroppedFirstPasteTerminal(QuestionTerminal):
+    def __init__(self, ui):
+        super().__init__(ui)
+        self.dialog_paste_calls = 0
+
+    def paste(self, text):
+        if self.shown and self.ui.open:
+            self.dialog_paste_calls += 1
+            if self.dialog_paste_calls == 1:
+                self.typed.append(text)
+                return
+        super().paste(text)
+
+
+def test_an_unconfirmable_free_text_answer_is_retyped_once_before_giving_up(tmp_path, driver_plan):
+    ui = ClaudeQuestionUI((AUTH,))
+    dropping = DroppedFirstPasteTerminal(ui)
+    session, terminal = asking_session(tmp_path, driver_plan, ui, terminal=dropping)
+    with session:
+        result = session.answer(session.question(), DialogSelection(text="Use mutual TLS"))
+        assert result.state == "completed"
+        assert (terminal.dialog_paste_calls, terminal.clears, terminal.typed) == (
+            2,
+            1,
+            ["Use mutual TLS", "Use mutual TLS"],
+        )
+        assert ui.answers == {0: "Use mutual TLS"}
+
+
+class LostDialogKeyTerminal(QuestionTerminal):
+    def press(self, key):
+        raise DeliveryUncertain("Fixture dialog key acknowledgement lost.")
+
+
+def test_a_lost_dialog_key_acknowledgement_reaches_the_dialog_stop_handling(tmp_path, driver_plan):
+    ui = ClaudeQuestionUI((AUTH,))
+    session, terminal = asking_session(
+        tmp_path, driver_plan, ui, terminal=LostDialogKeyTerminal(ui)
+    )
+    with session:
+        result = session.answer(session.question(), DialogSelection(choices=("API key",)))
+        assert (result.state, result.reason) == (
+            "unsupported",
+            "Dialog key delivery was not acknowledged; the dialog state is unknown.",
+        )
+        assert terminal.keys == []
+
+
+def test_dialog_answer_past_the_deadline_stops_as_a_timeout(tmp_path, driver_plan):
+    ui = ClaudeQuestionUI((AUTH,))
+    session, terminal = asking_session(tmp_path, driver_plan, ui, ignored=("Down",))
+    with session:
+        asked = session.question()
+        session.deadline = time.monotonic() - 1
+        result = session.answer(asked, DialogSelection(choices=("API key",)))
+        assert result.state == "timeout"
+        assert terminal.keys == ["Down"]
+
+
+def test_questions_are_answered_one_at_a_time_then_the_review_is_submitted(tmp_path, driver_plan):
+    ui = ClaudeQuestionUI((AUTH, STORE))
+    session, terminal = asking_session(tmp_path, driver_plan, ui)
+    with session:
+        first = session.answer(session.question(), DialogSelection(choices=("OAuth",)))
+        assert first.state == "structured_input"
+        second = session.question()
+        assert second.question == STORE.question
+        assert session.answer(second, DialogSelection(choices=("SQL",))).state == "completed"
+        assert terminal.keys == ["Enter", "Down", "Enter", "Enter"]
+        assert (ui.answers, ui.result, session.answered) == (
+            {0: "OAuth", 1: "SQL"},
+            "submitted",
+            2,
+        )
+
+
+def test_unverified_navigation_never_confirms_a_choice(tmp_path, driver_plan):
+    ui = ClaudeQuestionUI((AUTH,))
+    session, terminal = asking_session(tmp_path, driver_plan, ui, ignored=("Down",))
+    with session:
+        result = session.answer(session.question(), DialogSelection(choices=("API key",)))
+        assert (result.state, result.reason) == (
+            "unsupported",
+            "Dialog selection could not be verified on screen.",
+        )
+        assert (terminal.keys, ui.answers, session.answered) == (["Down"], {}, 0)
+
+
+def test_a_dialog_that_stays_open_after_enter_is_reported(tmp_path, driver_plan):
+    ui = ClaudeQuestionUI((AUTH,))
+    session, terminal = asking_session(tmp_path, driver_plan, ui, ignored=("Enter",))
+    with session:
+        result = session.answer(session.question(), DialogSelection(choices=("OAuth",)))
+        assert (result.state, result.reason) == (
+            "unsupported",
+            "The question dialog did not advance after its answer.",
+        )
+        assert (terminal.keys, session.answered) == (["Enter"], 0)
+
+
+def test_a_changed_dialog_is_not_answered(tmp_path, driver_plan):
+    ui = ClaudeQuestionUI((AUTH,))
+    session, terminal = asking_session(tmp_path, driver_plan, ui)
+    with session:
+        stale = session.question().model_copy(update={"question": "Which database?"})
+        result = session.answer(stale, DialogSelection(choices=("OAuth",)))
+        assert (result.state, result.reason) == (
+            "unsupported",
+            "The question dialog changed before it was answered.",
+        )
+        assert terminal.keys == []
+
+
+def test_cancellation_while_answering_reports_cancelled(tmp_path, driver_plan):
+    cancelled = threading.Event()
+    ui = ClaudeQuestionUI((AUTH,))
+    session, terminal = asking_session(tmp_path, driver_plan, ui, cancelled=cancelled)
+    with session:
+        asked = session.question()
+        cancelled.set()
+        assert session.answer(asked, DialogSelection(choices=("API key",))).state == "cancelled"
+        assert terminal.keys == []
+
+
+def test_question_dialogs_are_only_read_for_claude(tmp_path, driver_plan):
+    session, terminal, _ = build(tmp_path, driver_plan)
+    with session:
+        terminal.current = Screen(text=ClaudeQuestionUI((AUTH,)).render(), exited=None)
+        assert session.question() is None

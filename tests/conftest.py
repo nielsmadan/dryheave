@@ -1,5 +1,6 @@
 import shutil
 import sys
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -563,6 +564,140 @@ def workflow_benchmark(store, graded_benchmark, tmp_path, *, outcomes=("pass",),
             "scoring": benchmark.scoring.model_copy(update={"inspector": inspector}),
         }
     ), root
+
+
+DIALOG_RULE = "\u2500" * 60
+
+
+@dataclass(frozen=True)
+class AskedQuestion:
+    header: str
+    question: str
+    options: tuple[tuple[str, str], ...]
+    multi: bool = False
+
+
+class ClaudeQuestionUI:
+    def __init__(
+        self,
+        questions: tuple[AskedQuestion, ...],
+        *,
+        numbered: bool = True,
+        wrap_width: int | None = None,
+    ) -> None:
+        self.questions, self.numbered, self.wrap_width = questions, numbered, wrap_width
+        self.index = self.focus = 0
+        self.checked: list[set[str]] = [set() for _ in questions]
+        self.typed = ["" for _ in questions]
+        self.answers: dict[int, str] = {}
+        self.result: str | None = None
+
+    @property
+    def open(self) -> bool:
+        return self.result is None
+
+    @property
+    def reviewing(self) -> bool:
+        return self.index == len(self.questions)
+
+    def press(self, key: str) -> None:
+        if not self.open:
+            return
+        if self.reviewing:
+            if key in {"Up", "Down"}:
+                self.focus = 1 if key == "Down" else 0
+            elif key == "Enter":
+                self.result = "submitted" if self.focus == 0 else "cancelled"
+            return
+        question = self.questions[self.index]
+        count = len(question.options)
+        last = count + (2 if question.multi else 1)
+        if key in {"Up", "Down"}:
+            self.focus = max(0, min(last, self.focus + (1 if key == "Down" else -1)))
+        elif key in {"Space", "Enter"} and self.focus < count and question.multi:
+            label = question.options[self.focus][0]
+            self.checked[self.index] ^= {label}
+        elif key == "Enter" and question.multi and self.focus == count + 1:
+            chosen = [label for label, _ in question.options if label in self.checked[self.index]]
+            self._answer(", ".join([*chosen, *filter(None, [self.typed[self.index]])]))
+        elif key == "Enter" and not question.multi and self.focus < count:
+            self._answer(question.options[self.focus][0])
+        elif (
+            key == "Enter" and not question.multi and self.focus == count and self.typed[self.index]
+        ):
+            self._answer(self.typed[self.index])
+
+    def type(self, text: str) -> None:
+        if (
+            self.open
+            and not self.reviewing
+            and self.focus == len(self.questions[self.index].options)
+        ):
+            self.typed[self.index] += text
+
+    def _answer(self, value: str) -> None:
+        self.answers[self.index] = value
+        if len(self.questions) == 1 and not self.questions[0].multi:
+            self.result = "submitted"
+            return
+        self.index += 1
+        self.focus = 0
+
+    def tabs(self) -> str:
+        if len(self.questions) == 1 and not self.questions[0].multi:
+            return f"\u2610 {self.questions[0].header}"
+        marks = "  ".join(
+            f"{'\u2612' if index in self.answers else '\u2610'} {question.header}"
+            for index, question in enumerate(self.questions)
+        )
+        return f"\u2190 {marks}  \u2714 Submit \u2192"
+
+    def marker(self, index: int) -> str:
+        return "\u276f" if self.focus == index else " "
+
+    def render(self) -> str:
+        lines = [DIALOG_RULE, self.tabs(), ""]
+        if self.reviewing:
+            lines += ["Review your answers", ""]
+            for index, question in enumerate(self.questions):
+                lines += [f" \u25cf {question.question}", f"   \u2192 {self.answers[index]}"]
+            lines += ["", "Ready to submit your answers?", ""]
+            lines += [f"{self.marker(0)} 1. Submit answers", f"{self.marker(1)} 2. Cancel"]
+            return "\n".join(" " + line if line else "" for line in lines)
+        question = self.questions[self.index]
+        lines += [question.question, ""]
+        for index, (label, description) in enumerate(question.options):
+            number = f"{index + 1}. " if self.numbered else ""
+            box = (
+                f"[{'\u2714' if label in self.checked[self.index] else ' '}] "
+                if question.multi
+                else ""
+            )
+            indent = 2 + len(number) + len(box) if self.numbered else 4 + len(box)
+            lines += [f"{self.marker(index)} {number}{box}{label}", " " * indent + description]
+        count = len(question.options)
+        typed = self.typed[self.index]
+        placeholder = "Type something" if question.multi else "Type something."
+        box = f"[{'\u2714' if typed else ' '}] " if question.multi else ""
+        number = f"{count + 1}. " if self.numbered else ""
+        content = typed or placeholder
+        first, *rest = (
+            textwrap.wrap(content, self.wrap_width) or [""] if self.wrap_width else [content]
+        )
+        lines.append(f"{self.marker(count)} {number}{box}{first}")
+        indent = 2 + len(number) + len(box) if self.numbered else 4 + len(box)
+        lines += [" " * indent + line for line in rest]
+        if question.multi:
+            label = "Submit" if self.index == len(self.questions) - 1 else "Next"
+            lines.append(f"{self.marker(count + 1)}    {label}")
+        chat = count + (2 if question.multi else 1)
+        lines += [
+            DIALOG_RULE,
+            f"{self.marker(chat)} {count + 2}. Chat about this",
+            "",
+            "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel",
+        ]
+        return "\n".join(" " + line if line else "" for line in lines)
 
 
 @dataclass(frozen=True)

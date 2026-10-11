@@ -2,6 +2,7 @@ import os
 import time
 import traceback
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
@@ -22,12 +23,19 @@ from dryheave.cases import (
 )
 from dryheave.controller_models import (
     ControllerRecipe,
+    DialogPrompt,
     DialogueMessage,
     InspectionFinding,
     RoleCall,
     SimulatorDecision,
 )
-from dryheave.controllers import CallContext, invoke_controller, simulator_projection
+from dryheave.controllers import (
+    CallContext,
+    dialog_projection,
+    dialog_selection,
+    invoke_controller,
+    simulator_projection,
+)
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.auth import RuntimeBindings
 from dryheave.drivers.fake import FakeEventSource
@@ -73,12 +81,21 @@ from dryheave.runner_models import (
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json, digest, parse_model
 from dryheave.storage import ObjectStore
-from dryheave.workflow import next_workflow_action
+from dryheave.workflow import dialog_source, next_workflow_action
 
 type SubmissionPolicy = Literal["conversation", "curated-native-command"]
 
 INSPECTION_ATTEMPTS = 2
 WORKFLOW_STEP_EVENT = "workflow-step"
+INVALID_DIALOG_ANSWER = "invalid_dialog_answer"
+RETRIED_REJECTIONS = frozenset({"stop_with_findings", INVALID_DIALOG_ANSWER, "empty_reply"})
+
+
+@dataclass(frozen=True)
+class DialogAsk:
+    prompt: DialogPrompt
+    answer_hint: str | None
+    dialogue: tuple[DialogueMessage, ...]
 
 
 def _combine_cleanup(*reports: CleanupReport) -> CleanupReport:
@@ -101,13 +118,13 @@ def _combine_cleanup(*reports: CleanupReport) -> CleanupReport:
 def workflow_progress(
     steps: tuple[WorkflowStep, ...], events: tuple[JournalEvent, ...], attempt_id: str
 ) -> WorkflowProgress | None:
-    if not steps:
-        return None
     records = tuple(
         parse_model(canonical_json(event.data), WorkflowStepRecord)
         for event in events
         if event.attempt_id == attempt_id and event.event == WORKFLOW_STEP_EVENT
     )
+    if not steps and not records:
+        return None
     return WorkflowProgress(
         steps=tuple(step.step_id for step in steps),
         position=records[-1].position if records else 0,
@@ -351,7 +368,10 @@ class TrialExecution:
             self.update(submission=submission)
             self.journal.evidence(self.state, "submission-intent", submission)
             self.deliveries += 1
+            delivered = self.accepted
             self.observation = self.driver.deliver(submission)
+            if self.observation.state == "structured_input" and self.driver.enter_attempted:
+                self.observation = self._dialogs(inherited, prompt, delivered)
             previous = self.accepted
             self.accepted = self.driver.accepted_count
             if self.accepted > previous:
@@ -373,7 +393,9 @@ class TrialExecution:
                 self._advance(self.pending, self.position + 1)
             self.pending = None
             if self.observation.state not in {"completed", "question"}:
-                self.update(stop_reason=self._stop_reason(self.observation))
+                self.update(
+                    stop_reason=self.state.stop_reason or self._stop_reason(self.observation)
+                )
                 return
             if self.accepted >= self.case.budgets.max_turns:
                 self.update(stop_reason="turn_budget")
@@ -382,6 +404,60 @@ class TrialExecution:
             if following is None:
                 return
             prompt, policy = following
+
+    def _dialogs(self, inherited: Mapping[str, str], prompt: str, delivered: int) -> Observation:
+        observation = self.observation
+        if self.driver is None or observation is None:
+            raise InputError("Dialog answers need a started driver.")
+        self.driver.observe_turn()
+        self.accepted = self.driver.accepted_count
+        if self.accepted > delivered:
+            self.dialogue.append(DialogueMessage(role="user", text=prompt))
+            if self.pending is not None:
+                self._advance(self.pending, self.position + 1)
+                self.pending = None
+        while observation.state == "structured_input":
+            interruption = self._interruption()
+            asked = None if interruption else self.driver.question()
+            if asked is None:
+                if interruption is not None:
+                    self.update(stop_reason=interruption)
+                return observation
+            source = dialog_source(
+                self.steps, self.position + 1 if self.pending is not None else self.position
+            )
+            dialog = DialogAsk(
+                prompt=DialogPrompt(
+                    question=asked.question,
+                    options=asked.options,
+                    multi_select=asked.multi_select,
+                    allows_text=asked.allows_text,
+                ),
+                answer_hint=source.answer_hint if source is not None else None,
+                dialogue=tuple(self.dialogue)
+                if self.accepted > delivered
+                else (*self.dialogue, DialogueMessage(role="user", text=prompt)),
+            )
+            before = {call.call_id for call in self.state.calls}
+            decision = self._simulate(inherited, dialog=dialog)
+            selection = None if decision is None else dialog_selection(dialog.prompt, decision)
+            if selection is None:
+                return observation
+            answered = self.driver.answered
+            observation = self.driver.answer(asked, selection)
+            if self.driver.answered > answered:
+                self._record(
+                    WorkflowEvent(
+                        step_id=source.step_id if source is not None else "dialog",
+                        kind="dialog",
+                        outcome="answered",
+                        turn=self.driver.accepted_count,
+                        call_ids=tuple(
+                            call.call_id for call in self.state.calls if call.call_id not in before
+                        ),
+                    )
+                )
+        return observation
 
     def _follow(self, inherited: Mapping[str, str]) -> tuple[str, SubmissionPolicy] | None:
         decision = self._simulate(inherited)
@@ -476,6 +552,13 @@ class TrialExecution:
         )
         self.position = position
         self.update(workflow_position=position)
+
+    def _record(self, event: WorkflowEvent) -> None:
+        self.journal.record(
+            self.state,
+            WORKFLOW_STEP_EVENT,
+            WorkflowStepRecord(event=event, position=self.position).model_dump(mode="json"),
+        )
 
     def _interruption(self) -> str | None:
         if self.cancelled.is_set():
@@ -625,6 +708,7 @@ class TrialExecution:
         *,
         retry: bool = True,
         inspection: tuple[InspectionFinding, ...] = (),
+        dialog: DialogAsk | None = None,
     ) -> SimulatorDecision | None:
         made = tuple(call for call in self.state.calls if call.role == "simulator")
         spent = sum(call.elapsed_seconds or 0 for call in made)
@@ -634,11 +718,15 @@ class TrialExecution:
         request = simulator_projection(
             self.case,
             self.persona,
-            tuple(self.dialogue),
+            tuple(self.dialogue) if dialog is None else dialog.dialogue,
             self.trial.seed,
             recipe=self.recipe,
             inspection=inspection,
         )
+        if dialog is not None:
+            request = dialog_projection(
+                request, dialog.prompt, dialog.answer_hint, self.recipe.budget.max_input_bytes
+            )
         call_id = "c-" + uuid4().hex
         call = RoleCall(call_id=call_id, status="intent")
         index = len(made)
@@ -667,21 +755,41 @@ class TrialExecution:
             call = invoke_controller(self.recipe, request, artifacts, context)
         finally:
             self._replace_call(call.model_copy(update={"cleanup": context.cleanup}))
-        if inspection and call.decision is not None and call.decision.action == "stop":
-            call = call.model_copy(update={"status": "failed", "error": "stop_with_findings"})
+        rejection = self._rejection(call.decision, inspection, dialog)
+        if rejection is not None:
+            call = call.model_copy(update={"status": "failed", "error": rejection})
             self._replace_call(call.model_copy(update={"cleanup": context.cleanup}))
         self.journal.evidence(self.state, "controller-result", call)
         if call.status != "completed" or call.decision is None:
             stopped = (
                 context.cleanup.known_writers_stopped
                 if context.cleanup is not None
-                else call.error == "stop_with_findings"
+                else call.error in RETRIED_REJECTIONS
             )
             if retry and stopped and self._interruption() is None:
-                return self._simulate(inherited, retry=False, inspection=inspection)
-            self.update(stop_reason=self._interruption() or "controller_error")
+                return self._simulate(inherited, retry=False, inspection=inspection, dialog=dialog)
+            self.update(
+                stop_reason=self._interruption()
+                or ("needs_input" if call.error == INVALID_DIALOG_ANSWER else "controller_error")
+            )
             return None
         return call.decision
+
+    @staticmethod
+    def _rejection(
+        decision: SimulatorDecision | None,
+        inspection: tuple[InspectionFinding, ...],
+        dialog: DialogAsk | None,
+    ) -> str | None:
+        if decision is None:
+            return None
+        if inspection and decision.action == "stop":
+            return "stop_with_findings"
+        if dialog is not None:
+            return (
+                INVALID_DIALOG_ANSWER if dialog_selection(dialog.prompt, decision) is None else None
+            )
+        return "empty_reply" if decision.action == "reply" and not decision.text.strip() else None
 
     def _replace_call(self, call: RoleCall) -> None:
         self.update(

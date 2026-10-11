@@ -8,13 +8,21 @@ from uuid import uuid4
 
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.base import DeliveryUncertain, EventSource, Terminal, TransportError
-from dryheave.drivers.dialogs import composer, composer_matches, dialog, submittable
+from dryheave.drivers.dialogs import (
+    composer,
+    composer_matches,
+    dialog,
+    question_dialog,
+    submittable,
+)
 from dryheave.drivers.models import (
     CleanupReport,
+    DialogSelection,
     DriverLimits,
     LaunchObservation,
     NativeEvent,
     Observation,
+    QuestionDialog,
     Screen,
     Submission,
     UsageObservation,
@@ -26,9 +34,39 @@ from dryheave.models import AgentKind
 from dryheave.profile_models import LaunchPlan
 from dryheave.serialization import digest
 
+CLOSED_POLLS = 2
+
 
 def normalize_input(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def same_question(found: QuestionDialog, asked: QuestionDialog) -> bool:
+    return (found.kind, found.question, found.options, found.multi_select) == (
+        asked.kind,
+        asked.question,
+        asked.options,
+        asked.multi_select,
+    )
+
+
+def focused_on(asked: QuestionDialog, index: int) -> Callable[[QuestionDialog], bool]:
+    return lambda found: same_question(found, asked) and found.focused == index
+
+
+def toggled(asked: QuestionDialog, index: int, wanted: bool) -> Callable[[QuestionDialog], bool]:
+    return lambda found: same_question(found, asked) and found.rows[index].checked is wanted
+
+
+def row_index(asked: QuestionDialog, kind: str, label: str | None = None) -> int | None:
+    return next(
+        (
+            index
+            for index, row in enumerate(asked.rows)
+            if row.kind == kind and (label is None or row.label == label)
+        ),
+        None,
+    )
 
 
 class DriverSession:
@@ -57,6 +95,7 @@ class DriverSession:
         self.delivery_attempted = False
         self.enter_attempted = False
         self.accepted_count = 0
+        self.answered = 0
         self.counted: set[str] = set()
         self.cleanup: CleanupReport | None = None
 
@@ -220,6 +259,180 @@ class DriverSession:
             else "Exact composer content was not observed within bounds; Enter was not sent.",
             "" if screen is None else screen.text,
         )
+
+    def question(self) -> QuestionDialog | None:
+        if self.agent != AgentKind.CLAUDE or self.launch is None or self.cleanup is not None:
+            return None
+        found = question_dialog(self.terminal.state())
+        return found if found is not None and found.kind == "question" else None
+
+    def answer(self, asked: QuestionDialog, selection: DialogSelection) -> Observation:
+        if self.submission is None or self.cleanup is not None:
+            raise InputError("Dialog answers need an active native submission.")
+        if selection.text is not None and (
+            re.search(r"[\x00-\x1f\x7f]", selection.text)
+            or len(selection.text.encode()) > self.limits.max_input_bytes
+        ):
+            raise InputError("Dialog text must be one bounded line without control characters.")
+        self.artifacts.record(
+            "dialog-intent",
+            {"question": asked.question, "selection": selection.model_dump(mode="json")},
+        )
+        try:
+            failure = self._apply(asked, selection)
+            if failure is None:
+                return self._after_answer(asked)
+        except DeliveryUncertain:
+            failure = "Dialog key delivery was not acknowledged; the dialog state is unknown."
+        return self._dialog_stop(failure)
+
+    def _dialog_stop(self, reason: str) -> Observation:
+        text = self.terminal.state().text
+        if self.cancelled.is_set():
+            return self._observation("cancelled", "Controller cancellation requested.", text)
+        if time.monotonic() >= self.deadline:
+            return self._observation("timeout", "Driver lifetime or polling limit reached.", text)
+        return self._observation("unsupported", reason, text)
+
+    def _apply(self, asked: QuestionDialog, selection: DialogSelection) -> str | None:
+        current = self._await(lambda found: same_question(found, asked))
+        if current is None:
+            return "The question dialog changed before it was answered."
+        if asked.multi_select:
+            for index, row in enumerate(asked.rows):
+                wanted = row.label in selection.choices
+                if current is None or row.kind != "option" or current.rows[index].checked == wanted:
+                    continue
+                current = self._focus(asked, current, index)
+                current = current and self._key("Space", toggled(asked, index, wanted))
+            if current is not None and selection.text is not None:
+                current = self._type(asked, current, selection.text)
+            submit = row_index(asked, "submit")
+            if current is None or submit is None:
+                return "Dialog selection could not be verified on screen."
+            current = self._focus(asked, current, submit)
+        else:
+            target = (
+                row_index(asked, "text")
+                if selection.text is not None
+                else row_index(asked, "option", selection.choices[0])
+            )
+            if target is None:
+                return "Dialog option could not be located."
+            current = self._focus(asked, current, target)
+            if current is not None and selection.text is not None:
+                current = self._type(asked, current, selection.text)
+        if current is None:
+            return "Dialog selection could not be verified on screen."
+        self._press("Enter")
+        return None
+
+    def _type(
+        self, asked: QuestionDialog, current: QuestionDialog, text: str
+    ) -> QuestionDialog | None:
+        index = row_index(asked, "text")
+        focused = None if index is None else self._focus(asked, current, index)
+        if focused is None or index is None:
+            return None
+        target = " ".join(text.split())
+
+        def settled(found: QuestionDialog) -> bool:
+            return (
+                same_question(found, asked)
+                and found.focused == index
+                and " ".join(found.rows[index].label.split()) == target
+                and found.rows[index].checked in {None, True}
+            )
+
+        for attempt in range(2):
+            if attempt:
+                self.terminal.clear_line()
+            self.artifacts.record("dialog-text", {"question": asked.question})
+            self.terminal.paste(text)
+            found = self._await(settled)
+            if found is not None:
+                return found
+        return None
+
+    def _focus(
+        self, asked: QuestionDialog, current: QuestionDialog, target: int
+    ) -> QuestionDialog | None:
+        for _ in asked.rows:
+            if current.focused == target:
+                return current
+            if current.focused is None:
+                return None
+            step = 1 if current.focused < target else -1
+            expected = current.focused + step
+            found = self._key("Down" if step > 0 else "Up", focused_on(asked, expected))
+            if found is None:
+                return None
+            current = found
+        return current if current.focused == target else None
+
+    def _key(self, key: str, settled: Callable[[QuestionDialog], bool]) -> QuestionDialog | None:
+        self._press(key)
+        return self._await(settled)
+
+    def _press(self, key: str) -> None:
+        self.artifacts.record("dialog-key", {"key": key})
+        self.terminal.press(key)
+
+    def _await(self, settled: Callable[[QuestionDialog], bool]) -> QuestionDialog | None:
+        deadline = min(self.deadline, time.monotonic() + self.limits.command_seconds)
+        while not self.cancelled.is_set() and self.polls < self.limits.max_polls:
+            self.polls += 1
+            found = question_dialog(self.terminal.state())
+            if found is not None and settled(found):
+                return found
+            if time.monotonic() >= deadline:
+                return None
+            self.cancelled.wait(min(self.limits.poll_seconds, max(0, deadline - time.monotonic())))
+        return None
+
+    def _after_answer(self, asked: QuestionDialog) -> Observation:
+        advanced, outcome = self._advance(asked)
+        if advanced and outcome is not None and outcome.kind == "review":
+            submit = row_index(outcome, "option", "Submit answers")
+            focused = (
+                None
+                if submit is None or not outcome.complete
+                else self._focus(outcome, outcome, submit)
+            )
+            if focused is None:
+                return self._dialog_stop(
+                    "The answer review could not be submitted with every question answered."
+                )
+            self._press("Enter")
+            advanced, outcome = self._advance(outcome)
+            advanced = advanced and outcome is None
+        if not advanced:
+            return self._dialog_stop("The question dialog did not advance after its answer.")
+        self.answered += 1
+        self.artifacts.record("dialog-answered", {"question": asked.question})
+        if outcome is not None:
+            return self._observation(
+                "structured_input",
+                "Native question dialog awaits a selection.",
+                self.terminal.state().text,
+            )
+        return self.reconcile(wait=True)
+
+    def _advance(self, asked: QuestionDialog) -> tuple[bool, QuestionDialog | None]:
+        closed = 0
+        deadline = min(self.deadline, time.monotonic() + self.limits.command_seconds)
+        while not self.cancelled.is_set() and self.polls < self.limits.max_polls:
+            self.polls += 1
+            found = question_dialog(self.terminal.state())
+            closed = closed + 1 if found is None else 0
+            if found is not None and not same_question(found, asked):
+                return True, found
+            if closed >= CLOSED_POLLS:
+                return True, None
+            if time.monotonic() >= deadline:
+                break
+            self.cancelled.wait(min(self.limits.poll_seconds, max(0, deadline - time.monotonic())))
+        return False, None
 
     def reconcile(self, *, wait: bool = False) -> Observation:
         if self.submission is None:

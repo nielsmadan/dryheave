@@ -12,10 +12,13 @@ import psutil
 from dryheave.cases import FrozenCase, subject_context
 from dryheave.claude_controller import claude_observation, claude_payload
 from dryheave.controller_models import (
+    DIALOG_INSTRUCTION,
     FIX_IT_INSTRUCTION,
+    SIMULATOR_INSTRUCTION,
     ControllerRecipe,
     ControllerResponse,
     ControllerRuntime,
+    DialogPrompt,
     DialogueMessage,
     InspectionFinding,
     RoleCall,
@@ -27,7 +30,7 @@ from dryheave.controller_runtime import prepare_runtime
 from dryheave.controller_schema import controller_schema
 from dryheave.controller_watch import ControllerWatch
 from dryheave.drivers.artifacts import ArtifactWriter
-from dryheave.drivers.models import CleanupReport, ProcessIdentity
+from dryheave.drivers.models import CleanupReport, DialogSelection, ProcessIdentity
 from dryheave.errors import DryheaveError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.logs.base import mapping
@@ -81,6 +84,58 @@ def simulator_projection(
     if inspection and recipe is not None:
         request = _fit_inspection_to_budget(request, recipe.budget.max_input_bytes)
     return request
+
+
+def dialog_projection(
+    request: SimulatorInput,
+    dialog: DialogPrompt,
+    answer_hint: str | None,
+    max_input_bytes: int,
+) -> SimulatorInput:
+    if request.inspection or not request.instruction.startswith(SIMULATOR_INSTRUCTION):
+        raise InputError("A dialog answer request starts from a plain simulator request.")
+    asked = request.model_copy(
+        update={
+            "dialog": dialog,
+            "answer_hint": answer_hint,
+            "instruction": DIALOG_INSTRUCTION
+            + request.instruction.removeprefix(SIMULATOR_INSTRUCTION),
+        }
+    )
+    if len(canonical_json(asked)) <= max_input_bytes:
+        return asked
+    fitted = asked
+    low, high = 1, len(dialog.question)
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = asked.model_copy(
+            update={
+                "dialog": dialog.model_copy(
+                    update={"question": _truncate_rationale(dialog.question, mid)}
+                )
+            }
+        )
+        if len(canonical_json(candidate)) <= max_input_bytes:
+            fitted = candidate
+            low = mid + 1
+        else:
+            high = mid - 1
+    return fitted
+
+
+def dialog_selection(dialog: DialogPrompt, decision: SimulatorDecision) -> DialogSelection | None:
+    choices, text = decision.choices, decision.text.strip()
+    if (
+        decision.action != "reply"
+        or len(set(choices)) != len(choices)
+        or not set(choices) <= set(dialog.options)
+        or (text and (not dialog.allows_text or "\n" in text))
+    ):
+        return None
+    single = (len(choices) == 1 and not text) or (not choices and bool(text))
+    if not (bool(choices or text) if dialog.multi_select else single):
+        return None
+    return DialogSelection(choices=choices, text=text or None)
 
 
 def _truncate_rationale(rationale: str, limit: int) -> str:
@@ -208,7 +263,13 @@ def native_decision(content: bytes) -> SimulatorDecision:
 
 
 def _scripted(recipe: ControllerRecipe, request: SimulatorInput, index: int) -> ControllerResponse:
-    latest = request.dialogue[-1].text if request.dialogue else ""
+    latest = (
+        request.dialog.question
+        if request.dialog is not None
+        else request.dialogue[-1].text
+        if request.dialogue
+        else ""
+    )
     if index >= len(recipe.script):
         decision = SimulatorDecision(
             action="stop",

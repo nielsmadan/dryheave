@@ -166,3 +166,31 @@ class LaunchObservation(StrictModel):
     observed_cwd: str | None = None
     effective_permissions: str | None = None
     daemon: ProcessIdentity | None = None
+
+
+class DialogRow(StrictModel):
+    kind: Literal["option", "text", "submit"]
+    label: str
+    checked: bool | None = None
+
+
+class QuestionDialog(StrictModel):
+    kind: Literal["question", "review"]
+    question: str
+    rows: tuple[DialogRow, ...] = Field(min_length=1)
+    focused: int | None
+    multi_select: bool = False
+    complete: bool = True
+
+    @property
+    def options(self) -> tuple[str, ...]:
+        return tuple(row.label for row in self.rows if row.kind == "option")
+
+    @property
+    def allows_text(self) -> bool:
+        return any(row.kind == "text" for row in self.rows)
+
+
+class DialogSelection(StrictModel):
+    choices: tuple[str, ...] = ()
+    text: str | None = None

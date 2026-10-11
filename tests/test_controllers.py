@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from dryheave.cases import load_frozen_case
 from dryheave.controller_models import (
     ControllerRecipe,
+    DialogPrompt,
     DialogueMessage,
     RoleBudget,
     SimulatorDecision,
@@ -17,13 +18,17 @@ from dryheave.controllers import (
     CallContext,
     _codex_usage,
     controller_command,
+    dialog_projection,
+    dialog_selection,
     invoke_controller,
     native_decision,
     simulator_projection,
 )
 from dryheave.drivers.artifacts import ArtifactWriter
+from dryheave.drivers.models import DialogSelection
 from dryheave.models import CommandSpec
 from dryheave.personas import load_frozen_persona
+from dryheave.serialization import canonical_json
 
 
 def request_for(store):
@@ -394,3 +399,97 @@ def test_a_native_reply_is_always_a_done_decision():
         ).encode()
     )
     assert (decision.action, decision.stop_kind) == ("reply", "done")
+
+
+AUTH_DIALOG = DialogPrompt(
+    question="Which auth method should we use?",
+    options=("OAuth", "API key"),
+    allows_text=True,
+)
+FEATURE_DIALOG = DialogPrompt(
+    question="Which features ship first?", options=("Search", "Export"), multi_select=True
+)
+
+
+def answer(choices=(), text=""):
+    return SimulatorDecision(action="reply", choices=choices, text=text, reason="As the user.")
+
+
+@pytest.mark.parametrize(
+    ("dialog", "decision", "selection"),
+    [
+        (AUTH_DIALOG, answer(("API key",)), DialogSelection(choices=("API key",))),
+        (AUTH_DIALOG, answer(text="Use mutual TLS"), DialogSelection(text="Use mutual TLS")),
+        (AUTH_DIALOG, answer(("api key",)), None),
+        (AUTH_DIALOG, answer(("OAuth", "API key")), None),
+        (AUTH_DIALOG, answer(("OAuth",), text="Because it is standard."), None),
+        (AUTH_DIALOG, answer(text="Use TLS\nand rotate keys"), None),
+        (AUTH_DIALOG, SimulatorDecision(action="stop", reason="Nothing to add."), None),
+        (
+            FEATURE_DIALOG,
+            answer(("Search", "Export")),
+            DialogSelection(choices=("Search", "Export")),
+        ),
+        (FEATURE_DIALOG, answer(("Search", "Search")), None),
+        (FEATURE_DIALOG, answer(text="Sharing"), None),
+    ],
+)
+def test_dialog_answers_must_use_the_offered_labels(dialog, decision, selection):
+    assert dialog_selection(dialog, decision) == selection
+
+
+def test_a_dialog_reply_may_carry_choices_without_text():
+    assert answer(("OAuth",)).text == ""
+    with pytest.raises(ValidationError):
+        answer()
+
+
+def test_dialog_projection_asks_for_an_answer_guided_by_the_hint(store, benchmark):
+    from dryheave.controller_models import DIALOG_INSTRUCTION
+
+    case = load_frozen_case(store, "task")
+    persona = load_frozen_persona(store, case.persona_id)
+    dialogue = (DialogueMessage(role="user", text="Add login."),)
+    plain = simulator_projection(case, persona, dialogue, 17)
+    asked = dialog_projection(plain, AUTH_DIALOG, "Prefer what we already use.", 128 * 1024)
+    assert {"dialog", "answer_hint"}.isdisjoint(json.loads(canonical_json(plain)))
+    assert asked.instruction == DIALOG_INSTRUCTION
+    assert "Do not stop" in asked.instruction
+    assert json.loads(canonical_json(asked))["dialog"] == {
+        "question": "Which auth method should we use?",
+        "options": ["OAuth", "API key"],
+        "multi_select": False,
+        "allows_text": True,
+    }
+    assert asked.answer_hint == "Prefer what we already use."
+    assert asked.model_dump(exclude={"instruction", "dialog", "answer_hint"}) == plain.model_dump(
+        exclude={"instruction"}
+    )
+    policy = simulator_projection(
+        case, persona, dialogue, 17, recipe=ControllerRecipe(conversation_policy="facts-only")
+    )
+    guarded = dialog_projection(policy, AUTH_DIALOG, None, 128 * 1024)
+    assert guarded.instruction.startswith(DIALOG_INSTRUCTION)
+    assert guarded.instruction.endswith(policy.instruction.removeprefix(plain.instruction))
+
+
+def test_dialog_projection_fits_the_question_to_the_input_bound(store, benchmark):
+    request = request_for(store)
+    long = AUTH_DIALOG.model_copy(update={"question": "Which method? " * 400})
+    limit = len(canonical_json(request.model_copy(update={"dialog": AUTH_DIALOG}))) + 600
+    fitted = dialog_projection(request, long, None, limit)
+    assert len(canonical_json(fitted)) <= limit
+    assert fitted.dialog.question.endswith("\u2026")
+    assert fitted.dialog.options == long.options
+
+
+def test_scripted_simulator_matches_the_dialog_question(store, benchmark, tmp_path):
+    from dryheave.controller_models import ScriptStep
+
+    decision = answer(("OAuth",))
+    recipe = ControllerRecipe(
+        script=(ScriptStep(assistant=AUTH_DIALOG.question, decision=decision),)
+    )
+    request = dialog_projection(request_for(store), AUTH_DIALOG, None, 128 * 1024)
+    call, _ = invoke(recipe, request, tmp_path)
+    assert (call.status, call.decision) == ("completed", decision)

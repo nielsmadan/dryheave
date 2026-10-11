@@ -104,8 +104,9 @@ Codex profiles may explicitly select `workspace_trust: "trusted"` or
 setting creates a `projects."ABSOLUTE_OWNED_WORKSPACE".trust_level` command-line
 override and appears in `LaunchPlan.workspace_trust`. It does not copy a trust
 store or change permission/sandbox settings. Only Codex supports these explicit
-choices; other harnesses reject them. Permission, structured-input and unsupported
-dialogs stop as `needs_input`; the runner never asks the simulator to approve them.
+choices; other harnesses reject them. Permission, trust, unsupported and Codex
+structured-input dialogs stop as `needs_input`; the runner never asks the simulator
+to approve them. Claude selection dialogs are answered as described below.
 
 ## Controller protocol and budgets
 
@@ -220,8 +221,8 @@ or when a slash prompt step targets an agent other than Claude. With workflows o
 or a case with no effective workflow, the loop below never runs.
 
 A decision may carry `stop_kind` (`"done"`, the default, or `"declined"` when the
-simulated user will not approve what was asked) and `choices` (reserved for dialog
-answers). Both are dropped from serialization at their defaults, so existing
+simulated user will not approve what was asked) and `choices` (dialog answers). Both
+are dropped from serialization at their defaults, so existing
 scripts and recorded calls keep their bytes. A simulator `stop` with `stop_kind:
 "done"` is a done point; script exhaustion and script divergence are not — they
 carry `stop_kind: "declined"` and end the run with `stop_reason: "simulator_stop"`
@@ -267,6 +268,29 @@ its simulator calls. The capture's `workflow` (`WorkflowProgress`: step IDs,
 position, events) is rebuilt from `workflow-step` events at capture, including when
 recovery captures an interrupted attempt. Interrupted attempts are never resumed
 mid-interaction.
+
+### Selection dialogs
+
+When a Claude turn shows a question dialog (`structured_input`), the runner asks the
+simulator to answer it whether or not workflows are on. `SimulatorInput.dialog`
+carries the parsed question, option labels, `multi_select` and `allows_text`;
+`answer_hint` is the hint of the prompt step being delivered or, failing that, of
+the most recent prompt step before the current position. The dialogue ends with the
+turn's user prompt. The dialog instruction asks for `choices` with exact option
+labels (one for single select, one or more for multi-select), or free single-line
+`text` with no choices when `allows_text` is set and nothing fits. A reply may then
+carry choices without text. A decision that does not fit the dialog is recorded as
+a failed call with error `invalid_dialog_answer` and retried once; a second failure
+stops with `needs_input`. A plain reply with empty text is likewise a failed
+`empty_reply` call. The driver applies a valid answer and the same turn continues;
+a dialog it cannot parse or cannot verify on screen stops with `needs_input`.
+
+Each verified answer journals a `workflow-step` event with kind `dialog`, outcome
+`answered`, the accepted turn count and its simulator call IDs. Its `step_id` is the
+hint's prompt step, or `dialog` when there is none. Recording does not move
+`workflow_position`. Without a workflow the capture keeps `workflow` None unless a
+dialog was answered; then it holds a `WorkflowProgress` with no steps, position 0 and
+the dialog events.
 
 ## Durable recovery and assessment integration
 

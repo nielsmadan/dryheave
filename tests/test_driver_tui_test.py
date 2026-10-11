@@ -50,6 +50,15 @@ def test_command_timeout_is_delivery_uncertain(tmp_path, monkeypatch):
         transport.enter()
 
 
+def test_a_lost_dialog_key_acknowledgement_is_delivery_uncertain(tmp_path, monkeypatch):
+    def run(command, root, **kwargs):
+        return CommandResult(command.argv, -9, b"", b"", "timeout")
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    with terminal(tmp_path, monkeypatch) as transport, pytest.raises(DeliveryUncertain):
+        transport.press("Down")
+
+
 def test_wrong_state_shape_and_control_input_fail(tmp_path, monkeypatch):
     def run(command, root, **kwargs):
         return CommandResult(
@@ -154,6 +163,27 @@ def test_claude_input_is_typed_with_shift_enter_newlines(tmp_path, monkeypatch):
         ("key", "press", "Shift+Enter"),
         ("key", "press", "Shift+Enter"),
         ("type", "--", "show branch"),
+    ]
+
+
+def test_dialog_keys_are_pressed_by_name_and_other_keys_are_refused(tmp_path, monkeypatch):
+    calls = []
+
+    def run(command, root, **kwargs):
+        calls.append(command.argv)
+        return CommandResult(command.argv, 0, b'{"ok":true,"data":{}}', b"", "exited")
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    with terminal(tmp_path, monkeypatch) as transport:
+        for key in ("Down", "Up", "Space", "Enter"):
+            transport.press(key)
+        with pytest.raises(InputError, match="not an allowed dialog key"):
+            transport.press("Escape")
+    assert [argv[argv.index("--session") + 2 :] for argv in calls] == [
+        ("key", "press", "Down"),
+        ("key", "press", "Up"),
+        ("key", "press", "Space"),
+        ("key", "press", "Enter"),
     ]
 
 

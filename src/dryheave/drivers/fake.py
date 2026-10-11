@@ -26,6 +26,8 @@ class FakeTerminal:
         self.uncertain_enter = uncertain_enter
         self.pastes: list[str] = []
         self.enters = 0
+        self.clears = 0
+        self.keys: list[str] = []
         self.closed = False
         self.plan: LaunchPlan | None = None
 
@@ -57,6 +59,12 @@ class FakeTerminal:
         self.current = Screen(text="Working\n\u203a", exited=None)
         if self.uncertain_enter:
             raise DeliveryUncertain("Fixture Enter acknowledgement lost.")
+
+    def press(self, key: str) -> None:
+        self.keys.append(key)
+
+    def clear_line(self) -> None:
+        self.clears += 1
 
     def close(self) -> CleanupReport:
         self.closed = True

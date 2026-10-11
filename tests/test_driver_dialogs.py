@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import AskedQuestion, ClaudeQuestionUI
 from dryheave.drivers.dialogs import (
     CODEX_APPROVALS,
     command_menu,
@@ -10,9 +11,10 @@ from dryheave.drivers.dialogs import (
     composer,
     composer_matches,
     dialog,
+    question_dialog,
     submittable,
 )
-from dryheave.drivers.models import Screen
+from dryheave.drivers.models import DialogRow, Screen
 from dryheave.models import AgentKind
 
 CODEX_DIALOGS = json.loads(Path("tests/fixtures/codex-dialogs.json").read_text())
@@ -313,3 +315,201 @@ def test_command_like_transcript_rows_away_from_the_composer_are_not_a_menu():
 def test_plain_claude_prompt_ignores_the_command_menu():
     screen = menu_screen("review", REVIEW_ENTRIES)
     assert submittable(AgentKind.CLAUDE, screen, "review")
+
+
+DIALOG_FOOTER = "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel"
+SINGLE_QUESTION = f"""
+\u276f Add login to the app
+
+\u25cf I need one decision first.
+
+ {RULE}
+ \u2610 Auth
+
+ Which auth method should we use?
+
+   1. OAuth
+      Use the provider flow
+ \u276f 2. API key
+      Static key in config
+   3. Type something.
+ {RULE}
+   4. Chat about this
+
+ {DIALOG_FOOTER}
+"""
+MULTI_SELECT = f"""
+ {RULE}
+ \u2190 \u2610 Features  \u2714 Submit \u2192
+
+ Which features ship first?
+
+   1. [\u2714] Search
+           Full text search
+ \u276f 2. [ ] Export
+           CSV export
+   3. [ ] Type something
+       Submit
+ {RULE}
+   4. Chat about this
+
+ {DIALOG_FOOTER}
+"""
+
+
+def parse(text):
+    return question_dialog(Screen(text=text, exited=None))
+
+
+def test_single_select_question_is_parsed_from_the_screen():
+    found = parse(SINGLE_QUESTION)
+    assert (found.kind, found.question, found.options, found.multi_select) == (
+        "question",
+        "Which auth method should we use?",
+        ("OAuth", "API key"),
+        False,
+    )
+    assert (found.allows_text, found.focused) == (True, 1)
+    assert found.rows[2] == DialogRow(kind="text", label="Type something.")
+    assert dialog(AgentKind.CLAUDE, Screen(text=SINGLE_QUESTION, exited=None)).state == (
+        "structured_input"
+    )
+
+
+def test_multi_select_question_reports_checkboxes_and_its_submit_row():
+    found = parse(MULTI_SELECT)
+    assert (found.question, found.options, found.multi_select, found.focused) == (
+        "Which features ship first?",
+        ("Search", "Export"),
+        True,
+        1,
+    )
+    assert [(row.kind, row.label, row.checked) for row in found.rows] == [
+        ("option", "Search", True),
+        ("option", "Export", False),
+        ("text", "Type something", False),
+        ("submit", "Submit", None),
+    ]
+
+
+def test_typed_free_text_and_a_committed_tick_are_read_as_labels():
+    text = (
+        SINGLE_QUESTION.replace("1. OAuth", "1. OAuth \u2714")
+        .replace("\u276f 2. API key", "  2. API key")
+        .replace("   3. Type something.", " \u276f 3. Use mutual TLS")
+    )
+    found = parse(text)
+    assert (found.options, found.focused, found.rows[2].label) == (
+        ("OAuth", "API key"),
+        2,
+        "Use mutual TLS",
+    )
+
+
+def test_later_question_of_several_is_parsed_below_its_tab_bar():
+    ui = ClaudeQuestionUI(
+        (
+            AskedQuestion("Auth", "Which auth method?", (("OAuth", "Flow"), ("Key", "Static"))),
+            AskedQuestion(
+                "Store", "Where do sessions live?", (("Redis", "Fast"), ("SQL", "Durable"))
+            ),
+        )
+    )
+    ui.press("Enter")
+    found = parse(ui.render())
+    assert "\u2612 Auth" in ui.render()
+    assert (found.question, found.options, found.focused) == (
+        "Where do sessions live?",
+        ("Redis", "SQL"),
+        0,
+    )
+
+
+def test_unnumbered_options_are_parsed_by_column():
+    question = AskedQuestion("Auth", "Which auth method?", (("OAuth", "Flow"), ("Key", "Static")))
+    found = parse(ClaudeQuestionUI((question,), numbered=False).render())
+    assert (found.options, found.allows_text, found.focused) == (("OAuth", "Key"), True, 0)
+
+
+def test_review_screen_is_parsed_and_reports_unanswered_questions():
+    ui = ClaudeQuestionUI(
+        (
+            AskedQuestion("Auth", "Which auth method?", (("OAuth", "Flow"), ("Key", "Static"))),
+            AskedQuestion("Store", "Where?", (("Redis", "Fast"), ("SQL", "Durable"))),
+        )
+    )
+    ui.press("Enter")
+    ui.press("Enter")
+    found = parse(ui.render())
+    assert (found.kind, found.options, found.focused, found.complete) == (
+        "review",
+        ("Submit answers", "Cancel"),
+        0,
+        True,
+    )
+    warned = ui.render().replace(
+        " Review your answers",
+        " Review your answers\n\n ⚠ You have not answered all questions",
+    )
+    assert parse(warned).complete is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        SINGLE_QUESTION + "\n\u276f",
+        SINGLE_QUESTION.replace("4. Chat about this", "4. Something else"),
+        SINGLE_QUESTION.replace(f" {RULE}\n   4.", "   4."),
+        SINGLE_QUESTION.replace("   2. API key", "   7. API key").replace("\u276f 2.", "\u276f 7."),
+        SINGLE_QUESTION.replace("   4. Chat about this", " \u276f Chat about this"),
+        f"\u2022 Claude Code shows:\n  Chat about this\n  {DIALOG_FOOTER}\n\n\u276f\n\n? for shortcuts",
+    ],
+)
+def test_question_like_text_that_is_not_an_active_dialog_is_not_parsed(text):
+    assert parse(text) is None
+
+
+STARTUP_TRUST = f"""
+ {RULE}
+ Accessing workspace:
+
+ /tmp/project
+
+ Quick safety check: Is this a project you created or one you trust?
+
+ \u276f No, exit
+   Yes, I trust this folder
+
+ Enter to confirm \u00b7 Esc to cancel
+"""
+STARTUP_IMPORTS = f"""
+ {RULE}
+ Allow external CLAUDE.md file imports?
+
+ This project's CLAUDE.md or .claude/rules imports files outside the current working directory.
+
+ \u276f Yes, allow external imports
+   No, disable external imports
+
+ Enter to confirm \u00b7 Esc to cancel
+"""
+
+
+@pytest.mark.parametrize("text", [STARTUP_TRUST, STARTUP_IMPORTS])
+def test_unnumbered_startup_prompts_need_operator_policy_and_are_not_questions(text):
+    screen = Screen(text=text, exited=None)
+    assert parse(text) is None
+    assert dialog(AgentKind.CLAUDE, screen).state == "approval"
+
+
+def test_unknown_unnumbered_claude_selection_is_unrecognized():
+    text = STARTUP_TRUST.replace("Accessing workspace:", "Pick a color").replace(
+        "Quick safety check: Is this a project you created or one you trust?", "Any color works."
+    )
+    assert dialog(AgentKind.CLAUDE, Screen(text=text, exited=None)).state == "unsupported"
+
+
+def test_claude_permission_prompt_remains_an_approval():
+    text = "Bash command\n\n  rm -rf build\n\nDo you want to proceed?\n\u276f 1. Yes\n  2. No\n\nEsc to cancel"
+    assert parse(text) is None
+    assert dialog(AgentKind.CLAUDE, Screen(text=text, exited=None)).state == "approval"

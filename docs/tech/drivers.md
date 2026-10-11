@@ -120,10 +120,56 @@ offered workflow command name and full text, then clears it unsent.
 Native Codex logs omit approval, request-user-input and MCP elicitation dialogs.
 Pinned terminal anchors therefore distinguish `approval`, `structured_input` and
 `unsupported` observations; auth/trust/hooks/permission dialogs never become
-ordinary simulator questions. V1 stops these states for caller policy; it does
-not implement arbitrary dialog replies. Unknown UI or missing completion reaches
-a bounded visible blocker/timeout. Terminal exit code `0` means exited, never
-still running. Terminal readiness/silence is not model completion.
+ordinary simulator questions. Approval and unsupported states stop for caller
+policy, and so does Codex `structured_input`. Unknown UI or missing completion
+reaches a bounded visible blocker/timeout. Terminal exit code `0` means exited,
+never still running. Terminal readiness/silence is not model completion.
+
+Claude 2.1.296 startup prompts ("Accessing workspace:" folder trust and "Allow
+external CLAUDE.md file imports?") render unnumbered `❯` option lists with an
+"Enter to confirm · Esc to cancel" footer. They are `approval` observations, so a
+run stops with `needs_input` before any simulator call. Any other unnumbered
+Claude list with that footer is `unsupported`, never a composer.
+
+## Claude question dialogs
+
+Claude's AskUserQuestion dialog is the one `structured_input` the driver answers.
+`dialogs.question_dialog(screen)` parses it into a `QuestionDialog`: question
+text, rows (`option`, the free-text `text` row, and the multi-select `submit`
+row), the focused row, checkbox state and the multi-select flag. The layout is
+taken from the 2.1.296 bundled UI source, read statically and never observed
+live: a rule, a tab bar of `☐`/`☒` headers (`← … ✔ Submit →` for several
+questions or multi-select), the question, rows `❯ N. Label` with an indented
+description line (multi-select rows read `N. [✔] Label`), a final
+`Type something.` row, a `Next`/`Submit` row for multi-select, then a rule,
+`N. Chat about this` and the footer `Enter to select · … · Esc to cancel` as the
+last line. Options are located by column relative to the chat row, so unnumbered
+lists also parse. A trailing committed `✔` is not part of a label. Anything that
+does not fit, including the side-by-side preview layout, stays unrecognized. The
+final "Review your answers" screen parses as a `review` dialog with
+`Submit answers`/`Cancel` rows.
+
+`DriverSession.question()` returns the visible question for Claude, or `None`.
+`answer(asked, DialogSelection)` works on the same submission and only
+on the question it was given:
+
+- Single select: Up/Down until the screen shows the highlight on the chosen
+  row, then Enter.
+- Free text: move to the `Type something` row, type the single line and wait
+  for the row to show it, then Enter.
+- Multi-select: Space on each row whose checkbox differs from the choices,
+  waiting for each toggle, then move to the `Submit`/`Next` row and press Enter.
+
+Every key waits up to `command_seconds` for the expected screen. If the screen
+does not show it, nothing more is sent and the call returns `unsupported`
+(`cancelled` when cancellation was requested). After Enter the driver waits for
+the question to change. A following question returns `structured_input`, so
+several questions are answered one at a time. A review screen is submitted only
+when it reports every question answered. Closure must be seen on two
+consecutive screens. The turn is then observed as usual through
+`reconcile(wait=True)`. `session.answered` counts verified answers. Keys go
+through `Terminal.press`, which accepts only `Up`, `Down`, `Space` and `Enter`
+and sends them with tui-test `key press`; Escape is never sent.
 
 Usage keeps response/session/thread/root-turn identity, raw categories and source
 provenance. Responses deduplicate by identity; cumulative records are marked
