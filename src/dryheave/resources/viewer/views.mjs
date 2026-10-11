@@ -2,6 +2,8 @@ import { badge, block, bullets, caseLink, definitions, el, heading, idChip, note
 import { NO_VARIANT } from "./filters.mjs";
 import {
   CHECK_MARKS,
+  INSPECTION_CLASSES,
+  INSPECTION_MARKS,
   TOPLINE_LEGEND,
   UNKNOWN,
   checkLabel,
@@ -391,13 +393,14 @@ function toplineCell(text, className = "") {
   return el("td", { className, text });
 }
 
-function measureCells(item) {
-  return [
-    formatTurns(item.turns),
-    formatDuration(item.seconds),
-    formatTokens(item.tokens),
-    formatCost(item.cost, item.currency),
-  ].map((text) => toplineCell(text, "number"));
+function turnsCell(turns) {
+  return toplineCell(formatTurns(turns), "number");
+}
+
+function resourceCells(item) {
+  return [formatDuration(item.seconds), formatTokens(item.tokens), formatCost(item.cost, item.currency)].map(
+    (text) => toplineCell(text, "number"),
+  );
 }
 
 function groupCheckCell(topline, checkId) {
@@ -414,6 +417,41 @@ function attemptCheckCell(checks, checkId) {
   return outcome ? toplineCell(CHECK_MARKS[outcome] ?? "?", `check ${outcome}`) : toplineCell("");
 }
 
+function firstInspectionCell(value) {
+  if (!value || value === "none") {
+    return toplineCell("–");
+  }
+  return toplineCell(INSPECTION_MARKS[value] ?? "?", `check ${INSPECTION_CLASSES[value] ?? value}`);
+}
+
+function fixRequestsCell(value) {
+  return value === null || value === undefined ? toplineCell("–") : toplineCell(formatCount(value), "number");
+}
+
+function workflowCell(value) {
+  return value === null || value === undefined ? toplineCell("–") : toplineCell(value);
+}
+
+function groupFirstInspectionCell(passes, attempts) {
+  if (!attempts) {
+    return toplineCell("–");
+  }
+  const tone = passes === attempts ? "pass" : passes === 0 ? "fail" : "";
+  return toplineCell(`${passes}/${attempts}`, `check ${tone}`.trim());
+}
+
+function groupFixRequestsCell(value) {
+  return value === null || value === undefined ? toplineCell("–") : toplineCell(formatNumber(value), "number");
+}
+
+function groupWorkflowCell(completed, attempts) {
+  if (!attempts) {
+    return toplineCell("–");
+  }
+  const tone = completed === attempts ? "pass" : completed === 0 ? "fail" : "";
+  return toplineCell(`${completed}/${attempts}`, `check ${tone}`.trim());
+}
+
 function toplineTable(report) {
   const groups = (report.groups ?? []).filter((group) => group.topline);
   if (groups.length === 0) {
@@ -425,9 +463,17 @@ function toplineTable(report) {
   const head = el(
     "tr",
     {},
-    ["Variant / attempt", "Turns", "Time", "Tokens", "Cost", ...checkIds.map(checkLabel)].map(
-      (text) => el("th", { text, attrs: { scope: "col" } }),
-    ),
+    [
+      "Variant / attempt",
+      "Turns",
+      "First check",
+      "Fix requests",
+      "Workflow",
+      "Time",
+      "Tokens",
+      "Cost",
+      ...checkIds.map(checkLabel),
+    ].map((text) => el("th", { text, attrs: { scope: "col" } })),
   );
   const rows = groups.flatMap((group) => {
     const variant = group.variant || NO_VARIANT;
@@ -437,13 +483,21 @@ function toplineTable(report) {
     return [
       el("tr", { className: "variant" }, [
         toplineCell(`${variant} · mean of ${group.topline.attempts}`),
-        ...measureCells(group.topline),
+        turnsCell(group.topline.turns),
+        groupFirstInspectionCell(group.topline.first_inspection_passes, group.topline.first_inspection_attempts ?? 0),
+        groupFixRequestsCell(group.topline.fix_requests),
+        groupWorkflowCell(group.topline.workflows_completed, group.topline.workflow_attempts ?? 0),
+        ...resourceCells(group.topline),
         ...checkIds.map((checkId) => groupCheckCell(group.topline, checkId)),
       ]),
       ...members.map((attempt) =>
         el("tr", {}, [
           el("td", { className: "attempt", text: shortId(attempt.attempt_id, 10), attrs: { title: attempt.attempt_id } }),
-          ...measureCells(attempt.topline),
+          turnsCell(attempt.topline.turns),
+          firstInspectionCell(attempt.topline.first_inspection),
+          fixRequestsCell(attempt.topline.fix_requests),
+          workflowCell(attempt.topline.workflow),
+          ...resourceCells(attempt.topline),
           ...checkIds.map((checkId) => attemptCheckCell(attempt.topline.checks, checkId)),
         ]),
       ),
@@ -624,6 +678,40 @@ function helpNeededCard(result) {
       ["Disclosed proactively", list(help.proactive_facts)],
       ["Disclosed on request", list(help.on_request_facts)],
     ]),
+  ]);
+}
+
+function workflowCard(result) {
+  const workflow = result?.workflow;
+  if (!workflow) {
+    return section("Workflow", [note("No workflow is retained for this attempt.")]);
+  }
+  const events =
+    workflow.events.length === 0
+      ? note("No workflow events are retained for this attempt.")
+      : table(
+          "Workflow events in order.",
+          ["Step", "Kind", "Outcome", "Turn", "Failed criteria"],
+          workflow.events.map((event) => [
+            event.step_id,
+            event.kind,
+            event.outcome,
+            formatCount(event.turn),
+            event.failed_criteria.length === 0 ? "none" : event.failed_criteria.join(", "),
+          ]),
+        );
+  return section("Workflow", [
+    definitions([
+      ["Declared steps", formatCount(workflow.steps)],
+      ["Completed steps", formatCount(workflow.completed_steps)],
+      ["Inspections", formatCount(workflow.inspections)],
+      ["Fix requests", formatCount(workflow.fix_requests)],
+      ["Dialogs answered", formatCount(workflow.dialogs_answered)],
+      ["First inspection", workflow.first_inspection],
+      ["Final inspection", workflow.final_inspection],
+      ["Inspection time", formatSeconds(workflow.inspection_seconds)],
+    ]),
+    events,
   ]);
 }
 
@@ -907,6 +995,7 @@ export function attemptDetail(attempt, details, labels) {
     checksCard(result, details.reasoning),
     metricsCard(result),
     helpNeededCard(result),
+    workflowCard(result),
     rolesCard(attempt),
     dialogueCard(details.dialogue),
     patchCard(details.patch),

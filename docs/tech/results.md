@@ -171,6 +171,18 @@ currency and per-million-token rates. `known_cost` is an observed subtotal; part
 coverage does not establish a complete total. Explicit fixtures/no-call roles can
 establish zero; missing telemetry cannot.
 
+`Assessment.workflow` is a `WorkflowOutcome` derived once from the capture's
+`WorkflowProgress`, present only for an attempt that carried one; absent for a
+run without workflows and for assessments captured before workflows existed.
+It reports declared and completed step counts, inspection/fix-request/dialog
+counts, the first and final inspection's verdict (`passed`, `failed`,
+`unavailable`, `none`, or `not_reached` when steps were declared but never
+inspected) and total inspection seconds, plus the workflow's events in order
+for the attempt detail view. `HelpNeeded.simulator_replies` and its disclosed
+facts exclude fix-it replies and dialog answers — their call IDs are recorded
+on the matching workflow events — so only ordinary conversational replies are
+counted as asking the simulated user for help.
+
 Reports show scheduled trials, attempts, completed/scored/eligible counts, reasons
 for exclusion and distributions with observed/unknown counts. Spending retains
 failed, interrupted, retried and excluded attempts. Unfinished assessments reconstruct
@@ -203,12 +215,21 @@ every value HTML-escaped. `render_report_html` in `report_html.py` is a pure
 function from that data to the page string; the CLI does the I/O (resolving the
 reference, loading cases, optionally loading reasoning, writing the file).
 Both open with a Summary table: one row per variant, then one row per latest
-attempt of each trial, giving the agent's accepted turns, working time, total tokens
-(cache reads and writes included) and API-equivalent cost, plus one column per case
-check (✓ wanted outcome, ✗ the opposite, – not applicable, ? no clear answer; variant
-rows show passes over answered). Variant rows average the attempts listed under them,
-so retried attempts are excluded there, though their spend stays in the sections below.
-These come from each attempt's and each group's `topline`, derived in `reports.py`.
+attempt of each trial, giving the agent's accepted turns, first inspection
+(✓ passed, ✗ failed, ? unavailable, – no inspection), fix requests, workflow
+progress (`completed/steps`, or – without a workflow), working time (agent
+time excludes inspection seconds), total tokens (cache reads and writes
+included) and API-equivalent cost, plus one column per case check (✓ wanted
+outcome, ✗ the opposite, – not applicable, ? no clear answer; variant rows
+show passes over answered). Variant rows show first-check passes and
+workflow completions as passes over the attempts below them that have an
+inspection or a workflow respectively, and mean fix requests over attempts
+with a workflow; retried attempts are excluded from every variant row, though
+their spend stays in the sections below. These come from each attempt's and
+each group's `topline`, derived in `reports.py`. An attempt's detail adds a
+Workflow card with its step/inspection/dialog counts and its events in order
+(step, kind, outcome, turn, failed criteria); an attempt without a retained
+workflow shows that plainly instead.
 Sections mirror the viewer's Results and Case tabs: per-variant cost (API-equivalent
 estimate, with price basis), tokens, turns, duration and help needed, each labelled
 with its population (every retained attempt including retries, or eligible attempts

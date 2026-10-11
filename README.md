@@ -109,6 +109,15 @@ Follow the packaged [real workflow](src/dryheave/resources/examples/real-workflo
 6. `export/import` transports curated inputs and structured results. Raw captures,
    source sessions and grading artifacts require explicit sensitive-class flags.
 
+A case captures one person's real workflow, not an idealized task: its `workflow`
+field records the reviews, manual testing, QA and documentation habits they
+actually followed, replayed as `prompt` and `inspect` steps until the work passes
+or a budget runs out. `bench CASE --variant NAME=MODEL[@EFFORT] [--judge
+MODEL[@EFFORT]]` runs that workflow by default; `--no-workflow` sends only the
+case's initial prompt, for a first-shot comparison against the full workflow.
+`--inspector MODEL[@EFFORT]` grades inspect steps with a separate model instead
+of the judge's.
+
 Haiku profiles omit effort. Derive Sonnet with `--model MODEL --effort low`;
 derive back to Haiku with `--clear-effort`. This is a configuration comparison,
 not effort-only. Claude 2.1.278 controllers use tool-disabled print mode and the

@@ -514,6 +514,13 @@ held out, graded only at final assessment as every criterion already is.
 `CaseContent.workflow` is dropped from serialization when empty, so cases
 without one keep their existing object ID.
 
+`dryheave run --workflow` turns this on for a plain `run`. `bench` turns it on
+by default; `--no-workflow` disables it for a first-shot comparison against the
+full workflow, and also skips the launch check's slash-step probe. `bench
+--inspector MODEL[@EFFORT]` sets `ScoringConfig.inspector` for inspect steps,
+defaulting to the judge's model when omitted; `bench` refuses, before any spend,
+a workflow-enabled run whose case has an inspect step but no judge or inspector.
+
 ## Historical repository snapshots
 
 `capture_repository(store, repo, commit, initial_patch=..., limits=...)` requires a

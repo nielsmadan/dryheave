@@ -9,7 +9,7 @@ from dryheave.controller_runtime import reconcile_runtimes
 from dryheave.drivers.models import CleanupReport, ProcessIdentity
 from dryheave.errors import InputError
 from dryheave.filesystem import directory_names
-from dryheave.inspection import writers_confirmed_stopped
+from dryheave.inspection_scratch import writers_confirmed_stopped
 from dryheave.journals import RunStore
 from dryheave.models import TrialStage
 from dryheave.process_ownership import ProcessOwner
@@ -53,14 +53,23 @@ def reconcile_inspection_scratch(
         if not private.exists():
             continue
         reconcile_runtimes(private / "runtime")
-        if writers_confirmed_stopped(private):
+        if writers_confirmed_stopped(private, _alive):
             try:
                 shutil.rmtree(private)
             except OSError:
-                errors.append("inspection_scratch_cleanup_failed")
+                errors.append(f"inspection_scratch_cleanup_failed: {private}")
         else:
-            errors.append("inspection_scratch_unresolved")
+            errors.append(f"inspection_scratch_unresolved: {private}")
     return tuple(errors)
+
+
+def _alive(identity: ProcessIdentity) -> bool:
+    try:
+        return psutil.Process(identity.pid).create_time() == identity.created
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:
+        return True
 
 
 def reconcile_attempt(

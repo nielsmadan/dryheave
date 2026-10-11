@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import Field, SerializerFunctionWrapHandler, model_serializer
 
 from dryheave.models import Name, ObjectId, RunId, StrictModel
-from dryheave.result_models import Assessment, CheckResult, RoleMetrics
+from dryheave.result_models import Assessment, CheckResult, InspectionVerdict, RoleMetrics
 
 
 class Distribution(StrictModel):
@@ -47,6 +47,10 @@ class AttemptTopline(StrictModel):
     cost: float | None
     currency: str | None
     checks: tuple[CheckResult, ...]
+    first_inspection: InspectionVerdict | None = None
+    fix_requests: int | None = None
+    workflow: str | None = None
+    workflow_completed: bool | None = None
 
 
 class ToplineCheck(StrictModel):
@@ -63,6 +67,11 @@ class GroupTopline(StrictModel):
     cost: float | None
     currency: str | None
     checks: tuple[ToplineCheck, ...]
+    first_inspection_passes: int = 0
+    first_inspection_attempts: int = 0
+    fix_requests: float | None = None
+    workflows_completed: int = 0
+    workflow_attempts: int = 0
 
 
 class AttemptReport(StrictModel):

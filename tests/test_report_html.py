@@ -15,7 +15,9 @@ from dryheave.result_models import (
     MetricsResult,
     MetricValue,
     RoleMetrics,
+    WorkflowOutcome,
 )
+from dryheave.runner_models import WorkflowEvent
 from dryheave.viewer_models import (
     CaseCheckView,
     CaseDeterministicView,
@@ -368,21 +370,81 @@ def test_render_report_html_opens_with_an_agent_summary_of_measures_and_checks()
     html = render_report_html(report, {CASE_ID: _case_view()})
     assert html.index("<h2>Summary</h2>") < html.index("<h2>Report</h2>")
     assert (
-        "<th>Variant / attempt</th><th>Turns</th><th>Time</th><th>Tokens</th><th>Cost</th>"
+        "<th>Variant / attempt</th><th>Turns</th><th>First check</th><th>Fix requests</th>"
+        "<th>Workflow</th><th>Time</th><th>Tokens</th><th>Cost</th>"
         "<th>Final right view</th><th>Branch moves up</th><th>Recovered after collapse</th>"
     ) in html
-    measures = (
-        '<td class="number">2</td><td class="number">4m 30s</td>'
-        '<td class="number">1.55M</td><td class="number">$0.91</td>'
+    turns = '<td class="number">2</td>'
+    no_workflow = "<td>\u2013</td><td>\u2013</td><td>\u2013</td>"
+    resources = (
+        '<td class="number">4m 30s</td><td class="number">1.55M</td><td class="number">$0.91</td>'
     )
     assert (
         '<tr class="variant"><td>base · mean of 1</td>'
-        + measures
+        + turns
+        + no_workflow
+        + resources
         + '<td class="check pass">1/1</td><td class="check fail">0/1</td><td>\u2013</td></tr>'
     ) in html
     assert (
         '<tr><td class="attempt" title="a-4ff975651a324a13893fb9edf14b4bef">a-4ff97565</td>'
-        + measures
+        + turns
+        + no_workflow
+        + resources
         + '<td class="check pass">✓</td><td class="check fail">✗</td>'
         '<td class="check not_applicable">\u2013</td></tr>'
     ) in html
+
+
+def test_render_report_html_renders_workflow_topline_cells_and_the_per_attempt_card() -> None:
+    workflow = WorkflowOutcome(
+        steps=2,
+        completed_steps=2,
+        inspections=1,
+        fix_requests=1,
+        dialogs_answered=0,
+        first_inspection="passed",
+        final_inspection="passed",
+        inspection_seconds=5.0,
+        events=(
+            WorkflowEvent(step_id="review", kind="prompt", outcome="sent", turn=1),
+            WorkflowEvent(
+                step_id="check",
+                kind="inspect",
+                outcome="failed",
+                turn=1,
+                failed_criteria=("greeting",),
+                seconds=2.0,
+            ),
+            WorkflowEvent(step_id="check", kind="inspect", outcome="fix_requested", turn=1),
+            WorkflowEvent(step_id="check", kind="inspect", outcome="passed", turn=2, seconds=3.0),
+        ),
+    )
+    result = _assessment(
+        attempt_id="attempt-workflow",
+        accepted_turns=2,
+        subject_seconds=20.0,
+        workflow=workflow,
+    )
+    attempts = (_attempt("attempt-workflow", result),)
+    report = with_derived(
+        RunReport(
+            run_id="a" * 32,
+            experiment_id="a" * 64,
+            durable_sequence=1,
+            scheduled_trials=1,
+            unstarted_trials=(),
+            input_error=None,
+            attempts=attempts,
+            groups=group_metrics(attempts),
+        )
+    )
+    html = render_report_html(report, {CASE_ID: _case_view()})
+    assert '<td class="check pass">✓</td><td class="number">1</td><td>2/2</td>' in html
+    assert '<td class="number">15s</td>' in html
+    assert (
+        '<td class="check pass">1/1</td><td class="number">1.00</td><td class="check pass">1/1</td>'
+    ) in html
+    assert "Workflow events in order." in html
+    assert "<td>greeting</td>" in html
+    assert "<td>fix_requested</td>" in html

@@ -58,6 +58,7 @@ def _run(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
             or args.tui_test
             or args.strict
             or args.assess
+            or args.workflow
         ):
             raise InputError("Run status cannot be combined with execution options.")
         return run_status(store, args.status).model_dump(mode="json")
@@ -71,13 +72,21 @@ def _run(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
             validate_runtime_root(runtime_root)
         transport = resolve_transport(transport, workspace)
     options = None
-    if not args.resume or args.mode or args.runtime_root or args.tui_test or args.strict:
+    if (
+        not args.resume
+        or args.mode
+        or args.runtime_root
+        or args.tui_test
+        or args.strict
+        or args.workflow
+    ):
         options = RunOptions.model_validate(
             {
                 "mode": args.mode or "native",
                 "strict": args.strict,
                 "runtime_root": str(runtime_root) if runtime_root else None,
                 "transport": str(transport) if transport else None,
+                "workflow": args.workflow,
             }
         )
     cancelled = Event()
@@ -156,6 +165,11 @@ def register_runner(registry: CommandRegistry) -> None:
     run.add_argument("--status", metavar="RUN_ID")
     run.add_argument("--mode", choices=["native", "offline-fixture"])
     run.add_argument("--strict", action="store_true")
+    run.add_argument(
+        "--workflow",
+        action="store_true",
+        help="Follow the case's declared or default workflow instead of today's single pass.",
+    )
     run.add_argument("--runtime-root", type=Path)
     run.add_argument("--tui-test", type=Path)
     run.add_argument(

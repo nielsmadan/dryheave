@@ -6,9 +6,11 @@ from dryheave.bench import (
     JUDGE_BUDGET,
     RoleChoice,
     VariantChoice,
+    attempt_progress_lines,
     bench_draft,
     capture_variants,
     check_case,
+    check_workflow,
     claude_role,
     parse_role,
     parse_variant,
@@ -28,6 +30,7 @@ from dryheave.pricing import builtin_price_table
 from dryheave.profiles import load_profile
 from dryheave.report_models import (
     AttemptReport,
+    AttemptTopline,
     CheckSummary,
     Distribution,
     GroupMetrics,
@@ -163,9 +166,9 @@ def test_bench_experiment_is_content_addressed_and_resumable(store, benchmark):
         "sonnet",
         "sonnet",
     ]
-    assert resumable_run(store, identifier) is None
+    assert resumable_run(store, identifier, workflow=True) is None
     run_id = RunStore(store.root).create(identifier)
-    previous = resumable_run(store, identifier)
+    previous = resumable_run(store, identifier, workflow=True)
     assert previous is not None
     assert (previous.run_id, previous.finished) == (run_id, False)
     scoring = load_role(
@@ -174,12 +177,48 @@ def test_bench_experiment_is_content_addressed_and_resumable(store, benchmark):
     assert scoring.prices == builtin_price_table()
 
 
+def test_bench_resumes_only_a_run_with_the_same_workflow_setting(store, benchmark):
+    from dryheave.runner_models import RunOptions
+    from dryheave.runner_state import ExecutionJournal
+
+    case_id = check_case(store, benchmark.cases[0], judged=False)
+    profiles = capture_variants(
+        store, (VariantChoice("sonnet", RoleChoice("claude-sonnet-4-6", "low"), ()),), "claude"
+    )
+    identifier = create_experiment(
+        store,
+        bench_draft(
+            case_id, profiles, simulator=benchmark.simulator, judge=None, repetitions=1, seed=1
+        ),
+    )
+    runs = RunStore(store.root)
+
+    def frozen_run(workflow):
+        run_id = runs.create(identifier)
+        with runs.open(run_id) as journal:
+            ExecutionJournal(journal).configure(
+                RunOptions(mode="offline-fixture", workflow=workflow)
+            )
+        return run_id
+
+    with_workflow = frozen_run(True)
+    assert resumable_run(store, identifier, workflow=False) is None
+    assert resumable_run(store, identifier, workflow=True).run_id == with_workflow
+    without_workflow = frozen_run(False)
+    assert resumable_run(store, identifier, workflow=False).run_id == without_workflow
+    assert resumable_run(store, identifier, workflow=True).run_id == with_workflow
+
+
 def criterion(identifier, outcome):
     return CriterionResult.model_construct(criterion_id=identifier, outcome=outcome)
 
 
 def test_summary_counts_outcomes_per_variant_and_criterion():
-    def attempt(identifier, variant, outcomes):
+    workflow_topline = AttemptTopline.model_construct(
+        first_inspection="passed", fix_requests=1, workflow="2/2"
+    )
+
+    def attempt(identifier, variant, outcomes, topline=None):
         return AttemptReport.model_construct(
             attempt_id=identifier,
             variant=variant,
@@ -188,11 +227,12 @@ def test_summary_counts_outcomes_per_variant_and_criterion():
                 exclusion_reasons=(),
                 criteria=tuple(criterion(name, value) for name, value in outcomes),
             ),
+            topline=topline,
         )
 
     report = RunReport.model_construct(
         attempts=(
-            attempt("a1", "haiku", [("correctness", "fail"), ("tests", "pass")]),
+            attempt("a1", "haiku", [("correctness", "fail"), ("tests", "pass")], workflow_topline),
             attempt("a2", "haiku", [("correctness", "pass"), ("tests", "pass")]),
             AttemptReport.model_construct(attempt_id="a3", variant="sonnet", result=None),
         ),
@@ -204,9 +244,27 @@ def test_summary_counts_outcomes_per_variant_and_criterion():
         "tests": {"pass": 2},
     }
     assert summary["haiku"]["measures"] == {}
+    assert summary["haiku"]["attempts"][0] == {
+        "attempt_id": "a1",
+        "stop_reason": "completed",
+        "completion": "pass",
+        "exclusions": [],
+        "first_inspection": "passed",
+        "fix_requests": 1,
+        "workflow": "2/2",
+    }
+    assert summary["haiku"]["attempts"][1]["workflow"] is None
     assert summary["sonnet"] == {
         "attempts": [
-            {"attempt_id": "a3", "stop_reason": "needs_input", "completion": None, "exclusions": []}
+            {
+                "attempt_id": "a3",
+                "stop_reason": "needs_input",
+                "completion": None,
+                "exclusions": [],
+                "first_inspection": None,
+                "fix_requests": None,
+                "workflow": None,
+            }
         ],
         "criteria": {},
         "measures": {},
@@ -519,7 +577,90 @@ def test_slash_prompts_are_the_case_workflow_commands(store, monkeypatch):
             InspectStep(step_id="check", criteria=("quality",)),
             PromptStep(step_id="review", prompt="/code-review --quick"),
             PromptStep(step_id="docs", prompt="Update the docs."),
+            PromptStep(step_id="notes", prompt=" \n/release-notes"),
         ),
     )
     monkeypatch.setattr(bench, "load_frozen_case", lambda store, case_id: case)
-    assert bench.slash_prompts(store, "case") == ("/code-review --quick",)
+    assert bench.slash_prompts(store, "case") == ("/code-review --quick", " \n/release-notes")
+
+
+def _workflow_case(*, workflow):
+    from dryheave.cases import CaseContent, RubricCriterion
+
+    return CaseContent(
+        title="t",
+        initial_prompt="p",
+        criteria=(
+            RubricCriterion(criterion_id="quality", required=True, rubric="Quality rubric text."),
+        ),
+        workflow=workflow,
+    )
+
+
+def test_check_workflow_refuses_an_inspect_step_without_judge_or_inspector():
+    from dryheave.cases import InspectStep
+
+    case = _workflow_case(workflow=(InspectStep(step_id="check", criteria=("quality",)),))
+    with pytest.raises(InputError, match="--inspector"):
+        check_workflow(case, workflow=True, scoring=ScoringConfig())
+
+
+def test_check_workflow_allows_an_inspect_step_with_an_inspector():
+    from dryheave.cases import InspectStep
+
+    case = _workflow_case(workflow=(InspectStep(step_id="check", criteria=("quality",)),))
+    inspector = claude_role(RoleChoice("claude-haiku-4-5", None), "claude", JUDGE_BUDGET)
+    check_workflow(case, workflow=True, scoring=ScoringConfig(inspector=inspector))
+    check_workflow(case, workflow=True, scoring=ScoringConfig(judge=inspector))
+
+
+def test_check_workflow_ignores_inspect_steps_when_workflows_are_off():
+    from dryheave.cases import InspectStep
+
+    case = _workflow_case(workflow=(InspectStep(step_id="check", criteria=("quality",)),))
+    check_workflow(case, workflow=False, scoring=ScoringConfig())
+
+
+def test_check_workflow_allows_prompt_only_workflows_without_an_inspector():
+    from dryheave.cases import PromptStep
+
+    case = _workflow_case(workflow=(PromptStep(step_id="review", prompt="/code-review"),))
+    check_workflow(case, workflow=True, scoring=ScoringConfig())
+
+
+def test_attempt_progress_lines_name_stop_reason_and_workflow_fields():
+    workflow_topline = AttemptTopline.model_construct(
+        first_inspection="failed", fix_requests=2, workflow="1/2"
+    )
+    report = RunReport.model_construct(
+        attempts=(
+            AttemptReport.model_construct(
+                attempt_id="a1", variant="haiku", result=None, topline=workflow_topline
+            ),
+            AttemptReport.model_construct(attempt_id="a2", variant="haiku", result=None),
+        ),
+        groups=(),
+    )
+    lines = attempt_progress_lines(report, {"a1": "workflow_complete", "a2": "needs_input"})
+    assert lines == (
+        "attempt a1 stopped (workflow_complete); workflow 1/2; fix requests 2; first check failed",
+        "attempt a2 stopped (needs_input)",
+    )
+
+
+def test_bench_draft_sets_the_inspector_scoring_recipe(store, benchmark):
+    case_id = check_case(store, benchmark.cases[0], judged=False)
+    profiles = capture_variants(
+        store, (VariantChoice("sonnet", RoleChoice("claude-sonnet-4-6", "low"), ()),), "claude"
+    )
+    inspector = claude_role(RoleChoice("claude-haiku-4-5", None), "claude", JUDGE_BUDGET)
+    draft = bench_draft(
+        case_id,
+        profiles,
+        simulator=benchmark.simulator,
+        judge=None,
+        inspector=inspector,
+        repetitions=1,
+        seed=0,
+    )
+    assert draft.scoring.inspector == inspector

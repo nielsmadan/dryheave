@@ -1182,3 +1182,106 @@ def test_attempt_topline_leaves_tokens_unknown_when_a_category_is_unobserved() -
     )
     topline = attempt_topline(partial, latest=True)
     assert (topline.tokens, topline.cost, topline.currency) == (None, None, None)
+
+
+def _workflow_outcome(**overrides: object):
+    from dryheave.result_models import WorkflowOutcome
+
+    base = {
+        "steps": 0,
+        "completed_steps": 0,
+        "inspections": 0,
+        "fix_requests": 0,
+        "dialogs_answered": 0,
+        "first_inspection": "none",
+        "final_inspection": "none",
+        "inspection_seconds": 0.0,
+    }
+    base.update(overrides)
+    return WorkflowOutcome(**base)
+
+
+def test_attempt_topline_subtracts_inspection_seconds_and_carries_workflow_fields() -> None:
+    from dryheave.reports import attempt_topline
+
+    item = _topline_attempt("attempt-1", "trial-1", cost=1.0, seconds=100.0, checks=())
+    assert item.result is not None
+    outcome = _workflow_outcome(
+        steps=2,
+        completed_steps=2,
+        inspections=1,
+        fix_requests=1,
+        first_inspection="passed",
+        final_inspection="passed",
+        inspection_seconds=15.0,
+    )
+    with_workflow = item.model_copy(
+        update={"result": item.result.model_copy(update={"workflow": outcome})}
+    )
+    topline = attempt_topline(with_workflow, latest=True)
+    assert topline.seconds == 85.0
+    assert (topline.first_inspection, topline.fix_requests, topline.workflow) == (
+        "passed",
+        1,
+        "2/2",
+    )
+
+
+def test_group_topline_aggregates_first_check_fix_requests_and_workflow_completion() -> None:
+    from dryheave.reports import attempt_topline, group_topline
+
+    passed = _workflow_outcome(
+        steps=2,
+        completed_steps=2,
+        inspections=1,
+        first_inspection="passed",
+        final_inspection="passed",
+    )
+    failed = _workflow_outcome(
+        steps=2,
+        completed_steps=0,
+        inspections=1,
+        fix_requests=2,
+        first_inspection="failed",
+        final_inspection="failed",
+    )
+    attempt_a = _topline_attempt("attempt-a", "trial-a", cost=1.0, seconds=10.0, checks=())
+    attempt_b = _topline_attempt("attempt-b", "trial-b", cost=1.0, seconds=10.0, checks=())
+    attempt_c = _topline_attempt("attempt-c", "trial-c", cost=1.0, seconds=10.0, checks=())
+    assert attempt_a.result and attempt_b.result and attempt_c.result
+    with_a = attempt_a.model_copy(
+        update={"result": attempt_a.result.model_copy(update={"workflow": passed})}
+    )
+    with_b = attempt_b.model_copy(
+        update={"result": attempt_b.result.model_copy(update={"workflow": failed})}
+    )
+    toplines = [
+        attempt_topline(with_a, latest=True),
+        attempt_topline(with_b, latest=True),
+        attempt_topline(attempt_c, latest=True),
+    ]
+    group = group_topline(toplines)
+    assert group.first_inspection_passes == 1
+    assert group.first_inspection_attempts == 2
+    assert group.fix_requests == pytest.approx(1.0)
+    assert group.workflows_completed == 1
+    assert group.workflow_attempts == 2
+
+
+def test_attempt_topline_hides_workflow_and_fix_requests_for_dialogs_without_a_workflow() -> None:
+    from dryheave.reports import attempt_topline, group_topline
+
+    dialog_only = _workflow_outcome(steps=0, completed_steps=0, dialogs_answered=1)
+    attempt_a = _topline_attempt("attempt-a", "trial-a", cost=1.0, seconds=10.0, checks=())
+    assert attempt_a.result is not None
+    with_dialog = attempt_a.model_copy(
+        update={"result": attempt_a.result.model_copy(update={"workflow": dialog_only})}
+    )
+    topline = attempt_topline(with_dialog, latest=True)
+    assert (topline.first_inspection, topline.fix_requests, topline.workflow) == (None, None, None)
+    group = group_topline([topline])
+    assert (
+        group.first_inspection_attempts,
+        group.workflow_attempts,
+        group.workflows_completed,
+    ) == (0, 0, 0)

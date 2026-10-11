@@ -1,10 +1,10 @@
-import json
 import os
 import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISDIR, S_ISREG
 from tempfile import mkdtemp
 from threading import Event
 from typing import Literal
@@ -21,6 +21,7 @@ from dryheave.errors import DryheaveError, InputError
 from dryheave.filesystem import ensure_directory
 from dryheave.final_capture import capture_workspace
 from dryheave.grading import VerifierContext, check_snapshot
+from dryheave.inspection_scratch import writers_confirmed_stopped
 from dryheave.judges import JudgeInput, TranscriptEntry, fit_transcript, invoke_judge, judge_files
 from dryheave.models import Name, StrictModel
 from dryheave.result_models import CheckExecution
@@ -130,17 +131,6 @@ def _remove(private: Path) -> bool:
     return True
 
 
-def writers_confirmed_stopped(private: Path) -> bool:
-    for path in private.glob("**/*-cleanup.json"):
-        try:
-            payload = json.loads(path.read_text())
-        except (OSError, ValueError):
-            return False
-        if not payload.get("known_writers_stopped", False):
-            return False
-    return True
-
-
 def _inspect(request: InspectionRequest, private: Path) -> InspectionResult:
     step_id = request.step.step_id
     current: str | None = None
@@ -218,9 +208,14 @@ def _snapshot(
     raise _Unavailable("snapshot_unavailable")
 
 
+def _irregular(directory: str, names: list[str]) -> set[str]:
+    modes = {name: os.lstat(os.path.join(directory, name)).st_mode for name in names}
+    return {name for name, mode in modes.items() if not (S_ISREG(mode) or S_ISDIR(mode))}
+
+
 def _retain(source: Path, target: Path) -> None:
     ensure_directory(target.parent)
-    shutil.copytree(source, target)
+    shutil.copytree(source, target, symlinks=True, ignore=_irregular)
 
 
 def _verdict(execution: CheckExecution, deadline: float) -> tuple[str, str | None]:

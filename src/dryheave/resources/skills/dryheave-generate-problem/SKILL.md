@@ -96,7 +96,18 @@ description: Mine and curate supported Dryheave benchmark problems from explicit
    fixes and grading internals. Resolve issues before setting review flags.
    Deterministic checks need trusted hidden entrypoints, bounded argv, success and
    assertion-failure markers; syntax/import/runtime errors remain verifier errors.
-8. Re-run `problem record` for the same candidate with `--state drafted --draft PATH`,
+8. Look past this candidate's chosen end event for the author's actual
+   follow-ups — skill invocations such as `/code-review` or `/qa`, manual
+   testing they reported back, docs requests, re-reviews, and how they
+   answered any skill's dialogs — and encode them in order as `workflow`:
+   a `PromptStep` per follow-up prompt (with an `answer_hint` for any dialog
+   it triggers) and an `InspectStep` naming the criteria the author checked
+   at that point. Write that inspect criterion as a dedicated, observable
+   fact — what the user would see using the result, never a file, type or
+   symbol — separate from the correctness criterion from step 7, which stays
+   held out for final grading. Ask the author when a follow-up's intent is
+   unclear rather than guessing one.
+9. Re-run `problem record` for the same candidate with `--state drafted --draft PATH`,
    all reviewed evidence/rationales, and `--dirty-state clean` or `patch` matching
    the repository snapshot. Then run `problem validate REQUEST CANDIDATE --expect-revision REVISION`.
    Use its returned revision for `problem freeze REQUEST CANDIDATE --expect-revision REVISION`.
@@ -112,7 +123,7 @@ description: Mine and curate supported Dryheave benchmark problems from explicit
    run `case.setup`; provide required tools and declared environment references.
    Correct the draft/hidden verifier and freeze a new case before recalibrating;
    an older calibration always describes its original immutable case ID.
-9. Return frozen/drafted/rejected/unresolved candidates separately, their scope
+10. Return frozen/drafted/rejected/unresolved candidates separately, their scope
    and baseline reasoning, gaps and next action. Use `problem inspect REQUEST` to
    recover progress and `problem list` to find requests. Changing sources requires
    a new selection/request. Use `dryheave-agent-profile` for launch inputs and

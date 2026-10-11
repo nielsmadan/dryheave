@@ -10,8 +10,10 @@ from pydantic import (
 )
 
 from dryheave.models import Name, ObjectId, RunId, StrictModel, TokenUsage
+from dryheave.runner_models import WorkflowEvent
 
 Outcome = Literal["pass", "fail", "error", "not_run"]
+InspectionVerdict = Literal["passed", "failed", "unavailable", "none"]
 
 
 class AuditFinding(StrictModel):
@@ -82,6 +84,18 @@ class HelpNeeded(StrictModel):
     facts_disclosed: tuple[Name, ...]
     proactive_facts: tuple[Name, ...]
     on_request_facts: tuple[Name, ...]
+
+
+class WorkflowOutcome(StrictModel):
+    steps: int = Field(ge=0)
+    completed_steps: int = Field(ge=0)
+    inspections: int = Field(ge=0)
+    fix_requests: int = Field(ge=0)
+    dialogs_answered: int = Field(ge=0)
+    first_inspection: InspectionVerdict
+    final_inspection: Literal["passed", "failed", "unavailable", "not_reached", "none"]
+    inspection_seconds: float = Field(ge=0)
+    events: tuple[WorkflowEvent, ...] = ()
 
 
 MAX_METRIC_VALUES = 64
@@ -184,6 +198,7 @@ class Assessment(StrictModel):
     checks: tuple[CheckResult, ...] = ()
     metrics: tuple[MetricsResult, ...] = ()
     help_needed: HelpNeeded | None = None
+    workflow: WorkflowOutcome | None = None
     rubric_set: str | None = None
     graded_case_id: ObjectId | None = None
     regrade_id: Name | None = None
@@ -229,7 +244,7 @@ class Assessment(StrictModel):
         for name in ("checks", "metrics"):
             if not getattr(self, name):
                 value.pop(name, None)
-        for name in ("rubric_set", "help_needed", "graded_case_id", "regrade_id"):
+        for name in ("rubric_set", "help_needed", "workflow", "graded_case_id", "regrade_id"):
             if getattr(self, name) is None:
                 value.pop(name, None)
         return value

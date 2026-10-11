@@ -26,6 +26,15 @@ def test_assess_convenience_completes_existing_pipeline(store, graded_benchmark,
 
 
 @pytest.mark.integration
+def test_run_workflow_flag_reaches_run_options(store, benchmark, capsys):
+    identifier = create_experiment(store, benchmark)
+    common = ["--store", str(store.root), "--json"]
+    assert main([*common, "run", identifier, "--mode", "offline-fixture", "--workflow"]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["options"]["workflow"] is True
+
+
+@pytest.mark.integration
 def test_status_rejects_assessment(store, benchmark, capsys):
     result = run_experiment(
         store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")

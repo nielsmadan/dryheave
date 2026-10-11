@@ -480,9 +480,7 @@ class TrialExecution:
                 self.pending = WorkflowEvent(
                     step_id=step.step_id, kind="prompt", outcome="sent", turn=self.accepted
                 )
-                return step.prompt, (
-                    "curated-native-command" if step.prompt.startswith("/") else "conversation"
-                )
+                return step.prompt, ("curated-native-command" if step.slash else "conversation")
             if self.inspections >= self.case.budgets.max_turns:
                 self.update(stop_reason="turn_budget")
                 return None
@@ -580,11 +578,13 @@ class TrialExecution:
             },
         )
         calls: list[RoleCall] = []
+        judged = 0
         seconds = 0.0
         result: InspectionResult | None = None
         for index in range(INSPECTION_ATTEMPTS):
             observed = self._observed_events()
-            attempt = self._inspect_once(step, inherited, privates[index])
+            attempt, made = self._inspect_once(step, inherited, privates[index], judged)
+            judged += made
             calls.extend(attempt.calls)
             seconds += attempt.seconds
             if self._observed_events() == observed:
@@ -609,8 +609,8 @@ class TrialExecution:
         return result
 
     def _inspect_once(
-        self, step: InspectStep, inherited: Mapping[str, str], private: Path
-    ) -> InspectionResult:
+        self, step: InspectStep, inherited: Mapping[str, str], private: Path, judged: int
+    ) -> tuple[InspectionResult, int]:
         intents: list[str] = []
 
         def context(deadline: float, runtime_root: Path) -> CallContext:
@@ -624,7 +624,7 @@ class TrialExecution:
             )
             return CallContext(
                 call_id=call_id,
-                index=len(intents) - 1,
+                index=judged + len(intents) - 1,
                 deadline=deadline,
                 cancelled=self.cancelled,
                 inherited=inherited,
@@ -676,7 +676,7 @@ class TrialExecution:
                 for call in self.state.calls
             )
         )
-        return result
+        return result, len(intents)
 
     def _transcript(self) -> tuple[TranscriptEntry, ...]:
         workspace = str(self.workspace)

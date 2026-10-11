@@ -180,6 +180,47 @@ test("attemptDetail shows the judge's rationale for a criterion and check when t
   assert.equal(text.includes("reasoning not included"), false);
 });
 
+test("attemptDetail lists workflow events in order and falls back without a workflow", () => {
+  const withoutWorkflow = { ...attempt, result: resultWithGrading() };
+  const emptyText = renderedText(
+    attemptDetail(withoutWorkflow, { reasoning: null, dialogue: null, patch: null, evidence: null, evidenceFile: null }, {}),
+  );
+  assert.match(emptyText, /No workflow is retained for this attempt\./);
+
+  const workflow = {
+    steps: 2,
+    completed_steps: 2,
+    inspections: 1,
+    fix_requests: 1,
+    dialogs_answered: 0,
+    first_inspection: "passed",
+    final_inspection: "passed",
+    inspection_seconds: 5,
+    events: [
+      { step_id: "review", kind: "prompt", outcome: "sent", turn: 1, failed_criteria: [], call_ids: [], seconds: null },
+      {
+        step_id: "check",
+        kind: "inspect",
+        outcome: "failed",
+        turn: 1,
+        failed_criteria: ["greeting"],
+        call_ids: [],
+        seconds: 2,
+      },
+      { step_id: "check", kind: "inspect", outcome: "fix_requested", turn: 1, failed_criteria: ["greeting"], call_ids: [], seconds: null },
+      { step_id: "check", kind: "inspect", outcome: "passed", turn: 2, failed_criteria: [], call_ids: [], seconds: 3 },
+    ],
+  };
+  const withWorkflow = { ...attempt, result: resultWithGrading({ workflow }) };
+  const text = renderedText(
+    attemptDetail(withWorkflow, { reasoning: null, dialogue: null, patch: null, evidence: null, evidenceFile: null }, {}),
+  );
+  assert.match(text, /Workflow events in order\./);
+  assert.match(text, /greeting/);
+  assert.match(text, /fix_requested/);
+  assert.match(text, /passed/);
+});
+
 test("attemptDetail keeps hostile judge rationale, fact text and metric values inert", () => {
   const hostile = "<script>alert(1)</script>";
   const result = resultWithGrading({
@@ -924,13 +965,53 @@ test("resultsView opens with an agent summary of each variant and its latest att
   const nodes = resultsView(report({ groups: [sonnet], attempts: [retried, latest] }), {});
   const rows = matching(nodes[0], (node) => node.nodeName === "TR").map((row) => renderedText(row));
   assert.deepEqual(rows, [
-    "Variant / attemptTurnsTimeTokensCostFinal right viewBranch moves up",
-    "sonnet-high · mean of 124m 30s1.55M$0.911/10/1",
-    "a-4ff97565…24m 30s1.55M$0.91✓✗",
+    "Variant / attemptTurnsFirst checkFix requestsWorkflowTimeTokensCostFinal right viewBranch moves up",
+    "sonnet-high · mean of 12–––4m 30s1.55M$0.911/10/1",
+    "a-4ff97565…2–––4m 30s1.55M$0.91✓✗",
   ]);
   const tones = matching(nodes[0], (node) => node.nodeName === "TD" && /check/.test(node.className)).map(
     (node) => node.className,
   );
   assert.deepEqual(tones, ["check pass", "check fail", "check pass", "check fail"]);
   assert.equal(renderedText(nodes[0]).startsWith("Summary"), true);
+});
+
+test("resultsView renders workflow topline cells matching the Python renderer's cells", () => {
+  const measures = { turns: 2, seconds: 15, tokens: 1000, cost: 1.5, currency: "USD" };
+  const sonnet = group("sonnet-high", {
+    topline: {
+      attempts: 1,
+      ...measures,
+      checks: [],
+      first_inspection_passes: 1,
+      first_inspection_attempts: 1,
+      fix_requests: 1,
+      workflows_completed: 1,
+      workflow_attempts: 1,
+    },
+  });
+  const latest = {
+    ...attempt,
+    attempt_id: "a-4ff975651a324a13893fb9edf14b4bef",
+    variant: "sonnet-high",
+    topline: {
+      latest: true,
+      ...measures,
+      checks: [],
+      first_inspection: "passed",
+      fix_requests: 1,
+      workflow: "2/2",
+    },
+  };
+  const nodes = resultsView(report({ groups: [sonnet], attempts: [latest] }), {});
+  const rows = matching(nodes[0], (node) => node.nodeName === "TR").map((row) => renderedText(row));
+  assert.deepEqual(rows, [
+    "Variant / attemptTurnsFirst checkFix requestsWorkflowTimeTokensCost",
+    "sonnet-high · mean of 121/11.001/115s1.0k$1.50",
+    "a-4ff97565…2✓12/215s1.0k$1.50",
+  ]);
+  const tones = matching(nodes[0], (node) => node.nodeName === "TD" && /check/.test(node.className)).map(
+    (node) => node.className,
+  );
+  assert.deepEqual(tones, ["check pass", "check pass", "check pass"]);
 });

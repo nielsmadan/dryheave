@@ -395,22 +395,34 @@ def test_crash_mid_inspection_recovery_removes_the_scratch_directory(store, benc
     assert not private.exists()
 
 
-def test_crash_mid_inspection_recovery_leaves_the_scratch_directory_when_unconfirmed(
+def test_inspection_scratch_with_a_live_recorded_writer_blocks_until_that_writer_stops(
     store, benchmark
 ):
     experiment_id = create_experiment(store, benchmark)
     run_id, attempt_id = _reserve(store, experiment_id)
     private = store.root / "scratch" / "inspection-crash"
     (private / "judge" / "call-1").mkdir(parents=True)
-    (private / "judge" / "call-1" / "000001-cleanup.json").write_text(
-        CleanupReport(terminal_closed=True, known_writers_stopped=False).model_dump_json()
-    )
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        identity = ProcessIdentity(pid=writer.pid, created=psutil.Process(writer.pid).create_time())
+        (private / "judge" / "call-1" / "000001-cleanup.json").write_text(
+            CleanupReport(
+                terminal_closed=True, known_writers_stopped=False, owned=(identity,)
+            ).model_dump_json()
+        )
+        with RunStore(store.root).open(run_id) as journal:
+            execution = ExecutionJournal(journal)
+            state = execution.attempts[attempt_id]
+            _journal_inspection_intent(execution, state, private)
+            with pytest.raises(InputError, match="reconciliation before another subject launch"):
+                reconcile_execution(execution)
+            cleanup = ExecutionJournal(journal).cleanup_reports[attempt_id]
+        assert private.exists()
+        assert f"inspection_scratch_unresolved: {private}" in cleanup.errors
+    finally:
+        writer.kill()
+        writer.wait(timeout=3)
     with RunStore(store.root).open(run_id) as journal:
-        execution = ExecutionJournal(journal)
-        state = execution.attempts[attempt_id]
-        _journal_inspection_intent(execution, state, private)
-        with pytest.raises(InputError, match="reconciliation before another subject launch"):
-            reconcile_execution(execution)
+        reconcile_execution(ExecutionJournal(journal))
         cleanup = ExecutionJournal(journal).cleanup_reports[attempt_id]
-    assert private.exists()
-    assert "inspection_scratch_unresolved" in cleanup.errors
+    assert (private.exists(), cleanup.errors) == (False, ())

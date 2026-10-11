@@ -30,7 +30,20 @@ description: Curate Dryheave case and persona JSON, freeze historical repositori
    there. Keep imports/setup outside that wrapper. Missing runtime, syntax/import
    errors or absent markers must remain errors. A rubric criterion uses
    `kind: "judge"`, `criterion_id`, `required` and a substantive `rubric`.
-5. Add optional `checks` for binary journey/end-state outcomes a rubric score
+5. Look through the session for the author's follow-ups after the subject's
+   work — skill invocations such as `/code-review` or `/qa`, manual testing they
+   reported back (what they actually observed running the result), docs
+   requests, re-reviews, and how they answered any skill's dialogs — and
+   encode them in order as `workflow`. A `PromptStep` sends a follow-up's
+   prompt verbatim, with an `answer_hint` guiding how the simulated user
+   answers a dialog it triggers; an `InspectStep` names the criteria the
+   author was actually checking at that point. Write a dedicated, observable
+   inspect criterion for this — what the user would see using the result,
+   never a file, type or symbol the subject has not mentioned — kept separate
+   from the correctness criterion in step 4, which stays held out for final
+   grading. Ask the author when a follow-up's intent is unclear rather than
+   guessing one.
+6. Add optional `checks` for binary journey/end-state outcomes a rubric score
    does not capture: each needs a unique `check_id`, a yes/no `question`
    (judged from the final files plus a transcript of the subject's turns and
    tool actions; each action carries at most the first 600 characters of its
@@ -67,7 +80,7 @@ description: Curate Dryheave case and persona JSON, freeze historical repositori
    same `criterion_id`; this case's `required` then applies instead of the
    default. Drop one entirely by listing its id in `disabled_rubrics` (only
    those three ids are accepted there).
-6. Run `dryheave --store STORE case validate case.json --json`, then
+7. Run `dryheave --store STORE case validate case.json --json`, then
    `case freeze case.json --json` and `case inspect CASE_ID --json`. Save immutable
    IDs. Run `case calibrate CASE_ID --json` before subject spend. Inspect
    `data.calibration.status` and save `data.id` as CALIBRATION_ID. `demonstrated`
@@ -78,7 +91,7 @@ description: Curate Dryheave case and persona JSON, freeze historical repositori
    `files` map to inspect outputs. Fix errors or ineffective criteria, freeze a
    new case and calibrate again. Verifier copies do not execute `case.setup`:
    required tools and declared environment references must already be available.
-7. Copy the public examples with `dryheave example write --target FRESH_DIRECTORY`.
+8. Copy the public examples with `dryheave example write --target FRESH_DIRECTORY`.
    Follow its `real-workflow.md` to select actual config, instructions and skill
    resources explicitly, then `profile capture NAME --spec capture.json --json`.
    Inspect frozen hashes and preflight issues. Derive one actual behavior change;
@@ -129,3 +142,6 @@ checks and rubrics are graded.
 - `bench` refuses a case with checks or judge criteria when no `--judge` was
   given: pass `--judge MODEL[@EFFORT]` rather than dropping the checks, so
   they are not silently skipped.
+- `bench` refuses a workflow-enabled run whose workflow has an inspect step
+  but no judge or `--inspector MODEL[@EFFORT]`: pass one, or drop the step,
+  rather than running with `--no-workflow` to sidestep the check.

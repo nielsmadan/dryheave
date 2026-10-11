@@ -1,5 +1,8 @@
 # Experiments and captured trials
 
+The design decisions behind case workflows, inspections, fix-it replies and dialog
+answering are in docs/decisions/0003-case-workflows.md.
+
 The runner freezes an experiment, executes bounded interactive trials, stops its
 known writers and captures evidence. A capture has `assessment: "pending"` and
 `subject_completion: "unassessed"`. It contains no audit pass, quality score or
@@ -215,7 +218,13 @@ capture-only. See [results.md](results.md).
 
 `RunOptions.workflow` (default false, dropped from the frozen options when false)
 turns on the case's workflow; see authoring.md for steps and the default inspect
-step. A run with workflows on is refused before launch when a case has an inspect
+step. `run --workflow` sets it for a plain `run`; `bench` sets it by default and
+`--no-workflow` turns it off, so the launch check also skips probing slash steps
+(bench.py). The setting is not part of the experiment ID, so `bench` resumes or
+reports only an earlier run of the same experiment whose frozen
+`RunOptions.workflow` matches this invocation. `bench --inspector MODEL[@EFFORT]` sets `ScoringConfig.inspector`;
+without it, inspection falls back to the judge. A run with workflows on is
+refused before launch when a case has an inspect
 step but the scoring config has no inspector or judge with `max_calls` above zero,
 or when a slash prompt step targets an agent other than Claude. With workflows off,
 or a case with no effective workflow, the loop below never runs.
@@ -249,13 +258,17 @@ keeps its existing stop reason and the progress made so far.
 
 Simulator budgets, elapsed time and call indexes count only `role: "simulator"`
 calls, so scripted fixtures stay aligned. Inspection judge calls join the attempt's
-calls as `role: "judge"`, with their own per-inspection index and a deadline of
+calls as `role: "judge"`, with their own per-inspection index (shared by an
+`events_arrived` rerun, so one inspection stays within `max_calls`) and a deadline of
 `min(subject deadline, now + call_seconds)`; assessment prices them with the
 inspector (or judge) recipe under the judge role. Private inspection material lives
-in a fresh directory under the store's `scratch/`. Retained judge and verifier
-artifacts live under `runs/RUN_ID/inspections/ATTEMPT_ID/`, outside the attempt
-tree, and are copied into the capture's `evidence/inspection/` once the subject has
-stopped.
+in a fresh directory under the store's `scratch/`. Recovery removes a kept
+directory once dryheave's own judge and verifier cleanup records in it report every
+writer stopped or every recorded writer has since exited; it never reads the copied
+workspace. Retained judge and verifier artifacts (regular files and directories
+only; links and special files are skipped) live under
+`runs/RUN_ID/inspections/ATTEMPT_ID/`, outside the attempt tree, and are copied into
+the capture's `evidence/inspection/` once the subject has stopped.
 
 Journal events: `workflow-step` (one `WorkflowEvent` and the position after it),
 `inspection-intent` and `inspection-result`. They never reuse assessment event

@@ -12,7 +12,127 @@ from dryheave.journals import RunStore
 from dryheave.models import ObjectKind, TrialStage
 from dryheave.reports import report_run
 from dryheave.runner import load_capture, run_experiment, run_status
-from dryheave.runner_models import RunOptions
+from dryheave.runner_models import RunOptions, WorkflowEvent, WorkflowProgress
+
+
+def test_workflow_outcome_is_none_without_a_workflow() -> None:
+    from dryheave.assessments import _workflow_outcome
+
+    assert _workflow_outcome(None, {}) is None
+
+
+def test_workflow_outcome_for_a_completed_workflow() -> None:
+    from dryheave.assessments import _workflow_outcome
+
+    progress = WorkflowProgress(
+        steps=("review", "check"),
+        position=2,
+        events=(
+            WorkflowEvent(step_id="review", kind="prompt", outcome="sent", turn=1),
+            WorkflowEvent(step_id="check", kind="inspect", outcome="passed", turn=2, seconds=1.5),
+        ),
+    )
+    outcome = _workflow_outcome(progress, {"review": "prompt", "check": "inspect"})
+    assert outcome is not None
+    assert (outcome.steps, outcome.completed_steps, outcome.inspections) == (2, 2, 1)
+    assert (outcome.fix_requests, outcome.dialogs_answered) == (0, 0)
+    assert (outcome.first_inspection, outcome.final_inspection) == ("passed", "passed")
+    assert outcome.inspection_seconds == 1.5
+    assert outcome.events == progress.events
+
+
+def test_workflow_outcome_for_a_failed_final_inspection_counts_reused_as_failed() -> None:
+    from dryheave.assessments import _workflow_outcome
+
+    progress = WorkflowProgress(
+        steps=("check",),
+        position=0,
+        events=(
+            WorkflowEvent(step_id="check", kind="inspect", outcome="failed", turn=1, seconds=1.0),
+            WorkflowEvent(step_id="check", kind="inspect", outcome="fix_requested", turn=1),
+            WorkflowEvent(step_id="check", kind="inspect", outcome="reused", turn=2, seconds=0.0),
+            WorkflowEvent(step_id="check", kind="inspect", outcome="fix_requested", turn=2),
+        ),
+    )
+    outcome = _workflow_outcome(progress, {"check": "inspect"})
+    assert outcome is not None
+    assert (outcome.inspections, outcome.fix_requests) == (2, 2)
+    assert (outcome.first_inspection, outcome.final_inspection) == ("failed", "failed")
+
+
+def test_workflow_outcome_is_not_reached_when_steps_exist_without_an_inspection() -> None:
+    from dryheave.assessments import _workflow_outcome
+
+    progress = WorkflowProgress(steps=("check",), position=0, events=())
+    outcome = _workflow_outcome(progress, {"check": "inspect"})
+    assert outcome is not None
+    assert (outcome.inspections, outcome.first_inspection, outcome.final_inspection) == (
+        0,
+        "none",
+        "not_reached",
+    )
+
+
+def test_workflow_outcome_for_an_unavailable_inspection() -> None:
+    from dryheave.assessments import _workflow_outcome
+
+    progress = WorkflowProgress(
+        steps=("check",),
+        position=0,
+        events=(WorkflowEvent(step_id="check", kind="inspect", outcome="unavailable", turn=1),),
+    )
+    outcome = _workflow_outcome(progress, {"check": "inspect"})
+    assert outcome is not None
+    assert (outcome.first_inspection, outcome.final_inspection) == ("unavailable", "unavailable")
+    assert outcome.inspections == 1
+
+
+def test_workflow_outcome_for_dialogs_answered_without_a_declared_workflow() -> None:
+    from dryheave.assessments import _workflow_outcome
+
+    progress = WorkflowProgress(
+        steps=(),
+        position=0,
+        events=(WorkflowEvent(step_id="dialog", kind="dialog", outcome="answered", turn=1),),
+    )
+    outcome = _workflow_outcome(progress, {})
+    assert outcome is not None
+    assert (outcome.steps, outcome.completed_steps, outcome.dialogs_answered) == (0, 0, 1)
+    assert (outcome.first_inspection, outcome.final_inspection) == ("none", "none")
+
+
+def test_workflow_outcome_final_inspection_is_not_reached_when_the_retest_never_ran() -> None:
+    from dryheave.assessments import _workflow_outcome
+
+    progress = WorkflowProgress(
+        steps=("manual-test", "review", "retest"),
+        position=2,
+        events=(
+            WorkflowEvent(
+                step_id="manual-test", kind="inspect", outcome="passed", turn=1, seconds=1.0
+            ),
+            WorkflowEvent(step_id="review", kind="prompt", outcome="sent", turn=2),
+        ),
+    )
+    outcome = _workflow_outcome(
+        progress, {"manual-test": "inspect", "review": "prompt", "retest": "inspect"}
+    )
+    assert outcome is not None
+    assert outcome.first_inspection == "passed"
+    assert outcome.final_inspection == "not_reached"
+
+
+def test_workflow_outcome_final_inspection_is_none_for_a_prompt_only_workflow() -> None:
+    from dryheave.assessments import _workflow_outcome
+
+    progress = WorkflowProgress(
+        steps=("review",),
+        position=1,
+        events=(WorkflowEvent(step_id="review", kind="prompt", outcome="sent", turn=1),),
+    )
+    outcome = _workflow_outcome(progress, {"review": "prompt"})
+    assert outcome is not None
+    assert (outcome.first_inspection, outcome.final_inspection) == ("none", "none")
 
 
 @pytest.mark.integration
@@ -639,7 +759,8 @@ def test_help_needed_separates_disclosed_facts_by_kind(store, graded_benchmark):
 def test_help_needed_follows_the_captures_own_case_id_not_a_substitute_case(
     store, graded_benchmark
 ):
-    from dryheave.assessments import _help_needed
+    from dryheave.assessment_inputs import AssessmentInputs
+    from dryheave.assessments import _capture_case, _help_needed
 
     case_id = store.resolve(graded_benchmark.cases[0])
     case = load_frozen_case(store, case_id)
@@ -663,15 +784,102 @@ def test_help_needed_follows_the_captures_own_case_id_not_a_substitute_case(
     )
     capture = load_capture(store, summary.pending_assessment[0])
     assert capture.case_id == case_id
-    original = _help_needed(store, capture)
+    original = _help_needed(capture, _capture_case(store, AssessmentInputs(capture=capture)))
     assert original is not None
     assert original.on_request_facts == ("punctuation",)
     assert original.proactive_facts == ()
 
-    swapped = _help_needed(store, capture.model_copy(update={"case_id": proactive_variant}))
+    substitute = capture.model_copy(update={"case_id": proactive_variant})
+    swapped = _help_needed(substitute, _capture_case(store, AssessmentInputs(capture=substitute)))
     assert swapped is not None
     assert swapped.on_request_facts == ()
     assert swapped.proactive_facts == ("punctuation",)
+
+
+@pytest.mark.integration
+def test_help_needed_excludes_fix_it_and_dialog_answer_simulator_calls(store, graded_benchmark):
+    from dryheave.assessments import _help_needed
+    from dryheave.controller_models import RoleCall, SimulatorDecision
+    from dryheave.runner_models import WorkflowEvent, WorkflowProgress
+
+    summary = run_experiment(
+        store,
+        create_experiment(store, graded_benchmark),
+        options=RunOptions(mode="offline-fixture"),
+    )
+    capture = load_capture(store, summary.pending_assessment[0])
+    case = load_frozen_case(store, capture.case_id)
+    baseline = _help_needed(capture, case)
+    assert baseline is not None
+
+    ordinary = RoleCall(
+        call_id="ordinary-reply",
+        role="simulator",
+        status="completed",
+        decision=SimulatorDecision(action="reply", text="Use mutual TLS", reason="asked"),
+    )
+    fix_it = RoleCall(
+        call_id="fix-it-reply",
+        role="simulator",
+        status="completed",
+        decision=SimulatorDecision(action="reply", text="Still broken", reason="fix"),
+    )
+    dialog_answer = RoleCall(
+        call_id="dialog-reply",
+        role="simulator",
+        status="completed",
+        decision=SimulatorDecision(action="reply", choices=("Option A",), reason="answered"),
+    )
+    workflow = WorkflowProgress(
+        steps=("check",),
+        position=0,
+        events=(
+            WorkflowEvent(
+                step_id="check",
+                kind="inspect",
+                outcome="fix_requested",
+                turn=1,
+                call_ids=("fix-it-reply",),
+            ),
+            WorkflowEvent(
+                step_id="dialog",
+                kind="dialog",
+                outcome="answered",
+                turn=1,
+                call_ids=("dialog-reply",),
+            ),
+        ),
+    )
+    modified = capture.model_copy(
+        update={
+            "controller_calls": (*capture.controller_calls, ordinary, fix_it, dialog_answer),
+            "workflow": workflow,
+        }
+    )
+    result = _help_needed(modified, case)
+    assert result is not None
+    assert result.simulator_replies == baseline.simulator_replies + 1
+
+
+def test_capture_case_reuses_the_trial_case_and_loads_only_a_different_one(store, monkeypatch):
+    from dryheave import assessments
+    from dryheave.assessment_inputs import AssessmentInputs
+    from dryheave.experiment_models import TrialSpec
+    from dryheave.runner_models import CapturedAttempt
+
+    loaded = []
+    other = object()
+    monkeypatch.setattr(
+        assessments, "load_frozen_case", lambda store, case_id: loaded.append(case_id) or other
+    )
+    trial_case = object()
+    capture = CapturedAttempt.model_construct(case_id="c" * 64)
+    inputs = AssessmentInputs(
+        capture=capture, case=trial_case, trial=TrialSpec.model_construct(case_id="c" * 64)
+    )
+    assert (assessments._capture_case(store, inputs), loaded) == (trial_case, [])
+    inputs.trial = TrialSpec.model_construct(case_id="d" * 64)
+    assert (assessments._capture_case(store, inputs), loaded) == (other, ["c" * 64])
 
 
 def test_legacy_shaped_assessment_payload_loads_through_the_store_with_new_fields_defaulted(
@@ -718,9 +926,16 @@ def test_legacy_shaped_assessment_payload_loads_through_the_store_with_new_field
     manifest = Manifest(kind=ObjectKind.RESULT, payload=legacy_payload)
     identifier = store.put_manifest(manifest, files={})
     result = load_assessment(store, identifier)
-    assert (result.checks, result.metrics, result.rubric_set, result.help_needed) == (
+    assert (
+        result.checks,
+        result.metrics,
+        result.rubric_set,
+        result.help_needed,
+        result.workflow,
+    ) == (
         (),
         (),
+        None,
         None,
         None,
     )
@@ -776,6 +991,7 @@ def test_assessment_serializer_drops_empty_optional_assessment_fields() -> None:
         metrics=(),
         rubric_set=None,
         help_needed=None,
+        workflow=None,
         graded_case_id=None,
         regrade_id=None,
     )
@@ -785,6 +1001,7 @@ def test_assessment_serializer_drops_empty_optional_assessment_fields() -> None:
         "metrics",
         "rubric_set",
         "help_needed",
+        "workflow",
         "graded_case_id",
         "regrade_id",
     } & set(parsed)

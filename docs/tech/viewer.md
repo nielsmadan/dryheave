@@ -153,7 +153,11 @@ section), attempts (search plus variant, stage and eligibility facets), attempt
 detail (identities including the assessment's `graded_case_id` and
 `rubric_set`, audit, criteria with their calibration and the judge's
 rationale, case-declared checks with their rationale, case metrics, help
-needed, per-role usage records, dialogue, final patch and verifier evidence —
+needed, a Workflow card (declared/completed steps, inspection, fix-request
+and dialog counts, first/final inspection verdict, inspection time and the
+workflow's events in order — step, kind, outcome, turn, failed criteria — or
+a plain note when the attempt carries no workflow), per-role usage records,
+dialogue, final patch and verifier evidence —
 the judge's rationale is read from a dedicated bounded route and renders
 `reasoning not included` per judged row when the current assessment carries no
 judge response for that criterion or check, and `not judged (deterministic)`
@@ -178,7 +182,9 @@ computes them from the subject role alone, while per-attempt cost and spend say
 that they cover every role and every retained attempt, and pairs state that they
 are latest-compatible. The Results tab opens with the agent-only Summary table
 described under HTML report in results.md, rendered from the report's `topline`
-fields. The Results summary table labels every row with the
+fields, including the First check, Fix requests and Workflow columns and their
+variant-row ratios and means; `views.mjs` and `report_html.py` render the same
+cells from the same derived fields. The Results summary table labels every row with the
 population it covers — all retained attempts (retries included) or eligible
 attempts only — rather than leaving one caption to describe rows with different
 populations. Client-side role spend applies the same zero-cost,

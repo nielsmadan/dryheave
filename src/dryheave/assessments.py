@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import JsonValue
@@ -22,6 +23,7 @@ from dryheave.cases import (
     DeterministicCriterion,
     FrozenCase,
     RubricCriterion,
+    effective_workflow,
     load_frozen_case,
 )
 from dryheave.controller_models import RoleCall
@@ -52,6 +54,7 @@ from dryheave.result_models import (
     HelpNeeded,
     MetricsResult,
     RegradeRecord,
+    WorkflowOutcome,
 )
 from dryheave.rubrics import (
     DEFAULT_RUBRIC_SET,
@@ -60,7 +63,7 @@ from dryheave.rubrics import (
     uses_default_rubrics,
 )
 from dryheave.runner import cancellation_signals, load_capture
-from dryheave.runner_models import AttemptState, CapturedAttempt
+from dryheave.runner_models import AttemptState, CapturedAttempt, WorkflowProgress
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json, digest, parse_model
 from dryheave.storage import ObjectStore
@@ -85,19 +88,45 @@ def _judged(inputs: AssessmentInputs) -> bool:
     return _has_judge(inputs.scoring)
 
 
-def _help_needed(store: ObjectStore, capture: CapturedAttempt | None) -> HelpNeeded | None:
+def _workflow_assist_call_ids(progress: WorkflowProgress | None) -> frozenset[str]:
+    if progress is None:
+        return frozenset()
+    return frozenset(
+        call_id
+        for event in progress.events
+        if (event.kind == "inspect" and event.outcome == "fix_requested")
+        or (event.kind == "dialog" and event.outcome == "answered")
+        for call_id in event.call_ids
+    )
+
+
+def _capture_case(store: ObjectStore, inputs: AssessmentInputs) -> FrozenCase | None:
+    capture = inputs.capture
     if capture is None:
         return None
+    if (
+        inputs.case is not None
+        and inputs.trial is not None
+        and inputs.trial.case_id == capture.case_id
+    ):
+        return inputs.case
     try:
-        case = load_frozen_case(store, capture.case_id)
+        return load_frozen_case(store, capture.case_id)
     except (DryheaveError, OSError):
         return None
+
+
+def _help_needed(capture: CapturedAttempt | None, case: FrozenCase | None) -> HelpNeeded | None:
+    if capture is None or case is None:
+        return None
+    assisted = _workflow_assist_call_ids(capture.workflow)
     replies = tuple(
         call.decision
         for call in capture.controller_calls
         if call.role == "simulator"
         and call.decision is not None
         and call.decision.action == "reply"
+        and call.call_id not in assisted
     )
     disclosed = tuple(dict.fromkeys(fact_id for reply in replies for fact_id in reply.fact_ids))
     kinds = {fact.fact_id: fact.disclosure for fact in case.allowed_facts}
@@ -113,6 +142,80 @@ def _help_needed(store: ObjectStore, capture: CapturedAttempt | None) -> HelpNee
     )
 
 
+_INSPECTION_VERDICTS = frozenset({"passed", "failed", "unavailable", "reused"})
+
+
+def _inspection_verdict(outcome: str) -> Literal["passed", "failed", "unavailable"]:
+    if outcome == "passed":
+        return "passed"
+    if outcome in ("failed", "reused"):
+        return "failed"
+    if outcome == "unavailable":
+        return "unavailable"
+    raise ValueError(f"unexpected inspection outcome: {outcome}")
+
+
+def _workflow_step_kinds(
+    capture: CapturedAttempt | None, case: FrozenCase | None
+) -> Mapping[str, Literal["prompt", "inspect"]]:
+    if capture is None or case is None or capture.workflow is None or not capture.workflow.steps:
+        return {}
+    steps = effective_workflow(case, enabled=True, inspected=True)
+    return {step.step_id: step.kind for step in steps}
+
+
+def _workflow_outcome(
+    progress: WorkflowProgress | None, step_kinds: Mapping[str, Literal["prompt", "inspect"]]
+) -> WorkflowOutcome | None:
+    if progress is None:
+        return None
+    inspections = [
+        event
+        for event in progress.events
+        if event.kind == "inspect" and event.outcome in _INSPECTION_VERDICTS
+    ]
+    fix_requests = sum(
+        1
+        for event in progress.events
+        if event.kind == "inspect" and event.outcome == "fix_requested"
+    )
+    dialogs_answered = sum(
+        1 for event in progress.events if event.kind == "dialog" and event.outcome == "answered"
+    )
+    first_inspection: Literal["passed", "failed", "unavailable", "none"] = (
+        _inspection_verdict(inspections[0].outcome) if inspections else "none"
+    )
+    last_inspect_step_id = next(
+        (step_id for step_id in reversed(progress.steps) if step_kinds.get(step_id) == "inspect"),
+        None,
+    )
+    final_inspection: Literal["passed", "failed", "unavailable", "not_reached", "none"]
+    if last_inspect_step_id is None:
+        final_inspection = "none"
+    else:
+        last_event = next(
+            (event for event in reversed(inspections) if event.step_id == last_inspect_step_id),
+            None,
+        )
+        final_inspection = _inspection_verdict(last_event.outcome) if last_event else "not_reached"
+    inspection_seconds = sum(
+        event.seconds
+        for event in progress.events
+        if event.kind == "inspect" and event.seconds is not None
+    )
+    return WorkflowOutcome(
+        steps=len(progress.steps),
+        completed_steps=progress.position,
+        inspections=len(inspections),
+        fix_requests=fix_requests,
+        dialogs_answered=dialogs_answered,
+        first_inspection=first_inspection,
+        final_inspection=final_inspection,
+        inspection_seconds=inspection_seconds,
+        events=progress.events,
+    )
+
+
 def _initial(
     store: ObjectStore,
     execution: ExecutionJournal,
@@ -121,6 +224,7 @@ def _initial(
     graded: FrozenCase | None,
 ) -> Assessment:
     capture, trial, experiment = inputs.capture, inputs.trial, inputs.experiment
+    captured = _capture_case(store, inputs)
     if inputs.error is None and capture is not None and inputs.case is not None:
         try:
             audit = audit_capture(store, capture, inputs.case, inputs.files, Path(state.workspace))
@@ -163,7 +267,10 @@ def _initial(
         accepted_turns=capture.accepted_turns if capture else None,
         subject_seconds=capture.subject_seconds if capture else None,
         setup_seconds=capture.setup_seconds if capture else None,
-        help_needed=_help_needed(store, capture),
+        help_needed=_help_needed(capture, captured),
+        workflow=_workflow_outcome(
+            capture.workflow if capture else None, _workflow_step_kinds(capture, captured)
+        ),
         roles=role_metrics(inputs, state, ()),
     )
 

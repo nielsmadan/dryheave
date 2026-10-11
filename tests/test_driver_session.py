@@ -657,6 +657,26 @@ def test_single_choice_moves_the_highlight_verifies_it_then_continues_the_turn(
         assert (terminal.enters, session.accepted_count) == (1, 1)
 
 
+def test_preview_question_is_answered_by_verified_arrow_navigation(tmp_path, driver_plan):
+    scope = AskedQuestion(
+        "Fix scope",
+        "Which findings should I fix?",
+        (("Fix everything (Recommended)", ""), ("Fix Critical only", ""), ("Skip", "")),
+        previews=("1. Not an option\n2. Also not", "", ""),
+    )
+    ui = ClaudeQuestionUI((scope,))
+    session, terminal = asking_session(tmp_path, driver_plan, ui)
+    with session:
+        asked = session.question()
+        assert asked.options == ("Fix everything (Recommended)", "Fix Critical only", "Skip")
+        result = session.answer(asked, DialogSelection(choices=("Skip",)))
+        assert (result.state, terminal.keys, ui.answers) == (
+            "completed",
+            ["Down", "Down", "Enter"],
+            {0: "Skip"},
+        )
+
+
 def test_multi_select_toggles_each_choice_submits_and_confirms_the_review(tmp_path, driver_plan):
     ui = ClaudeQuestionUI((FEATURES,))
     session, terminal = asking_session(tmp_path, driver_plan, ui)

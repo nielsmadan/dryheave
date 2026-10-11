@@ -513,3 +513,61 @@ def test_claude_permission_prompt_remains_an_approval():
     text = "Bash command\n\n  rm -rf build\n\nDo you want to proceed?\n\u276f 1. Yes\n  2. No\n\nEsc to cancel"
     assert parse(text) is None
     assert dialog(AgentKind.CLAUDE, Screen(text=text, exited=None)).state == "approval"
+
+
+FIX_SCOPE = AskedQuestion(
+    "Fix scope",
+    "Which findings should I fix?",
+    (("Fix everything (Recommended)", ""), ("Fix Critical only", ""), ("Don't fix anything", "")),
+    previews=(
+        "codex.py:144  strip one leading '='\n\u276f 2. Not an option\n3. Chat about this",
+        "",
+        "",
+    ),
+)
+
+
+def preview_screen(*presses):
+    ui = ClaudeQuestionUI((FIX_SCOPE,))
+    for key in presses:
+        ui.press(key)
+    return ui.render()
+
+
+def test_side_by_side_preview_question_reads_options_from_the_left_column():
+    text = preview_screen()
+    found = parse(text)
+    assert (found.question, found.options, found.focused, found.multi_select) == (
+        "Which findings should I fix?",
+        ("Fix everything (Recommended)", "Fix Critical only", "Don't fix anything"),
+        0,
+        False,
+    )
+    assert dialog(AgentKind.CLAUDE, Screen(text=text, exited=None)).state == "structured_input"
+    assert (
+        parse(preview_screen("Down")).focused,
+        parse(preview_screen("Down", "Down")).focused,
+    ) == (
+        1,
+        2,
+    )
+
+
+def test_focus_on_the_unnumbered_chat_row_of_a_preview_question_is_no_option():
+    assert parse(preview_screen("Down", "Down", "Down")).focused is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda text: text.replace(" · n to add notes", ""),
+        lambda text: "\n".join(line[:31].rstrip() for line in text.splitlines()),
+        lambda text: text.replace("Fix everything" + " " * 15, "Fix everything" + " " * 12 + "gap"),
+        lambda text: text.replace("Notes: press n to add notes", ""),
+    ],
+    ids=["footer", "no-pane", "gap", "no-notes"],
+)
+def test_preview_like_layouts_that_do_not_fit_stay_unrecognized(change):
+    text = change(preview_screen("Down"))
+    assert parse(text) is None
+    assert dialog(AgentKind.CLAUDE, Screen(text=text, exited=None)).state == "unsupported"

@@ -575,6 +575,7 @@ class AskedQuestion:
     question: str
     options: tuple[tuple[str, str], ...]
     multi: bool = False
+    previews: tuple[str, ...] = ()
 
 
 class ClaudeQuestionUI:
@@ -611,7 +612,7 @@ class ClaudeQuestionUI:
             return
         question = self.questions[self.index]
         count = len(question.options)
-        last = count + (2 if question.multi else 1)
+        last = count + (0 if question.previews else 2 if question.multi else 1)
         if key in {"Up", "Down"}:
             self.focus = max(0, min(last, self.focus + (1 if key == "Down" else -1)))
         elif key in {"Space", "Enter"} and self.focus < count and question.multi:
@@ -666,6 +667,8 @@ class ClaudeQuestionUI:
             return "\n".join(" " + line if line else "" for line in lines)
         question = self.questions[self.index]
         lines += [question.question, ""]
+        if question.previews:
+            return self._preview_render(lines, question)
         for index, (label, description) in enumerate(question.options):
             number = f"{index + 1}. " if self.numbered else ""
             box = (
@@ -696,6 +699,37 @@ class ClaudeQuestionUI:
             f"{self.marker(chat)} {count + 2}. Chat about this",
             "",
             "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel",
+        ]
+        return "\n".join(" " + line if line else "" for line in lines)
+
+    def _preview_render(self, lines: list[str], question: AskedQuestion) -> str:
+        left = []
+        for index, (label, _) in enumerate(question.options):
+            tick = " \u2714" if self.answers.get(self.index) == label else ""
+            first, *rest = textwrap.wrap(label + tick, 25)
+            left += [
+                f"{self.marker(index)} {index + 1}. {first}",
+                *("     " + line for line in rest),
+            ]
+        content = question.previews[self.focus] if self.focus < len(question.options) else ""
+        body = content.splitlines() or ["No preview available"]
+        width = max(map(len, body)) + 4
+        pane = [
+            "\u250c" + "\u2500" * (width - 2) + "\u2510",
+            *(f"\u2502 {line.ljust(width - 4)} \u2502" for line in body),
+            "\u2514" + "\u2500" * (width - 2) + "\u2518",
+            "",
+            "Notes: press n to add notes",
+        ]
+        left += [""] * (len(pane) - len(left))
+        pane += [""] * (len(left) - len(pane))
+        lines += [(row.ljust(34) + side).rstrip() for row, side in zip(left, pane, strict=True)]
+        lines += [
+            "",
+            DIALOG_RULE,
+            f"{self.marker(len(question.options))} Chat about this",
+            "",
+            "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 n to add notes \u00b7 Esc to cancel",
         ]
         return "\n".join(" " + line if line else "" for line in lines)
 

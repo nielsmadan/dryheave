@@ -463,3 +463,28 @@ def test_findings_are_fitted_to_a_shared_character_bound():
     assert fitted[0].rationale.endswith("…")
     assert fitted[1] == short
     assert sum(len(item.rationale) for item in fitted) <= FINDINGS_CHARACTERS
+
+
+def test_retained_evidence_copies_regular_files_and_skips_links_and_fifos(tmp_path):
+    from dryheave.inspection import _retain
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("subject data")
+    source = tmp_path / "evidence"
+    (source / "nested").mkdir(parents=True)
+    (source / "result.json").write_text("{}")
+    (source / "nested" / "stdout.bin").write_bytes(b"out")
+    (source / "file-link").symlink_to(outside / "secret.txt")
+    (source / "dir-link").symlink_to(outside)
+    os.mkfifo(source / "pipe")
+    target = tmp_path / "retained" / "criteria" / "greeting"
+    _retain(source, target)
+    assert sorted(
+        (str(path.relative_to(target)), path.is_symlink(), path.is_file())
+        for path in target.rglob("*")
+    ) == [
+        ("nested", False, False),
+        ("nested/stdout.bin", False, True),
+        ("result.json", False, True),
+    ]

@@ -10,10 +10,12 @@ from pydantic import JsonValue
 from dryheave.bench import (
     AUTH_REFERENCE,
     JUDGE_BUDGET,
+    attempt_progress_lines,
     bench_draft,
     capture_variants,
     check_case,
     check_removals,
+    check_workflow,
     claude_role,
     discard_check,
     launch_check,
@@ -25,9 +27,11 @@ from dryheave.bench import (
     snapshot_for_check,
     summarize,
 )
+from dryheave.cases import load_frozen_case
 from dryheave.commands import CommandRegistry
 from dryheave.drivers.base import TransportError
 from dryheave.errors import InputError
+from dryheave.experiment_models import ScoringConfig
 from dryheave.experiments import create_experiment
 from dryheave.journals import RunStore
 from dryheave.live_config import LIVE_CONFIG_DIRECTORY, load_snapshot_manifest
@@ -75,7 +79,7 @@ def _launch_checks(
                 root,
                 paths=paths,
                 environment=os.environ,
-                workflow=True,
+                workflow=args.workflow,
                 commands=commands,
             )
         except TransportError as error:
@@ -93,7 +97,12 @@ def _launch_checks(
 
 
 def _execute(
-    store: ObjectStore, experiment_id: str, resume: str | None, paths: tuple[Path, Path]
+    store: ObjectStore,
+    experiment_id: str,
+    resume: str | None,
+    paths: tuple[Path, Path],
+    *,
+    workflow: bool,
 ) -> str:
     cancelled = Event()
     with cancellation_signals(cancelled):
@@ -103,7 +112,12 @@ def _execute(
             resume=resume,
             options=None
             if resume
-            else RunOptions(mode="native", runtime_root=str(paths[0]), transport=str(paths[1])),
+            else RunOptions(
+                mode="native",
+                runtime_root=str(paths[0]),
+                transport=str(paths[1]),
+                workflow=workflow,
+            ),
             cancelled=cancelled,
         )
         _progress(f"run {summary.run_id} captured; grading")
@@ -114,12 +128,20 @@ def _execute(
 def _bench(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     variants = tuple(map(parse_variant, args.variant))
     judge = parse_role(args.judge) if args.judge else None
+    inspector = parse_role(args.inspector) if args.inspector else None
     case_id = check_case(store, args.case, judged=judge is not None)
     if AUTH_REFERENCE not in os.environ:
         raise InputError(
             f"{AUTH_REFERENCE} is not set; subjects, simulator and judge cannot authenticate. "
             "Launch bench from a shell where your Claude credential is injected."
         )
+    judge_recipe = claude_role(judge, args.claude, JUDGE_BUDGET) if judge else None
+    inspector_recipe = claude_role(inspector, args.claude, JUDGE_BUDGET) if inspector else None
+    check_workflow(
+        load_frozen_case(store, case_id),
+        workflow=args.workflow,
+        scoring=ScoringConfig(judge=judge_recipe, inspector=inspector_recipe),
+    )
     paths = _native_paths(args)
     profiles = capture_variants(store, variants, args.claude)
     draft = bench_draft(
@@ -131,12 +153,13 @@ def _bench(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]
             simulator_budget(args.simulator_replies),
             conversation_policy="design-approval",
         ),
-        judge=claude_role(judge, args.claude, JUDGE_BUDGET) if judge else None,
+        judge=judge_recipe,
+        inspector=inspector_recipe,
         repetitions=args.repetitions,
         seed=args.seed,
     )
     experiment_id = create_experiment(store, draft)
-    previous = resumable_run(store, experiment_id)
+    previous = resumable_run(store, experiment_id, workflow=args.workflow)
     if previous is not None and previous.finished and not (args.new_run or args.check_only):
         _progress(f"run {previous.run_id} already finished; pass --new-run to spend on another")
         run_id = previous.run_id
@@ -150,18 +173,19 @@ def _bench(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]
                 "launch_check": "ready",
             }
         resume = None if previous is None or args.new_run else previous.run_id
-        run_id = _execute(store, experiment_id, resume, paths)
+        run_id = _execute(store, experiment_id, resume, paths, workflow=args.workflow)
     status = run_status(store, run_id)
     snapshot = RunStore(store.root).inspect(run_id).path / LIVE_CONFIG_DIRECTORY
+    report = report_run(store, run_id)
+    stop_reasons = {state.attempt_id: state.stop_reason for state in status.attempts}
+    for line in attempt_progress_lines(report, stop_reasons):
+        _progress(line)
     return {
         "run_id": run_id,
         "experiment_id": experiment_id,
         "profiles": dict(profiles),
         "live_config": load_snapshot_manifest(snapshot).model_dump(mode="json"),
-        "results": summarize(
-            report_run(store, run_id),
-            {state.attempt_id: state.stop_reason for state in status.attempts},
-        ),
+        "results": summarize(report, stop_reasons),
         "next": (f"dryheave view --open   # or: dryheave report {run_id} --html report.html"),
     }
 
@@ -180,6 +204,18 @@ def register_bench(registry: CommandRegistry) -> None:
         help="Repeat per variant; each starts from the same snapshot of your live Claude config.",
     )
     parser.add_argument("--judge", metavar="MODEL[@EFFORT]")
+    parser.add_argument(
+        "--inspector",
+        metavar="MODEL[@EFFORT]",
+        help="Workflow inspect steps; defaults to the judge's model when a judge is set.",
+    )
+    parser.add_argument(
+        "--no-workflow",
+        dest="workflow",
+        action="store_false",
+        default=True,
+        help="Run the case's initial prompt only, without its declared or default workflow.",
+    )
     parser.add_argument("--simulator", default="claude-sonnet-4-6@low", metavar="MODEL[@EFFORT]")
     parser.add_argument(
         "--simulator-replies",

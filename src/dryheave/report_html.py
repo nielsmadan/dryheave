@@ -197,10 +197,15 @@ DASH = "\u2013"
 MILLION = 1_000_000
 THOUSAND = 1_000
 CHECK_MARKS = {"pass": "✓", "fail": "✗", "not_applicable": DASH, "error": "?"}
+INSPECTION_MARKS = {"passed": "✓", "failed": "✗", "unavailable": "?"}
+INSPECTION_CLASSES = {"passed": "pass", "failed": "fail", "unavailable": "unavailable"}
 TOPLINE_LEGEND = (
     f"✓ the outcome the case wants · ✗ the opposite · {DASH} not applicable · ? no clear answer. "
     "Turns, time, tokens and cost are the agent's alone, without the simulated user and the "
-    "judge; tokens include cache reads and writes, and cost is an API list-price estimate. "
+    "judge, and time excludes inspection; tokens include cache reads and writes, and cost is "
+    "an API list-price estimate. First check is the workflow's first inspection "
+    f"(✓ passed, ✗ failed, ? unavailable, {DASH} no inspection); fix requests count fix-it "
+    f"replies; workflow shows completed over declared steps, or {DASH} without a workflow. "
     "Variant rows average the attempts below them; retried attempts are left out."
 )
 
@@ -258,22 +263,49 @@ def _group_check_cell(topline: GroupTopline, check_id: str) -> str:
     return _cell(f"{tally.passes}/{tally.answered}", f"check {tone}".strip())
 
 
-def _measure_cells(
-    turns: float | None,
-    seconds: float | None,
-    tokens: float | None,
-    cost: float | None,
-    currency: str | None,
+def _turns_cell(turns: float | None) -> str:
+    return _cell(_fmt_turns(turns), "number")
+
+
+def _resource_cells(
+    seconds: float | None, tokens: float | None, cost: float | None, currency: str | None
 ) -> str:
     return "".join(
         _cell(text, "number")
-        for text in (
-            _fmt_turns(turns),
-            _fmt_duration(seconds),
-            _fmt_tokens(tokens),
-            _fmt_cost(cost, currency),
-        )
+        for text in (_fmt_duration(seconds), _fmt_tokens(tokens), _fmt_cost(cost, currency))
     )
+
+
+def _first_inspection_cell(value: str | None) -> str:
+    if value is None or value == "none":
+        return _cell(DASH)
+    return _cell(INSPECTION_MARKS[value], f"check {INSPECTION_CLASSES[value]}")
+
+
+def _fix_requests_cell(value: int | None) -> str:
+    return _cell(DASH) if value is None else _cell(str(value), "number")
+
+
+def _workflow_cell(value: str | None) -> str:
+    return _cell(DASH) if value is None else _cell(value)
+
+
+def _group_first_inspection_cell(passes: int, attempts: int) -> str:
+    if attempts == 0:
+        return _cell(DASH)
+    tone = "pass" if passes == attempts else "fail" if passes == 0 else ""
+    return _cell(f"{passes}/{attempts}", f"check {tone}".strip())
+
+
+def _group_fix_requests_cell(value: float | None) -> str:
+    return _cell(DASH) if value is None else _cell(_fmt_number(value), "number")
+
+
+def _group_workflow_cell(completed: int, attempts: int) -> str:
+    if attempts == 0:
+        return _cell(DASH)
+    tone = "pass" if completed == attempts else "fail" if completed == 0 else ""
+    return _cell(f"{completed}/{attempts}", f"check {tone}".strip())
 
 
 def _topline_section(report: RunReport) -> str:
@@ -285,21 +317,22 @@ def _topline_section(report: RunReport) -> str:
             check.check_id for group in groups if group.topline for check in group.topline.checks
         )
     )
-    headers = ["Variant / attempt", "Turns", "Time", "Tokens", "Cost", *map(check_label, check_ids)]
+    headers = [
+        "Variant / attempt",
+        "Turns",
+        "First check",
+        "Fix requests",
+        "Workflow",
+        "Time",
+        "Tokens",
+        "Cost",
+        *map(check_label, check_ids),
+    ]
     rows = []
     for group in groups:
         topline = group.topline
         if topline is None:
             continue
-        rows.append(
-            '<tr class="variant">'
-            + _cell(f"{group.variant or NO_VARIANT} · mean of {topline.attempts}")
-            + _measure_cells(
-                topline.turns, topline.seconds, topline.tokens, topline.cost, topline.currency
-            )
-            + "".join(_group_check_cell(topline, check_id) for check_id in check_ids)
-            + "</tr>"
-        )
         members: list[tuple[str, AttemptTopline]] = [
             (attempt.attempt_id, attempt.topline)
             for attempt in report.attempts
@@ -307,10 +340,27 @@ def _topline_section(report: RunReport) -> str:
             and attempt.topline.latest
             and (attempt.variant or "") == (group.variant or "")
         ]
+        rows.append(
+            '<tr class="variant">'
+            + _cell(f"{group.variant or NO_VARIANT} · mean of {topline.attempts}")
+            + _turns_cell(topline.turns)
+            + _group_first_inspection_cell(
+                topline.first_inspection_passes, topline.first_inspection_attempts
+            )
+            + _group_fix_requests_cell(topline.fix_requests)
+            + _group_workflow_cell(topline.workflows_completed, topline.workflow_attempts)
+            + _resource_cells(topline.seconds, topline.tokens, topline.cost, topline.currency)
+            + "".join(_group_check_cell(topline, check_id) for check_id in check_ids)
+            + "</tr>"
+        )
         rows.extend(
             "<tr>"
             + f'<td class="attempt" title="{_esc(attempt_id)}">{_esc(attempt_id[:10])}</td>'
-            + _measure_cells(item.turns, item.seconds, item.tokens, item.cost, item.currency)
+            + _turns_cell(item.turns)
+            + _first_inspection_cell(item.first_inspection)
+            + _fix_requests_cell(item.fix_requests)
+            + _workflow_cell(item.workflow)
+            + _resource_cells(item.seconds, item.tokens, item.cost, item.currency)
             + "".join(_attempt_check_cell(item.checks, check_id) for check_id in check_ids)
             + "</tr>"
             for attempt_id, item in members
@@ -656,6 +706,41 @@ def _help_needed_card(result: Assessment | None) -> str:
     return _section("Help needed", _definitions(rows))
 
 
+def _workflow_card(result: Assessment | None) -> str:
+    workflow = result.workflow if result else None
+    if workflow is None:
+        return _section("Workflow", _note("No workflow is retained for this attempt."))
+    rows = [
+        ("Declared steps", _fmt_count(workflow.steps)),
+        ("Completed steps", _fmt_count(workflow.completed_steps)),
+        ("Inspections", _fmt_count(workflow.inspections)),
+        ("Fix requests", _fmt_count(workflow.fix_requests)),
+        ("Dialogs answered", _fmt_count(workflow.dialogs_answered)),
+        ("First inspection", workflow.first_inspection),
+        ("Final inspection", workflow.final_inspection),
+        ("Inspection time", _fmt_seconds(workflow.inspection_seconds)),
+    ]
+    events = (
+        _note("No workflow events are retained for this attempt.")
+        if not workflow.events
+        else _table(
+            "Workflow events in order.",
+            ["Step", "Kind", "Outcome", "Turn", "Failed criteria"],
+            [
+                [
+                    event.step_id,
+                    event.kind,
+                    event.outcome,
+                    str(event.turn),
+                    ", ".join(event.failed_criteria) if event.failed_criteria else "none",
+                ]
+                for event in workflow.events
+            ],
+        )
+    )
+    return _section("Workflow", _definitions(rows) + events)
+
+
 def _attempts_section(report: RunReport, reasoning: Mapping[str, JudgeReasoningView]) -> str:
     children = [_attempts_table(report.attempts)]
     for attempt in report.attempts:
@@ -670,6 +755,7 @@ def _attempts_section(report: RunReport, reasoning: Mapping[str, JudgeReasoningV
                 _checks_card(attempt.result, reasoning_view),
                 _metrics_card(attempt.result),
                 _help_needed_card(attempt.result),
+                _workflow_card(attempt.result),
             ]
         )
         children.append(

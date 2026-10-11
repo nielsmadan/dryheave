@@ -59,6 +59,15 @@ def test_a_lost_dialog_key_acknowledgement_is_delivery_uncertain(tmp_path, monke
         transport.press("Down")
 
 
+def test_a_lost_clear_line_acknowledgement_is_delivery_uncertain(tmp_path, monkeypatch):
+    def run(command, root, **kwargs):
+        return CommandResult(command.argv, -9, b"", b"", "timeout")
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    with terminal(tmp_path, monkeypatch) as transport, pytest.raises(DeliveryUncertain):
+        transport.clear_line()
+
+
 def test_wrong_state_shape_and_control_input_fail(tmp_path, monkeypatch):
     def run(command, root, **kwargs):
         return CommandResult(

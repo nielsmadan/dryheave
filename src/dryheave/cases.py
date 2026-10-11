@@ -147,6 +147,10 @@ class PromptStep(StrictModel):
     prompt: str = Field(min_length=1, max_length=32000)
     answer_hint: str | None = Field(default=None, max_length=2000)
 
+    @property
+    def slash(self) -> bool:
+        return self.prompt.lstrip().startswith("/")
+
     @model_serializer(mode="wrap")
     def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         value: dict[str, object] = handler(self)

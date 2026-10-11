@@ -243,14 +243,31 @@ def _total_tokens(tokens: TokenUsage) -> int | None:
 
 def attempt_topline(item: AttemptReport, *, latest: bool) -> AttemptTopline:
     subject = _subject_role(item)
+    result = item.result
+    workflow = result.workflow if result else None
+    has_workflow = workflow is not None and workflow.steps > 0
+    inspection_seconds = workflow.inspection_seconds if workflow else 0.0
+    seconds = (
+        result.subject_seconds - inspection_seconds
+        if result and result.subject_seconds is not None
+        else None
+    )
     return AttemptTopline(
         latest=latest,
-        turns=item.result.accepted_turns if item.result else None,
-        seconds=item.result.subject_seconds if item.result else None,
+        turns=result.accepted_turns if result else None,
+        seconds=seconds,
         tokens=_total_tokens(subject.known_tokens) if subject else None,
         cost=subject.known_cost if subject else None,
         currency=subject.currency if subject else None,
-        checks=item.result.checks if item.result else (),
+        checks=result.checks if result else (),
+        first_inspection=workflow.first_inspection if has_workflow and workflow else None,
+        fix_requests=workflow.fix_requests if has_workflow and workflow else None,
+        workflow=f"{workflow.completed_steps}/{workflow.steps}"
+        if has_workflow and workflow
+        else None,
+        workflow_completed=workflow.completed_steps == workflow.steps
+        if has_workflow and workflow
+        else None,
     )
 
 
@@ -277,6 +294,13 @@ def group_topline(toplines: list[AttemptTopline]) -> GroupTopline:
             )
             for check_id in check_ids
         ),
+        first_inspection_passes=sum(1 for item in toplines if item.first_inspection == "passed"),
+        first_inspection_attempts=sum(
+            1 for item in toplines if item.first_inspection not in (None, "none")
+        ),
+        fix_requests=_mean(item.fix_requests for item in toplines),
+        workflows_completed=sum(1 for item in toplines if item.workflow_completed),
+        workflow_attempts=sum(1 for item in toplines if item.workflow is not None),
     )
 
 

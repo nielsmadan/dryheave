@@ -45,7 +45,7 @@ CONFIRM_FOOTER = re.compile(
     r"|esc to cancel"
 )
 QUESTION_FOOTER = re.compile(r"\S+ to select(?: \u00b7 .+)? \u00b7 \S+ to cancel", re.IGNORECASE)
-CHAT_ROW = re.compile(r"(?P<marker>\u276f)?\s*(?P<number>\d+)\. Chat about this")
+CHAT_ROW = re.compile(r"(?P<marker>\u276f)?\s*(?:(?P<number>\d+)\. )?Chat about this")
 DIALOG_RULE = re.compile("[\u2500\u254c]+")
 ROW_MARKERS = "\u276f\u2191\u2193"
 NUMBERED_ROW = re.compile(r"(?P<number>\d+)\.\s+(?P<rest>\S.*)")
@@ -62,6 +62,9 @@ UNANSWERED = "You have not answered all questions"
 REVIEW_ROWS = 2
 QUESTION_TAIL = 3
 MIN_ROWS = 2
+PREVIEW_COLUMN = 30
+PREVIEW_GAP = 4
+PREVIEW_FOOTER = " \u00b7 n to add notes \u00b7 "
 
 
 @dataclass(frozen=True)
@@ -224,7 +227,10 @@ def _question(lines: list[str], visible: list[int]) -> QuestionDialog | None:
     )
     if lead < 0 or top is None:
         return None
-    body = _body_lines([lines[index] for index in visible if top < index < rule], lead)
+    preview = chat["number"] is None
+    source = [lines[index] for index in visible if top < index < rule]
+    columns = _option_column(source, lead, lines[visible[-1]]) if preview else source
+    body = None if columns is None else _body_lines(columns, lead)
     if body is None:
         return None
     headers = list(takewhile(lambda line: line.kind == "title", body))
@@ -235,13 +241,13 @@ def _question(lines: list[str], visible: list[int]) -> QuestionDialog | None:
     if titles and titles[0].startswith(TAB_MARKS):
         titles = titles[1:]
     question = " ".join(title.lstrip(GUTTER) for title in titles).strip()
-    rows = _rows(entries)
+    rows = _preview_rows(entries) if preview else _rows(entries)
     if not question or rows is None or len(rows) < MIN_ROWS:
         return None
     multi = rows[0][0].checked is not None
     count = sum(row.kind != "submit" for row, _ in rows)
     if (
-        int(chat["number"]) != count + 1
+        (not preview and int(chat["number"]) != count + 1)
         or any((row.checked is not None) != multi for row, _ in rows if row.kind != "submit")
         or any(row.kind == "submit" for row, _ in rows) != multi
     ):
@@ -254,6 +260,25 @@ def _question(lines: list[str], visible: list[int]) -> QuestionDialog | None:
         focused=focused[0] if len(focused) == 1 else None,
         multi_select=multi,
     )
+
+
+def _option_column(lines: list[str], lead: int, footer: str) -> list[str] | None:
+    if PREVIEW_FOOTER not in footer:
+        return None
+    headers = list(takewhile(lambda line: line[lead : lead + 1] not in ROW_MARKERS + " ", lines))
+    split = lead + PREVIEW_COLUMN
+    rows = lines[len(headers) :]
+    if any(line[split : split + PREVIEW_GAP].strip() for line in rows):
+        return None
+    pane = [line[split:].strip() for line in rows if line[split:].strip()]
+    if not (
+        pane
+        and pane[0].startswith("\u250c")
+        and any(line.startswith("\u2514") for line in pane)
+        and pane[-1].startswith("Notes:")
+    ):
+        return None
+    return [*headers, *(line[:split] for line in rows if line[:split].strip())]
 
 
 def _body_lines(lines: list[str], lead: int) -> list[BodyLine] | None:
@@ -303,6 +328,25 @@ def _rows(entries: list[BodyLine]) -> list[tuple[DialogRow, bool]] | None:
         rows[last][1],
     )
     return rows
+
+
+def _preview_rows(entries: list[BodyLine]) -> list[tuple[DialogRow, bool]] | None:
+    labels: list[tuple[list[str], bool]] = []
+    for entry in entries:
+        if entry.text[:1] == " ":
+            if not labels or entry.focused:
+                return None
+            labels[-1][0].append(entry.text.strip())
+            continue
+        match = NUMBERED_ROW.fullmatch(entry.text.rstrip())
+        if match is None or int(match["number"]) != len(labels) + 1:
+            return None
+        labels.append(([match["rest"].strip()], entry.focused))
+    rows = [
+        (DialogRow(kind="option", label=" ".join(words).removesuffix(COMMITTED).rstrip()), focus)
+        for words, focus in labels
+    ]
+    return None if any(not row.label for row, _ in rows) else rows
 
 
 def _row(text: str) -> DialogRow | None:

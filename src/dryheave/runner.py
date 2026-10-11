@@ -141,7 +141,7 @@ def require_workflow_support(
     slashed = {
         case_id
         for case_id, steps in workflows.items()
-        if any(isinstance(step, PromptStep) and step.prompt.startswith("/") for step in steps)
+        if any(isinstance(step, PromptStep) and step.slash for step in steps)
     }
     profiles = {trial.profile_id for trial in experiment.trials if trial.case_id in slashed}
     if any(load_profile(store, profile).recipe.agent != AgentKind.CLAUDE for profile in profiles):

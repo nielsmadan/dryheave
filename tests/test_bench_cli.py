@@ -3,9 +3,26 @@ from argparse import Namespace
 import pytest
 
 from dryheave import bench_cli
+from dryheave.cli import build_parser
 from dryheave.drivers.base import DeliveryUncertain
 from dryheave.drivers.models import Observation
 from dryheave.errors import InputError
+
+
+def _parse_bench(*extra):
+    return build_parser().parse_args(
+        ["bench", "a-case", "--variant", "sonnet=claude-sonnet-4-6@low", *extra]
+    )
+
+
+def test_bench_workflow_defaults_on_and_no_workflow_turns_it_off():
+    assert _parse_bench().workflow is True
+    assert _parse_bench("--no-workflow").workflow is False
+
+
+def test_bench_inspector_defaults_to_none_and_parses_model_effort():
+    assert _parse_bench().inspector is None
+    assert _parse_bench("--inspector", "claude-haiku-4-5@low").inspector == "claude-haiku-4-5@low"
 
 
 def _launch_checks(store, monkeypatch, check):
@@ -19,7 +36,7 @@ def _launch_checks(store, monkeypatch, check):
     monkeypatch.setattr(bench_cli, "launch_check", check)
     with pytest.raises(InputError) as raised:
         bench_cli._launch_checks(
-            Namespace(variant=["sonnet=claude-sonnet-4-6@low"]),
+            Namespace(variant=["sonnet=claude-sonnet-4-6@low"], workflow=True),
             store,
             {"sonnet": "a" * 64},
             (store.root / "rt", store.root / "tui-test"),
@@ -64,7 +81,7 @@ def test_launch_checks_probe_the_case_slash_commands_for_each_variant(store, mon
     monkeypatch.setattr(bench_cli, "check_removals", lambda manifest, variants: None)
     monkeypatch.setattr(bench_cli, "launch_check", ready)
     bench_cli._launch_checks(
-        Namespace(variant=["a=claude-sonnet-4-6@low", "b=claude-haiku-4-5"]),
+        Namespace(variant=["a=claude-sonnet-4-6@low", "b=claude-haiku-4-5"], workflow=True),
         store,
         {"a": "a" * 64, "b": "b" * 64},
         (store.root / "rt", store.root / "tui-test"),
@@ -74,3 +91,23 @@ def test_launch_checks_probe_the_case_slash_commands_for_each_variant(store, mon
         (True, ("/code-review --quick",)),
         (True, ("/code-review --quick",)),
     ]
+
+
+def test_launch_checks_follow_the_no_workflow_flag(store, monkeypatch):
+    seen = []
+
+    def ready(*args, workflow, commands, **kwargs):
+        seen.append((workflow, commands))
+        return Observation(state="ready", reason="Composer is empty.", text="> ")
+
+    monkeypatch.setattr(bench_cli, "snapshot_for_check", lambda root, environment: None)
+    monkeypatch.setattr(bench_cli, "check_removals", lambda manifest, variants: None)
+    monkeypatch.setattr(bench_cli, "launch_check", ready)
+    bench_cli._launch_checks(
+        Namespace(variant=["a=claude-sonnet-4-6@low"], workflow=False),
+        store,
+        {"a": "a" * 64},
+        (store.root / "rt", store.root / "tui-test"),
+        ("/code-review --quick",),
+    )
+    assert seen == [(False, ("/code-review --quick",))]

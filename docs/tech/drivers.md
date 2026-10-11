@@ -144,8 +144,12 @@ description line (multi-select rows read `N. [✔] Label`), a final
 `Type something.` row, a `Next`/`Submit` row for multi-select, then a rule,
 `N. Chat about this` and the footer `Enter to select · … · Esc to cancel` as the
 last line. Options are located by column relative to the chat row, so unnumbered
-lists also parse. A trailing committed `✔` is not part of a label. Anything that
-does not fit, including the side-by-side preview layout, stays unrecognized. The
+lists also parse. A trailing committed `✔` is not part of a label. A
+single-select question whose options carry previews renders side by side: a
+30-column option list, a 4-column gap, then a boxed preview and a `Notes:` line,
+an unnumbered `Chat about this` row and `n to add notes` in the footer. Options
+are read from the left column only, wrapped labels are joined, and the preview
+pane is ignored. Anything that does not fit stays unrecognized. The
 final "Review your answers" screen parses as a `review` dialog with
 `Submit answers`/`Cancel` rows.
 

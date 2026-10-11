@@ -718,7 +718,7 @@ def claude_profile(store) -> str:
     )
 
 
-def slash_draft(store, graded_benchmark, tmp_path):
+def slash_draft(store, graded_benchmark, tmp_path, prompt="/code-review --quick"):
     from dryheave.cases import PromptStep
     from dryheave.controller_models import ScriptStep, SimulatorDecision
     from dryheave.experiment_models import FixtureTurn
@@ -727,7 +727,7 @@ def slash_draft(store, graded_benchmark, tmp_path):
         store,
         graded_benchmark,
         tmp_path,
-        workflow=(PromptStep(step_id="review", prompt="/code-review --quick"),),
+        workflow=(PromptStep(step_id="review", prompt=prompt),),
     )
     return draft.model_copy(
         update={
@@ -751,12 +751,13 @@ def slash_draft(store, graded_benchmark, tmp_path):
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("prompt", ["/code-review --quick", "  \n/code-review --quick"])
 def test_slash_prompt_step_is_delivered_as_a_curated_native_command(
-    store, graded_benchmark, tmp_path
+    store, graded_benchmark, tmp_path, prompt
 ):
     from dryheave.experiment_models import VariantSpec
 
-    draft = slash_draft(store, graded_benchmark, tmp_path).model_copy(
+    draft = slash_draft(store, graded_benchmark, tmp_path, prompt).model_copy(
         update={"variants": (VariantSpec(name="claude", profile=claude_profile(store)),)}
     )
     result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
@@ -768,10 +769,11 @@ def test_slash_prompt_step_is_delivered_as_a_curated_native_command(
     ] == ["conversation", "conversation", "curated-native-command"]
 
 
+@pytest.mark.parametrize("prompt", ["/code-review --quick", "  /code-review --quick"])
 def test_slash_prompt_steps_are_refused_before_launch_for_other_agents(
-    store, graded_benchmark, tmp_path
+    store, graded_benchmark, tmp_path, prompt
 ):
-    draft = slash_draft(store, graded_benchmark, tmp_path)
+    draft = slash_draft(store, graded_benchmark, tmp_path, prompt)
     with pytest.raises(InputError, match="only delivered to Claude"):
         run_experiment(store, create_experiment(store, draft), options=workflow_options())
     assert RunStore(store.root).list_runs() == ()
@@ -948,6 +950,43 @@ def test_events_arriving_during_inspection_rerun_it_once_then_make_it_unavailabl
     assert capture.stop_reason == "inspection_unavailable"
     assert len(list(inspector.glob("request-*.json"))) == 2
     assert len(capture.workflow.events[0].call_ids) == 2
+
+
+@pytest.mark.integration
+def test_an_inspection_rerun_shares_the_inspectors_call_budget(
+    store, graded_benchmark, tmp_path, monkeypatch
+):
+    from dryheave.drivers.session import DriverSession
+
+    observed = DriverSession.reconcile
+    polls = []
+
+    def growing(session, *, wait=False):
+        result = observed(session, wait=wait)
+        if not wait:
+            polls.append(len(session.events))
+            if len(polls) % 2 == 0:
+                session.events.append(session.events[-1])
+        return result
+
+    monkeypatch.setattr(DriverSession, "reconcile", growing)
+    draft, inspector = workflow_benchmark(store, graded_benchmark, tmp_path)
+    recipe = draft.scoring.inspector
+    draft = draft.model_copy(
+        update={
+            "scoring": draft.scoring.model_copy(
+                update={
+                    "inspector": recipe.model_copy(
+                        update={"budget": recipe.budget.model_copy(update={"max_calls": 1})}
+                    )
+                }
+            )
+        }
+    )
+    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "inspection_unavailable"
+    assert len(list(inspector.glob("request-*.json"))) == 1
 
 
 @pytest.mark.integration

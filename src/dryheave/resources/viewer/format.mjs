@@ -497,11 +497,18 @@ export function chipTitle(label, value, names) {
 
 export const CHECK_MARKS = { pass: "✓", fail: "✗", not_applicable: "–", error: "?" };
 
+export const INSPECTION_MARKS = { passed: "✓", failed: "✗", unavailable: "?" };
+
+export const INSPECTION_CLASSES = { passed: "pass", failed: "fail", unavailable: "unavailable" };
+
 export const TOPLINE_LEGEND =
   "✓ the outcome the case wants · ✗ the opposite · – not applicable · ? no clear answer. " +
   "Turns, time, tokens and cost are the agent's alone, without the simulated user and the " +
-  "judge; tokens include cache reads and writes, and cost is an API list-price estimate. " +
-  "Variant rows average the attempts below them; retried attempts are left out.";
+  "judge, and time excludes inspection; tokens include cache reads and writes, and cost is an " +
+  "API list-price estimate. First check is the workflow's first inspection (✓ passed, ✗ failed, " +
+  "? unavailable, – no inspection); fix requests count fix-it replies; workflow shows completed " +
+  "over declared steps, or – without a workflow. Variant rows average the attempts below them; " +
+  "retried attempts are left out.";
 
 export function checkLabel(checkId) {
   const words = checkId.replaceAll("-", " ").replaceAll("_", " ").toLowerCase();

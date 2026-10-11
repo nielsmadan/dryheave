@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from pydantic import JsonValue
 
-from dryheave.cases import PromptStep, load_frozen_case
+from dryheave.cases import FrozenCase, InspectStep, PromptStep, effective_workflow, load_frozen_case
 from dryheave.controller_models import ClaudeControllerRuntime, ControllerRecipe, RoleBudget
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.auth import RuntimeBindings
@@ -22,7 +22,12 @@ from dryheave.drivers.models import DriverLimits, Observation, Screen
 from dryheave.drivers.session import DriverSession, normalize_input
 from dryheave.drivers.tui_test import TuiTestTerminal
 from dryheave.errors import InputError
-from dryheave.experiment_models import ExperimentDraft, ScoringConfig, VariantSpec
+from dryheave.experiment_models import (
+    ExperimentDraft,
+    ScoringConfig,
+    VariantSpec,
+    inspection_recipe,
+)
 from dryheave.journals import RunStore
 from dryheave.live_config import live_source, require_servers, snapshot_live_config
 from dryheave.models import AgentKind, CommandSpec, EnvironmentReference, TrialStage
@@ -32,6 +37,7 @@ from dryheave.profile_models import CaptureSpec, LiveConfigManifest, NativeRecip
 from dryheave.profiles import capture_profile
 from dryheave.report_models import AttemptReport, GroupMetrics, RunReport
 from dryheave.runner import run_status
+from dryheave.runner_state import ExecutionJournal
 from dryheave.skills import SKILL_NAMES
 from dryheave.storage import ObjectStore
 
@@ -128,12 +134,13 @@ def claude_role(
     )
 
 
-def bench_draft(
+def bench_draft(  # noqa: PLR0913
     case_id: str,
     profiles: Mapping[str, str],
     *,
     simulator: ControllerRecipe,
     judge: ControllerRecipe | None,
+    inspector: ControllerRecipe | None = None,
     repetitions: int,
     seed: int,
 ) -> ExperimentDraft:
@@ -146,8 +153,20 @@ def bench_draft(
         repetitions=repetitions,
         seed=seed,
         simulator=simulator,
-        scoring=ScoringConfig(judge=judge, prices=builtin_price_table()),
+        scoring=ScoringConfig(judge=judge, inspector=inspector, prices=builtin_price_table()),
     )
+
+
+def check_workflow(case: FrozenCase, *, workflow: bool, scoring: ScoringConfig) -> None:
+    if not workflow:
+        return
+    inspected = inspection_recipe(scoring) is not None
+    steps = effective_workflow(case, enabled=True, inspected=inspected)
+    if not inspected and any(isinstance(step, InspectStep) for step in steps):
+        raise InputError(
+            "This case's workflow has an inspect step but no judge or --inspector "
+            "MODEL[@EFFORT]; pass one, or run with --no-workflow."
+        )
 
 
 def capture_variants(
@@ -177,7 +196,7 @@ def slash_prompts(store: ObjectStore, case_id: str) -> tuple[str, ...]:
     return tuple(
         step.prompt
         for step in load_frozen_case(store, case_id).workflow
-        if isinstance(step, PromptStep) and step.prompt.startswith("/")
+        if isinstance(step, PromptStep) and step.slash
     )
 
 
@@ -298,7 +317,7 @@ class PreviousRun:
     finished: bool
 
 
-def resumable_run(store: ObjectStore, experiment_id: str) -> PreviousRun | None:
+def resumable_run(store: ObjectStore, experiment_id: str, *, workflow: bool) -> PreviousRun | None:
     runs = RunStore(store.root)
     matching = sorted(
         (
@@ -308,9 +327,18 @@ def resumable_run(store: ObjectStore, experiment_id: str) -> PreviousRun | None:
         ),
         key=lambda metadata: metadata.created_at,
     )
-    if not matching:
+    compatible = next(
+        (
+            metadata
+            for metadata in reversed(matching)
+            if (options := ExecutionJournal(runs.inspect(metadata.run_id)).options) is None
+            or options.workflow == workflow
+        ),
+        None,
+    )
+    if compatible is None:
         return None
-    status = run_status(store, matching[-1].run_id)
+    status = run_status(store, compatible.run_id)
     return PreviousRun(
         run_id=status.run_id,
         finished=not status.unstarted_trials
@@ -395,6 +423,11 @@ def summarize(report: RunReport, stop_reasons: Mapping[str, str | None]) -> dict
                     "stop_reason": stop_reasons.get(attempt.attempt_id),
                     "completion": attempt.result.completion if attempt.result else None,
                     "exclusions": list(attempt.result.exclusion_reasons) if attempt.result else [],
+                    "first_inspection": attempt.topline.first_inspection
+                    if attempt.topline
+                    else None,
+                    "fix_requests": attempt.topline.fix_requests if attempt.topline else None,
+                    "workflow": attempt.topline.workflow if attempt.topline else None,
                 }
                 for attempt in attempts(name)
             ],
@@ -403,3 +436,18 @@ def summarize(report: RunReport, stop_reasons: Mapping[str, str | None]) -> dict
         }
         for name in sorted({attempt.variant or "unknown" for attempt in report.attempts})
     }
+
+
+def attempt_progress_lines(
+    report: RunReport, stop_reasons: Mapping[str, str | None]
+) -> tuple[str, ...]:
+    def line(attempt: AttemptReport) -> str:
+        topline = attempt.topline
+        parts = [f"attempt {attempt.attempt_id} stopped ({stop_reasons.get(attempt.attempt_id)})"]
+        if topline is not None and topline.workflow is not None:
+            parts.append(f"workflow {topline.workflow}")
+            parts.append(f"fix requests {topline.fix_requests}")
+            parts.append(f"first check {topline.first_inspection}")
+        return "; ".join(parts)
+
+    return tuple(line(attempt) for attempt in report.attempts)
