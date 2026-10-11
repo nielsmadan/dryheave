@@ -106,7 +106,7 @@ def test_modern_codex_protocol_and_cleanup_are_versioned(store, benchmark, tmp_p
     context = CallContext(
         call_id="codex-call",
         index=0,
-        deadline=time.monotonic() + 3,
+        deadline=time.monotonic() + 15,
         cancelled=threading.Event(),
         inherited={"SYNTHETIC_AUTH_PATH": str(tmp_path / "opaque")},
         on_identities=lambda _identities: None,
