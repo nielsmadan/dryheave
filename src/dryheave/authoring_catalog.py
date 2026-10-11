@@ -41,6 +41,7 @@ InjectionReason = Literal[
     "skill_wrapper",
     "command_wrapper",
     "system_reminder",
+    "harness_event",
     "unrecognized_wrapper",
 ]
 

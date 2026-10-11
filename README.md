@@ -1,11 +1,11 @@
 # Dryheave
 
 Dryheave turns coding-agent sessions into reusable interactive benchmarks. Import
-Codex or Claude logs, curate a task and simulated user, freeze its historical Git
-repository and selected native configuration, then compare repeated runs with
-retained evidence. Subjects use their real terminal UI. Hidden checks and optional
-model judgments run after the subject stops; reports keep audit eligibility,
-quality, missing observations and spending separate.
+Codex, Claude or Droid logs, curate a task and simulated user, freeze its
+historical Git repository and selected native configuration, then compare repeated
+runs with retained evidence. Subjects use their real terminal UI. Hidden checks
+and optional model judgments run after the subject stops; reports keep audit
+eligibility, quality, missing observations and spending separate.
 
 Python 3.13+, Git, macOS or Linux are required. Native trials additionally require
 a supported agent CLI, explicit authentication and **tui-test 0.1.0-beta.3**.
@@ -57,7 +57,8 @@ Record transport once with `init --tui-test /path/to/tui-test`, or install
 `tui-test` on PATH. Claude operators install with
 `skills install --target .claude/skills`; the default target remains `.agents/skills`.
 
-For selected-log mining, use `collect select NAME FILE --agent codex`, then
+For selected-log mining, use `collect select NAME FILE --agent codex` (or
+`--agent claude`, `--agent droid`), then
 `problem request [DESCRIPTION] --selection NAME [--micro-bug]`. The packaged
 voice/problem/profile skills curate internal drafts and retain supported tasks,
 rejections and gaps. Follow [selected-log authoring](docs/user/selected-log-authoring.md)

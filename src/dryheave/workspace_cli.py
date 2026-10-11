@@ -21,7 +21,7 @@ def _initialize(args: argparse.Namespace, _store: ObjectStore) -> dict[str, Json
         "runtime": str(workspace.path("runtime")),
         "skills": str(workspace.path("skills")),
         "tui_test": str(transport) if transport else None,
-        "next": "Enter the workspace, run dryheave skills install (Claude: --target .claude/skills), then collect select NAME FILE --agent codex or --agent claude. "
+        "next": "Enter the workspace, run dryheave skills install (Claude: --target .claude/skills), then collect select NAME FILE --agent codex, --agent claude or --agent droid. "
         + (
             "Check transport with dryheave doctor."
             if transport

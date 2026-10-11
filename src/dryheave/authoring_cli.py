@@ -12,9 +12,8 @@ from dryheave.commits import session_baseline
 from dryheave.commits_cli import register_commit_survey
 from dryheave.errors import CancelledError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
-from dryheave.logs import claude, codex
 from dryheave.logs.base import ImportLimits, Session, candidates, discover
-from dryheave.logs.service import import_session
+from dryheave.logs.service import AGENT_CHOICES, import_session, parser_for
 from dryheave.mining import user_message_profile
 from dryheave.mining_cli import register_mining, register_mining_collection
 from dryheave.models import AgentKind, ObjectKind, StrictModel
@@ -40,7 +39,7 @@ def _limits(args: argparse.Namespace) -> ImportLimits:
 
 def _scan(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]:
     limits = _limits(args)
-    parser = codex.parse if args.agent == "codex" else claude.parse
+    parser = parser_for(AgentKind(args.agent))
     ranked: list[tuple[tuple[int, int, str], JsonValue]] = []
     for path in discover(args.root, limits):
         session = parser(path, limits)
@@ -201,7 +200,7 @@ def register_authoring(registry: CommandRegistry) -> None:
     commands = collection.add_subparsers(dest="collect_command", required=True)
     for name, handler in (("scan", _scan), ("import", _import)):
         parser = commands.add_parser(name)
-        parser.add_argument("--agent", choices=["codex", "claude"], required=True)
+        parser.add_argument("--agent", choices=AGENT_CHOICES, required=True)
         parser.add_argument("--max-bytes", type=int, default=16 * 1024 * 1024)
         parser.add_argument("--max-events", type=int, default=20000)
         if name == "scan":

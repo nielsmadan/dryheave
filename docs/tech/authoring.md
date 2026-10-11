@@ -428,7 +428,8 @@ access by an agent.
 ## Log and process APIs
 
 `logs.service.import_session(store, path, AgentKind, limits)` freezes a `Session`.
-`logs.codex.parse` and `logs.claude.parse` return the same model without writing.
+`logs.service.parser_for(AgentKind)` selects the adapter; `logs.codex.parse`,
+`logs.claude.parse` and `logs.droid.parse` return the same model without writing.
 `logs.base.discover` scans non-symlink JSONL files with depth/entry limits.
 `ImportLimits` defaults to 16 MiB, 20,000 source records, 10,000 scan entries and
 12 directory levels; CLI import/scan expose byte and event limits. A malformed
@@ -441,6 +442,17 @@ blocks, base instructions, hook bodies and compaction replacement histories are
 excluded. The adapter reads both Codex legacy response/event messages and 0.153.4
 paginated capitalized item completions; duplicate message representations collapse
 while distinct turns remain distinct. Claude text/tool blocks remain ordered.
+
+Droid reads `session_start` for the session ID, log version, `cwd` and title, message
+records for text/tool blocks, `todo_state` as metadata and `agent_turn_outcome` as a
+turn lifecycle event; `compaction_state` records a `compacted` warning instead of
+replaying replacement summaries. Droid writes hook and system traffic as `user`
+messages, marked `visibility: user_only` for hook and interface notices and
+`visibility: llm_only` for injected system text. Those events are retained, not
+filtered, and their text is carried in a `<harness-event>` wrapper so the shared
+`mining.classify_user_event` patterns report them as `harness_injected` rather than as
+the human speaking. A Droid log carries no Git metadata, so `recorded_baseline` is
+always `None` and every Droid session records a `baseline_unknown` warning.
 
 Codex dialogue deduplication indexes ordered candidates by native ID, text and
 turn. It consumes the earliest compatible event representation, including

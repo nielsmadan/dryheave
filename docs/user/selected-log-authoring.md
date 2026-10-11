@@ -27,14 +27,17 @@ measurements and the choice stays yours.
 Each scanned session also reports the `cwd` and `baseline_commit` its log recorded:
 the working directory Codex wrote into `session_meta`, and the `git.commit_hash` of the
 repository when the session started. Both are `null` when the log records neither.
-Neither is inferred or substituted, and a Claude log records no commit hash at all, so
-its `baseline_commit` is always `null`. That recorded baseline is the join key the
-commit survey below uses.
+Neither is inferred or substituted. A Claude log records a branch label but no commit
+hash, and a Droid log records no Git metadata at all, so for both the `baseline_commit`
+is always `null`. That recorded baseline is the join key the commit survey below uses,
+so a Claude or Droid session can be selected by path but is never found by
+`collect commit`.
 
 A voice built on one session describes that session. Select several, spanning
 different kinds of work, up to the 24 a selection holds. Selection membership is
-immutable, so widening one means creating a new selection with more files. Both
-`--agent codex` and `--agent claude` are accepted, for scanning and for selecting.
+immutable, so widening one means creating a new selection with more files.
+`--agent codex`, `--agent claude` and `--agent droid` are accepted, for scanning and
+for selecting.
 
 ## Start from Git history
 
@@ -190,8 +193,8 @@ dryheave skills install --target .claude/skills
 
 Then invoke `/dryheave-voice-profile`, `/dryheave-generate-problem` and
 `/dryheave-agent-profile` with the same selection/request names. Use
-`collect select ... --agent claude` when the selected source logs are Claude
-logs; the operator's agent need not match the source-log agent.
+`collect select ... --agent claude` or `--agent droid` when the selected source logs
+are Claude or Droid logs; the operator's agent need not match the source-log agent.
 
 The operator reads bounded selected evidence, writes internal draft JSON, records
 its decisions, and runs public validation/freezing commands. You supply task
@@ -241,7 +244,8 @@ their imported membership permanently, even if source files or store aliases mov
 | `problem freeze REQUEST CANDIDATE --expect-revision N` | Recheck the validation reference and freeze the existing case model. |
 
 `--json` works on every command. Selection import also accepts existing
-`--max-bytes` and `--max-events` bounds, and `--agent claude` for Claude logs.
+`--max-bytes` and `--max-events` bounds, and `--agent claude` or `--agent droid` for
+Claude or Droid logs.
 Use one store consistently; workspace defaults apply, and an explicit `--store`
 still selects a different store. Selection IDs refer to sessions in that store.
 

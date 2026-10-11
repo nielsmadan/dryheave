@@ -14,6 +14,7 @@ from dryheave.mining import (
     EvidenceQuery,
     MetadataQuery,
     SelectionInputs,
+    classified_user_events,
     classify_user_event,
     create_request,
     create_voice,
@@ -933,3 +934,70 @@ def test_claude_skill_invocation_bodies_are_harness_injected() -> None:
     assert classification == "genuine"
     assert reasons == ()
     assert remainder == "please run the doc skill"
+
+
+DROID_FIXTURE = Path("tests/fixtures/droid-recorded.jsonl")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            '<skill filePath="/fixture/skills/doc/SKILL.md">\n# Documentation\n</skill>',
+            ("harness_injected", ("skill_wrapper",), ""),
+        ),
+        (
+            "<harness-event>SessionStart</harness-event>",
+            ("harness_injected", ("harness_event",), ""),
+        ),
+        (
+            "<harness-event><system-reminder>Current date</system-reminder></harness-event>",
+            ("harness_injected", ("system_reminder", "harness_event"), ""),
+        ),
+        ("<harness-event>truncated hook", ("harness_injected", ("harness_event",), "")),
+    ],
+)
+def test_harness_wrappers_cover_attributed_skills_and_hook_events(text, expected):
+    assert classify_user_event(text) == expected
+
+
+def test_droid_skill_activation_notification_is_harness_injected() -> None:
+    body = (
+        "<system-notification>\n"
+        "Skills provide specialized capabilities and domain knowledge. The user has selected "
+        "the following skill for immediate execution. Begin following the skill's instructions "
+        "now.\n"
+        '<skill filePath="/fixture/skills/code-review/SKILL.md">\n'
+        "<name>code-review</name>\n\n# Code Review\n\nRun the repository checks.\n"
+        "</skill>\n</system-notification>\n\n--quick"
+    )
+    assert classify_user_event(body) == ("harness_injected", ("skill_wrapper",), "")
+
+
+def test_droid_user_events_separate_genuine_writing_from_harness_traffic(store) -> None:
+    session = store.load(
+        import_session(store, DROID_FIXTURE, AgentKind.DROID), Session, kind=ObjectKind.SESSION
+    )
+    assert [
+        (event.event_id, classification, reasons)
+        for event, classification, reasons, _ in classified_user_events(session)
+    ] == [
+        ("e000002-0", "harness_injected", ("harness_event",)),
+        ("e000003-0", "harness_injected", ("system_reminder", "harness_event")),
+        ("e000004-0", "genuine", ()),
+        ("e000008-0", "harness_injected", ("harness_event",)),
+        ("e000009-0", "harness_injected", ("skill_wrapper",)),
+        ("e000010-0", "genuine", ()),
+    ]
+    profile = user_message_profile(session)
+    assert (
+        profile.user_events,
+        profile.genuine,
+        profile.harness_injected,
+        profile.unclassified,
+    ) == (
+        6,
+        2,
+        4,
+        0,
+    )

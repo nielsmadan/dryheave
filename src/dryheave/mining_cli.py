@@ -19,6 +19,7 @@ from dryheave.authoring_catalog import (
 from dryheave.commands import CommandRegistry
 from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.logs.base import EvidenceExcerpt, ImportLimits, Session
+from dryheave.logs.service import AGENT_CHOICES
 from dryheave.mining import (
     EvidenceQuery,
     MetadataQuery,
@@ -433,7 +434,7 @@ def register_mining_collection(
     select.add_argument("name")
     select.add_argument("files", type=Path, nargs="*")
     select.add_argument("--session", action="append", default=[])
-    select.add_argument("--agent", choices=["codex", "claude"])
+    select.add_argument("--agent", choices=AGENT_CHOICES)
     select.add_argument("--max-bytes", type=int, default=16 * 1024 * 1024)
     select.add_argument("--max-events", type=int, default=20000)
     select.add_argument("--expect-revision", type=int)

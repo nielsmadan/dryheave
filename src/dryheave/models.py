@@ -73,6 +73,7 @@ class ObjectKind(StrEnum):
 class AgentKind(StrEnum):
     CLAUDE = "claude"
     CODEX = "codex"
+    DROID = "droid"
 
 
 class TrialStage(StrEnum):

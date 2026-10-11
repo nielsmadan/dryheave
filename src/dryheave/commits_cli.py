@@ -15,6 +15,7 @@ from dryheave.commits import (
 )
 from dryheave.errors import InputError
 from dryheave.logs.base import ImportLimits
+from dryheave.logs.service import AGENT_CHOICES
 from dryheave.models import AgentKind
 from dryheave.storage import ObjectStore
 
@@ -25,7 +26,7 @@ def _scan(args: argparse.Namespace) -> SessionScan | None:
             raise InputError("--agent selects a parser for --root; supply the log root as well.")
         return None
     if args.agent is None:
-        raise InputError("Scanning --root requires --agent codex or --agent claude.")
+        raise InputError("Scanning --root requires --agent codex, --agent claude or --agent droid.")
     return scan_sessions(
         args.root,
         AgentKind(args.agent),
@@ -74,7 +75,7 @@ def _next(sessions: tuple[SessionMatch, ...], parent: str | None) -> str:
 def _register_shared(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--root", type=Path, help="Log directory scanned for matching sessions.")
-    parser.add_argument("--agent", choices=["codex", "claude"])
+    parser.add_argument("--agent", choices=AGENT_CHOICES)
     parser.add_argument("--max-bytes", type=int, default=16 * 1024 * 1024)
     parser.add_argument("--max-events", type=int, default=20000)
 

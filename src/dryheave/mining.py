@@ -66,7 +66,7 @@ HARNESS_WRAPPERS: tuple[tuple[InjectionReason, re.Pattern[str]], ...] = (
         "environment_context",
         re.compile(r"<environment_context>.*?(?:</environment_context>|\Z)", re.DOTALL),
     ),
-    ("skill_wrapper", re.compile(r"<skill>.*?(?:</skill>|\Z)", re.DOTALL)),
+    ("skill_wrapper", re.compile(r"<skill(?:\s[^>]*)?>.*?(?:</skill>|\Z)", re.DOTALL)),
     (
         "command_wrapper",
         re.compile(
@@ -75,11 +75,16 @@ HARNESS_WRAPPERS: tuple[tuple[InjectionReason, re.Pattern[str]], ...] = (
             re.DOTALL,
         ),
     ),
+    ("harness_event", re.compile(r"<harness-event>.*?(?:</harness-event>|\Z)", re.DOTALL)),
 )
 INSTRUCTION_BLOCK = re.compile(
     r"^(?:Contents of \S*(?:AGENTS|CLAUDE)\.md|# (?:AGENTS|CLAUDE)\.md)", re.MULTILINE
 )
-SKILL_BODY = re.compile(r"^Base directory for this skill: \S", re.MULTILINE)
+SKILL_BODY = re.compile(
+    r"^(?:Base directory for this skill: \S"
+    r"|<system-notification>\s*Skills provide specialized capabilities)",
+    re.MULTILINE,
+)
 UNRECOGNIZED_WRAPPER = re.compile(r"<([a-zA-Z][\w.-]*)(?:\s[^>]*)?>.*</\1>", re.DOTALL)
 Classification = Literal["genuine", "harness_injected", "unclassified"]
 
@@ -119,7 +124,7 @@ def select_logs(
     if not 1 <= len(paths) + len(sessions) <= MAX_SELECTED_SESSIONS:
         raise InputError("Explicitly select 1-24 files or imported sessions.")
     if paths and agent is None:
-        raise InputError("Selected files require --agent codex or --agent claude.")
+        raise InputError("Selected files require --agent codex, --agent claude or --agent droid.")
     with edit_catalog(root, expected_revision) as catalog:
         if name in catalog.selections:
             raise ConflictError("Selection membership is immutable; choose a new selection name.")

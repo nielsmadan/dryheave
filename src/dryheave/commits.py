@@ -6,7 +6,6 @@ from typing import Literal
 from pydantic import Field, ValidationError
 
 from dryheave.errors import DryheaveError, InputError, LimitError
-from dryheave.logs import claude, codex
 from dryheave.logs.base import (
     ImportLimits,
     Session,
@@ -14,6 +13,7 @@ from dryheave.logs.base import (
     recorded_baseline,
     recorded_cwd,
 )
+from dryheave.logs.service import parser_for
 from dryheave.models import AgentKind, StrictModel
 from dryheave.repositories import Git, SnapshotLimits
 
@@ -463,7 +463,7 @@ def _matches(
 
 def scan_sessions(root: Path, agent: AgentKind, limits: ImportLimits | None = None) -> SessionScan:
     limits = limits or ImportLimits()
-    parser = codex.parse if agent == AgentKind.CODEX else claude.parse
+    parser = parser_for(agent)
     sessions: list[ScannedSession] = []
     skipped: list[SkippedSession] = []
     for path in discover(root, limits):

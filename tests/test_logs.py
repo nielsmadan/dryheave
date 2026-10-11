@@ -3,11 +3,19 @@ from pathlib import Path
 
 import pytest
 
+from dryheave.commits import scan_sessions
 from dryheave.errors import InputError, LimitError
-from dryheave.logs import claude, codex
-from dryheave.logs.base import ImportLimits, candidates, discover
+from dryheave.logs import claude, codex, droid
+from dryheave.logs.base import (
+    ImportLimits,
+    Session,
+    candidates,
+    discover,
+    recorded_baseline,
+    recorded_cwd,
+)
 from dryheave.logs.service import import_session
-from dryheave.models import AgentKind
+from dryheave.models import AgentKind, ObjectKind
 from dryheave.storage import ObjectStore
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -288,3 +296,121 @@ def test_legacy_duplicate_with_missing_turn_id(tmp_path: Path) -> None:
     ]
     session = codex.parse(write_log(tmp_path / "log.jsonl", records))
     assert [(event.kind, event.text) for event in session.events] == [("user", "Do it")]
+
+
+def test_real_droid_shapes() -> None:
+    session = droid.parse(FIXTURES / "droid-recorded.jsonl")
+    assert (session.agent, session.source_id, session.source_version) == (
+        AgentKind.DROID,
+        "fixture-session",
+        "2",
+    )
+    assert session.metadata["cwd"] == "/fixture/repository"
+    assert session.metadata["title"] == "Add a greeting command"
+    assert [(event.event_id, event.kind) for event in session.events] == [
+        ("e000002-0", "user"),
+        ("e000003-0", "user"),
+        ("e000004-0", "user"),
+        ("e000005-1", "assistant"),
+        ("e000005-2", "tool_call"),
+        ("e000006-0", "tool_result"),
+        ("e000007", "metadata"),
+        ("e000008-0", "user"),
+        ("e000009-0", "user"),
+        ("e000010-0", "user"),
+        ("e000011", "lifecycle"),
+    ]
+    assert [event.text for event in session.events if event.kind == "assistant"] == [
+        "Which punctuation should the greeting use?"
+    ]
+    assert "Private reasoning" not in "".join(event.text for event in session.events)
+    assert [event.data["name"] for event in session.events if event.kind == "tool_call"] == ["Read"]
+    assert [event.text for event in session.events if event.kind == "tool_result"] == [
+        "print('Hello')\n"
+    ]
+    assert [event.turn_id for event in session.events if event.kind == "lifecycle"] == [
+        "fixture-turn-1"
+    ]
+    assert session.usage == ()
+
+
+def test_droid_harness_user_events_keep_a_recognizable_wrapper() -> None:
+    session = droid.parse(FIXTURES / "droid-recorded.jsonl")
+    assert [
+        event.text for event in session.events if event.kind == "user" and event.source_line < 5
+    ] == [
+        "<harness-event>SessionStart</harness-event>",
+        "<harness-event><system-reminder>\nCurrent date: 2026-09-20.\n</system-reminder>"
+        "</harness-event>",
+        "Add a greeting command.",
+    ]
+    hook = session.events[0]
+    assert hook.data["hookEventName"] == "SessionStart"
+    assert hook.data["visibility"] == "user_only"
+    assert session.events[7].text == (
+        '<harness-event>Skill "code-review" activated: --quick</harness-event>'
+    )
+
+
+def test_droid_records_no_git_baseline(tmp_path: Path, store: ObjectStore) -> None:
+    source = FIXTURES / "droid-recorded.jsonl"
+    session = droid.parse(source)
+    assert recorded_baseline(session) is None
+    assert recorded_cwd(session) == "/fixture/repository"
+    assert "git" not in session.metadata
+    assert "baseline_unknown" in {warning.code for warning in session.warnings}
+    (tmp_path / "droid-recorded.jsonl").write_bytes(source.read_bytes())
+    scan = scan_sessions(tmp_path, AgentKind.DROID, ImportLimits())
+    assert [(item.source_id, item.cwd, item.baseline_commit) for item in scan.sessions] == [
+        ("fixture-session", "/fixture/repository", None)
+    ]
+    assert scan.sessions_with_baseline == 0
+    identifier = import_session(store, source, AgentKind.DROID)
+    assert store.load(identifier, Session, kind=ObjectKind.SESSION).agent == AgentKind.DROID
+
+
+def test_droid_malformed_and_truncated_records_warn(tmp_path: Path) -> None:
+    session = droid.parse(FIXTURES / "droid-recorded.jsonl")
+    assert [
+        (warning.code, warning.line)
+        for warning in session.warnings
+        if warning.code in {"malformed_line", "truncated_tail"}
+    ] == [("malformed_line", 12), ("truncated_tail", 12)]
+    path = write_log(
+        tmp_path / "droid.jsonl",
+        [
+            {"type": "session_start", "id": "first", "cwd": "/one"},
+            {"type": "session_start", "id": "second", "cwd": "/two"},
+            {"type": "compaction_state", "summaryText": "earlier work", "removedCount": 4},
+        ],
+    )
+    session = droid.parse(path)
+    assert {"ambiguous_session", "ambiguous_cwd", "compacted"} <= {
+        warning.code for warning in session.warnings
+    }
+
+
+def test_droid_log_without_session_start_reports_missing_metadata(tmp_path: Path) -> None:
+    session = droid.parse(write_log(tmp_path / "droid.jsonl", [{"type": "todo_state", "id": "t"}]))
+    assert session.source_id is None
+    assert "missing_metadata" in {warning.code for warning in session.warnings}
+
+
+def test_droid_ignores_unknown_records_and_keeps_a_string_version(tmp_path: Path) -> None:
+    session = droid.parse(
+        write_log(
+            tmp_path / "droid.jsonl",
+            [
+                {"type": "session_start", "id": "fixture", "version": "3.1.0"},
+                {"type": "unknown_record", "payload": {"ignored": True}},
+                {"type": "message", "id": "m1", "message": {"role": "system", "content": "setup"}},
+                {
+                    "type": "message",
+                    "id": "m2",
+                    "message": {"role": "user", "content": "Do the work."},
+                },
+            ],
+        )
+    )
+    assert session.source_version == "3.1.0"
+    assert [(event.kind, event.text) for event in session.events] == [("user", "Do the work.")]

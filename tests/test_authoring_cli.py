@@ -230,3 +230,23 @@ def test_scan_reports_the_recorded_cwd_and_baseline_commit_or_marks_them_absent(
         "b-without-baseline.jsonl": ("/fixture/other", None),
     }
     assert "collect survey --repo PATH" in scanned["baselines"]
+
+
+def test_collect_accepts_droid_logs(tmp_path: Path, capsys) -> None:
+    common = ["--store", str(tmp_path / "store"), "--json"]
+    root = tmp_path / "logs"
+    root.mkdir()
+    (root / "droid.jsonl").write_bytes((FIXTURES / "droid-recorded.jsonl").read_bytes())
+    assert main([*common, "collect", "scan", "--agent", "droid", "--root", str(root)]) == 0
+    scanned = json.loads(capsys.readouterr().out)["data"]["sessions"]
+    assert [(item["source_id"], item["cwd"], item["baseline_commit"]) for item in scanned] == [
+        ("fixture-session", "/fixture/repository", None)
+    ]
+    assert scanned[0]["user_messages"]["genuine"] == 2
+    assert scanned[0]["user_messages"]["harness_injected"] == 4
+    assert main([*common, "collect", "import", str(root / "droid.jsonl"), "--agent", "droid"]) == 0
+    identifier = json.loads(capsys.readouterr().out)["data"]["id"]
+    assert main(["collect", "show", identifier, *common]) == 0
+    session = json.loads(capsys.readouterr().out)["data"]["session"]
+    assert session["agent"] == "droid"
+    assert session["source_version"] == "2"
