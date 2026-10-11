@@ -24,10 +24,20 @@ def _usage(raw: dict[str, JsonValue]) -> TokenUsage:
         return value if type(value) is int and value >= 0 else None
 
     reasoning = mapping(raw.get("output_tokens_details")).get("thinking_tokens")
+    cache_write = number("cache_creation_input_tokens")
+    cache_write_1h = mapping(raw.get("cache_creation")).get("ephemeral_1h_input_tokens")
+    cache_write_1h = (
+        cache_write_1h
+        if type(cache_write_1h) is int
+        and cache_write_1h >= 0
+        and (cache_write is None or cache_write_1h <= cache_write)
+        else None
+    )
     return TokenUsage(
         uncached_input=number("input_tokens"),
         cache_read=number("cache_read_input_tokens"),
-        cache_write=number("cache_creation_input_tokens"),
+        cache_write=cache_write,
+        cache_write_1h=cache_write_1h,
         output=number("output_tokens"),
         reasoning=reasoning if type(reasoning) is int else None,
         provenance="claude.message.usage; latest snapshot per message.id",
@@ -172,6 +182,7 @@ def parse(path: Path, limits: ImportLimits | None = None) -> Session:
     )
     return Session(
         agent=AgentKind.CLAUDE,
+        parser_version="2",
         source_id=source_id,
         source_version=version,
         source_path_hash=source_hash(path),

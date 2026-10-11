@@ -50,3 +50,42 @@ def test_many_owned_identities_are_linear_journal_deltas(store, benchmark):
         restored = ExecutionJournal(journal).attempts[state.attempt_id]
         assert restored.owned == state.owned
         assert restored.stage == TrialStage.PREPARING
+
+
+def test_regrade_scope_keeps_its_assessment_events_apart_from_the_normal_index(store):
+    from dryheave.assessment_inputs import saved_judge_calls
+    from dryheave.controller_models import RoleCall
+    from dryheave.drivers.models import CleanupReport
+
+    run_id = RunStore(store.root).create("a" * 64)
+    with RunStore(store.root).open(run_id) as journal:
+        normal = ExecutionJournal(journal)
+        state = normal.reserve("trial")
+        normal.evidence(
+            state, "judge-intent", RoleCall(call_id="j-old", role="judge", status="intent")
+        )
+        regrade = ExecutionJournal(journal, regrade_id="r-1")
+        regrade.evidence(
+            state, "judge-intent", RoleCall(call_id="j-new", role="judge", status="intent")
+        )
+        regrade.record(state, "criterion-intent", {"criterion_id": "quality"})
+        regrade.evidence(
+            state,
+            "assessment-recovery-cleanup",
+            CleanupReport(terminal_closed=True, known_writers_stopped=True),
+        )
+        assert [call.call_id for call in saved_judge_calls(normal, state)] == ["j-old"]
+        assert [call.call_id for call in saved_judge_calls(regrade, state)] == ["j-new"]
+        assert normal.events_for(state.attempt_id, "criterion-intent") == ()
+        assert regrade.events_for(state.attempt_id, "criterion-intent")[0].data == {
+            "criterion_id": "quality"
+        }
+        assert regrade.assessment_root(state) == (
+            normal.attempt_root(state) / "regrades" / "r-1" / "assessment"
+        )
+        raw = [event.data for event in journal.events if event.event == "judge-intent"]
+        assert [item.get("regrade_id") for item in raw] == [None, "r-1"]
+    with RunStore(store.root).open(run_id) as journal:
+        reopened = ExecutionJournal(journal)
+        assert reopened.cleanup_reports[state.attempt_id].known_writers_stopped
+        assert [call.call_id for call in saved_judge_calls(reopened, state)] == ["j-old"]

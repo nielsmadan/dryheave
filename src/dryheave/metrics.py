@@ -1,13 +1,16 @@
 from collections import defaultdict
 from collections.abc import Iterable
 
+from pydantic import JsonValue
+
 from dryheave.controller_models import ControllerRecipe, RoleCall
 from dryheave.drivers.models import NativeEvent, NativeUsage
-from dryheave.experiment_models import PriceTable
+from dryheave.errors import DryheaveError
+from dryheave.experiment_models import PriceRate, PriceTable
 from dryheave.models import TokenUsage
 from dryheave.result_models import RoleMetrics, UsageCharge
 from dryheave.runner_models import CapturedAttempt
-from dryheave.serialization import canonical_json, digest
+from dryheave.serialization import canonical_json, digest, parse_json
 
 TOKEN_FIELDS = ("uncached_input", "cache_read", "cache_write", "output", "reasoning")
 BILLABLE_FIELDS = TOKEN_FIELDS[:-1]
@@ -15,20 +18,77 @@ BILLABLE_FIELDS = TOKEN_FIELDS[:-1]
 
 def token_sum(usages: Iterable[TokenUsage | None]) -> TokenUsage:
     values: dict[str, list[int]] = defaultdict(list)
+    cache_write_1h: list[int] = []
+    cache_write_1h_known = True
     for usage in usages:
         if usage is not None:
             for field in TOKEN_FIELDS:
                 value = getattr(usage, field)
                 if value is not None:
                     values[field].append(value)
+            if usage.cache_write is not None:
+                if usage.cache_write_1h is None:
+                    cache_write_1h_known = False
+                else:
+                    cache_write_1h.append(usage.cache_write_1h)
     totals = {field: sum(values[field]) if values[field] else None for field in TOKEN_FIELDS}
     output, reasoning = totals["output"], totals["reasoning"]
     if output is not None and reasoning is not None and reasoning > output:
         totals["reasoning"] = None
+    totals["cache_write_1h"] = (
+        sum(cache_write_1h) if cache_write_1h_known and cache_write_1h else None
+    )
     return TokenUsage(
         **totals,
         provenance="Sum of observed non-overlapping categories; null categories remain unobserved.",
     )
+
+
+def _write_cost(usage: TokenUsage, rate: PriceRate) -> tuple[float, str | None]:
+    cache_write = usage.cache_write or 0
+    if usage.cache_write_1h is not None and rate.cache_write_1h is not None:
+        return (
+            (cache_write - usage.cache_write_1h) * rate.cache_write
+            + usage.cache_write_1h * rate.cache_write_1h
+        ), None
+    if cache_write and usage.cache_write_1h is None:
+        return cache_write * rate.cache_write, (
+            "The 1-hour cache-write split is unknown for this record; "
+            "priced entirely at the 5-minute rate."
+        )
+    if cache_write and rate.cache_write_1h is None:
+        return cache_write * rate.cache_write, (
+            "The price table has no 1-hour cache-write rate; priced entirely at the 5-minute rate."
+        )
+    return cache_write * rate.cache_write, None
+
+
+def cache_write_1h_from_raw(raw: dict[str, JsonValue]) -> int | None:
+    creation = raw.get("cache_creation")
+    if not isinstance(creation, dict):
+        return None
+    value = creation.get("ephemeral_1h_input_tokens")
+    return value if type(value) is int and value >= 0 else None
+
+
+def call_usage_with_raw_split(
+    usage: TokenUsage | None, raw_stdout: bytes | None
+) -> TokenUsage | None:
+    if usage is None or usage.cache_write_1h is not None or usage.cache_write is None:
+        return usage
+    if raw_stdout is None:
+        return usage
+    try:
+        content = parse_json(raw_stdout)
+    except DryheaveError:
+        return usage
+    values = content.get("usage")
+    if not isinstance(values, dict):
+        return usage
+    derived = cache_write_1h_from_raw(values)
+    if derived is None or derived > usage.cache_write:
+        return usage
+    return usage.model_copy(update={"cache_write_1h": derived})
 
 
 def _charge(record: UsageCharge, table: PriceTable | None) -> UsageCharge:
@@ -40,7 +100,15 @@ def _charge(record: UsageCharge, table: PriceTable | None) -> UsageCharge:
     rate = next((rate for rate in table.rates if rate.model == model), None)
     if rate is None or any(getattr(record.usage, name) is None for name in BILLABLE_FIELDS):
         return record
-    cost = sum(getattr(record.usage, name) * getattr(rate, name) for name in BILLABLE_FIELDS) / 1e6
+    write_cost, write_reason = _write_cost(record.usage, rate)
+    cost = (
+        sum(
+            getattr(record.usage, name) * getattr(rate, name)
+            for name in BILLABLE_FIELDS
+            if name != "cache_write"
+        )
+        + write_cost
+    ) / 1e6
     return record.model_copy(
         update={
             "cost": cost,
@@ -48,6 +116,7 @@ def _charge(record: UsageCharge, table: PriceTable | None) -> UsageCharge:
             "currency": table.currency,
             "price_version": table.version,
             "price_date": table.effective_date,
+            "reason": record.reason + (" " + write_reason if write_reason else ""),
         }
     )
 
@@ -119,7 +188,7 @@ def _cumulative(records: list[NativeUsage]) -> tuple[list[NativeUsage], bool]:
             and getattr(current, field) < getattr(previous, field)
             for field in BILLABLE_FIELDS
         )
-        for field in TOKEN_FIELDS:
+        for field in (*TOKEN_FIELDS, "cache_write_1h"):
             value = getattr(current, field)
             before = getattr(previous, field) if previous else None
             values[field] = (
@@ -134,6 +203,9 @@ def _cumulative(records: list[NativeUsage]) -> tuple[list[NativeUsage], bool]:
         output, reasoning = values["output"], values["reasoning"]
         if output is not None and reasoning is not None and reasoning > output:
             values["reasoning"] = None
+        cache_write, cache_write_1h = values["cache_write"], values["cache_write_1h"]
+        if cache_write is not None and cache_write_1h is not None and cache_write_1h > cache_write:
+            values["cache_write_1h"] = None
         converted.append(
             record.model_copy(
                 update={
@@ -218,6 +290,10 @@ def subject_metrics(
             if record.usage
             else None
         )
+        if usage is not None and usage.cache_write_1h is None and usage.cache_write is not None:
+            derived = cache_write_1h_from_raw(record.raw)
+            if derived is not None and derived <= usage.cache_write:
+                usage = usage.model_copy(update={"cache_write_1h": derived})
         charges.append(
             _charge(
                 UsageCharge(
@@ -254,6 +330,7 @@ def call_metrics(
     calls: tuple[RoleCall, ...],
     recipe: ControllerRecipe | None,
     table: PriceTable | None,
+    raw_stdout: dict[str, bytes] | None = None,
 ) -> RoleMetrics:
     if recipe is None and not calls:
         return summarize_role(
@@ -273,11 +350,12 @@ def call_metrics(
                 fixture_charge(call.call_id, "Explicit scripted simulator made no model call.")
             )
             continue
+        usage = call_usage_with_raw_split(call.usage, (raw_stdout or {}).get(call.call_id))
         charges.append(
             _charge(
                 UsageCharge(
                     identity=call.call_id,
-                    usage=call.usage,
+                    usage=usage,
                     observed_model=call.observed_model,
                     requested_model=recipe.model if recipe else None,
                     model_basis="observed"

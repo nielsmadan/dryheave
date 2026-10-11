@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from dryheave.errors import InputError
 from dryheave.filesystem import read_bytes
@@ -15,6 +15,7 @@ from dryheave.storage import ObjectStore
 
 MIN_DESCRIPTION_LENGTH = 10
 MIN_RUBRIC_LENGTH = 20
+DEFAULT_RUBRIC_IDS = ("code-quality", "codebase-consistency", "test-quality")
 
 
 class TaskFact(StrictModel):
@@ -79,6 +80,37 @@ class RubricCriterion(StrictModel):
         return self
 
 
+class CheckCondition(StrictModel):
+    check_id: Name
+    answer: Literal["yes", "no"]
+
+
+class CaseCheck(StrictModel):
+    check_id: Name
+    question: str = Field(min_length=10, max_length=4000)
+    expect: Literal["yes", "no"]
+    only_if: CheckCondition | None = None
+
+
+class MetricsCommand(StrictModel):
+    metrics_id: Name
+    description: str = Field(min_length=10, max_length=4000)
+    command: CommandSpec
+    entrypoint: RelativePath
+
+    @model_validator(mode="after")
+    def trusted_entrypoint(self) -> Self:
+        if self.description.strip().lower().startswith(("todo", "placeholder", "fill in")):
+            raise ValueError("metrics description cannot be a placeholder")
+        if len(self.description.strip()) < MIN_DESCRIPTION_LENGTH:
+            raise ValueError("metrics description must be substantive")
+        if f"{{verifier}}/{self.entrypoint}" not in self.command.argv:
+            raise ValueError(
+                "command must invoke the supplied hidden entrypoint with {verifier}/PATH"
+            )
+        return self
+
+
 class CaseBudgets(StrictModel):
     max_turns: int = Field(default=4, gt=0, le=100)
     subject_seconds: int = Field(default=180, gt=0, le=86400)
@@ -107,6 +139,35 @@ class CaseContent(StrictModel):
     intent_confirmed: bool = False
     facts_reviewed: bool = False
     unresolved_issues: tuple[str, ...] = ()
+    checks: tuple[CaseCheck, ...] = ()
+    metrics: tuple[MetricsCommand, ...] = ()
+    disabled_rubrics: tuple[Name, ...] = ()
+
+    @model_validator(mode="after")
+    def valid_checks(self) -> Self:
+        seen: set[str] = set()
+        for check in self.checks:
+            if check.check_id in seen:
+                raise ValueError(f"check IDs must be unique: {check.check_id}")
+            if check.only_if is not None and check.only_if.check_id not in seen:
+                raise ValueError(f"check {check.check_id} only_if must reference an earlier check")
+            seen.add(check.check_id)
+        if len({item.metrics_id for item in self.metrics}) != len(self.metrics):
+            raise ValueError("metrics IDs must be unique")
+        if len(set(self.disabled_rubrics)) != len(self.disabled_rubrics):
+            raise ValueError("disabled rubric IDs must be unique")
+        unknown = sorted(set(self.disabled_rubrics) - set(DEFAULT_RUBRIC_IDS))
+        if unknown:
+            raise ValueError(f"disabled rubrics must be default rubric IDs: {', '.join(unknown)}")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        for name in ("checks", "metrics", "disabled_rubrics"):
+            if not getattr(self, name):
+                value.pop(name, None)
+        return value
 
 
 class CaseDraft(CaseContent):
@@ -141,6 +202,8 @@ class FrozenCase(CaseContent):
                 and criterion.entrypoint not in self.hidden_files
             ):
                 raise ValueError("hidden verifier entrypoint is missing")
+        if any(item.entrypoint not in self.hidden_files for item in self.metrics):
+            raise ValueError("hidden metrics entrypoint is missing")
         if len(set(self.hidden_files.values())) != len(self.hidden_files):
             raise ValueError("hidden file blob paths must be unique")
         return self
@@ -356,6 +419,11 @@ def _validate_grading(draft: CaseDraft, root: Path) -> tuple[str, ...]:
         )
         if text.strip().lower() in {"todo", "placeholder", "fill in grading here"}:
             issues.append(f"Criterion {criterion.criterion_id} is a placeholder.")
+    issues.extend(
+        f"Hidden metrics entrypoint is missing: {item.entrypoint}."
+        for item in draft.metrics
+        if item.entrypoint not in draft.hidden_files
+    )
     for name, path in draft.hidden_files.items():
         if not _source_file(root, path).strip():
             issues.append(f"Hidden verifier file is empty: {name}.")

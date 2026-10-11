@@ -117,3 +117,39 @@ def test_assessment_cancellation_has_concise_resume_guidance(
         if structured
         else "dryheave: " + message + "\n"
     )
+
+
+def test_assess_case_requires_regrade(store, capsys):
+    assert main(["--store", str(store.root), "assess", "a" * 32, "--case", "b" * 64]) == 2
+    assert capsys.readouterr().err == "dryheave: --case requires --regrade.\n"
+
+
+def test_regrade_cancellation_resumes_the_same_regrade_command(store, capsys, monkeypatch):
+    import shlex
+
+    def cancelled(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("dryheave.result_cli.regrade_run", cancelled)
+    run_id, case_id = "a" * 32, "b" * 64
+    args = ["--store", str(store.root), "assess", run_id, "--regrade", "--case", case_id]
+    assert main(args) == 130
+    assert capsys.readouterr().err.endswith(
+        "Resume with: " + shlex.join(("dryheave", *args)) + "\n"
+    )
+
+
+@pytest.mark.integration
+def test_cli_regrade_returns_its_regrade_id_and_the_chained_report(store, graded_benchmark, capsys):
+    prefix = ["--store", str(store.root), "--json"]
+    identifier = create_experiment(store, graded_benchmark)
+    assert main([*prefix, "run", identifier, "--mode", "offline-fixture"]) == 0
+    run_id = json.loads(capsys.readouterr().out)["data"]["run_id"]
+    assert main([*prefix, "assess", run_id]) == 0
+    (original,) = json.loads(capsys.readouterr().out)["data"]["assessment_ids"]
+    assert main([*prefix, "assess", run_id, "--regrade"]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["regrade_id"].startswith("r-")
+    (regraded,) = data["assessment_ids"]
+    attempt = data["report"]["attempts"][0]
+    assert (attempt["assessment_id"], attempt["result"]["previous_id"]) == (regraded, original)

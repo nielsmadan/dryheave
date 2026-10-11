@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SerializerFunctionWrapHandler, model_serializer
 
 from dryheave.models import Name, ObjectId, RunId, StrictModel
 from dryheave.result_models import Assessment, RoleMetrics
@@ -32,6 +32,32 @@ class AttemptReport(StrictModel):
     roles: tuple[RoleMetrics, ...] = ()
 
 
+class CriterionSummary(StrictModel):
+    case_id: ObjectId
+    criterion_id: Name
+    passes: int = Field(ge=0)
+    graded: int = Field(ge=0)
+    scores: Distribution
+
+
+class CheckSummary(StrictModel):
+    case_id: ObjectId
+    check_id: Name
+    passes: int = Field(ge=0)
+    fails: int = Field(ge=0)
+    not_applicable: int = Field(ge=0)
+    errors: int = Field(default=0, ge=0)
+    agreement: float | None = Field(default=None, ge=0, le=1)
+
+
+class MetricSummary(StrictModel):
+    case_id: ObjectId
+    metric_id: Name
+    label: str
+    unit: str | None
+    values: Distribution
+
+
 class GroupMetrics(StrictModel):
     variant: str
     mode: str
@@ -53,6 +79,24 @@ class GroupMetrics(StrictModel):
     unknown_cost_records: int
     partial_cost_attempts: int
     costs: Distribution
+    cache_read_tokens: Distribution | None = None
+    cache_write_tokens: Distribution | None = None
+    total_input_tokens: Distribution | None = None
+    criteria: tuple[CriterionSummary, ...] = ()
+    checks: tuple[CheckSummary, ...] = ()
+    metrics: tuple[MetricSummary, ...] = ()
+    simulator_replies: Distribution | None = None
+    cost_by_role: dict[str, Distribution] = Field(default_factory=dict)
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        for name in ("criteria", "checks", "metrics"):
+            if not getattr(self, name):
+                value.pop(name, None)
+        if self.simulator_replies is None:
+            value.pop("simulator_replies", None)
+        return value
 
 
 class RunReport(StrictModel):

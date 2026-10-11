@@ -64,12 +64,26 @@ def claude_observation(content: bytes) -> RoleObservation:
                 ("output", "output_tokens"),
             )
         }
+        creation = values.get("cache_creation")
+        raw_cache_write_1h = (
+            creation.get("ephemeral_1h_input_tokens") if isinstance(creation, dict) else None
+        )
+        cache_write = counters.get("cache_write")
+        cache_write_bound = cache_write if type(cache_write) is int else None
+        cache_write_1h = (
+            raw_cache_write_1h
+            if type(raw_cache_write_1h) is int
+            and raw_cache_write_1h >= 0
+            and (cache_write_bound is None or raw_cache_write_1h <= cache_write_bound)
+            else None
+        )
         if all(
             value is None or (type(value) is int and value >= 0) for value in counters.values()
         ) and any(counters.values()):
             with suppress(ValidationError):
                 usage = TokenUsage.model_validate(
                     counters
+                    | {"cache_write_1h": cache_write_1h}
                     | {
                         "provenance": "claude-print-2.1.278-result-cumulative; reasoning is not separately observed"
                     }

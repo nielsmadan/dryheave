@@ -316,3 +316,238 @@ def test_failure_execution_marker_requires_bounded_nonblank_text(marker):
             expected_stdout="CHECKS_PASSED",
             expected_failure_stdout=marker,
         )
+
+
+LEGACY_CONTENT = {
+    "schema_version": 1,
+    "title": "Fix the greeting",
+    "initial_prompt": "Fix the greeting punctuation.",
+    "allowed_facts": [],
+    "evidence": [
+        {
+            "session_id": "a" * 64,
+            "event_id": "e1",
+            "visibility": "subject",
+            "excerpt": "Fix the greeting punctuation.",
+        }
+    ],
+    "setup": [],
+    "tool_requirements": [],
+    "budgets": {"max_turns": 4, "subject_seconds": 180, "setup_seconds": 120},
+    "capture_policy": {
+        "max_files": 20000,
+        "max_bytes": 64 * 1024 * 1024,
+        "max_depth": 32,
+        "exclude": [],
+        "include_ignored": [],
+    },
+    "criteria": [
+        {
+            "criterion_id": "quality",
+            "kind": "judge",
+            "required": True,
+            "rubric": "The greeting keeps its public interface.",
+        }
+    ],
+    "intent_confirmed": True,
+    "facts_reviewed": True,
+    "unresolved_issues": [],
+}
+
+
+def test_legacy_frozen_case_and_draft_serialize_byte_identically() -> None:
+    from dryheave.cases import CaseDraft
+    from dryheave.serialization import canonical_json, parse_model
+
+    frozen = LEGACY_CONTENT | {
+        "repository_id": "b" * 64,
+        "persona_id": "c" * 64,
+        "source_session_id": "a" * 64,
+        "source_path_hash": "d" * 64,
+        "source_start_event": "e1",
+        "source_end_event": "e1",
+        "hidden_files": {},
+        "reference_patch_file": None,
+    }
+    draft = LEGACY_CONTENT | {
+        "source_session_id": "a" * 64,
+        "start_event": "e1",
+        "end_event": "e1",
+        "repository_id": "b" * 64,
+        "persona": None,
+        "persona_id": "c" * 64,
+        "hidden_files": {},
+        "reference_patch": None,
+    }
+    assert canonical_json(parse_model(canonical_json(frozen), FrozenCase)) == canonical_json(frozen)
+    assert parse_model(canonical_json(draft), CaseDraft).model_dump(mode="json") == draft
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        (
+            {
+                "checks": [
+                    {"check_id": "asked", "question": "Did the agent ask?", "expect": "yes"},
+                    {"check_id": "asked", "question": "Did the agent ask?", "expect": "no"},
+                ]
+            },
+            "check IDs must be unique",
+        ),
+        (
+            {
+                "checks": [
+                    {
+                        "check_id": "kept",
+                        "question": "Was the setting kept?",
+                        "expect": "yes",
+                        "only_if": {"check_id": "asked", "answer": "yes"},
+                    },
+                    {"check_id": "asked", "question": "Did the agent ask?", "expect": "yes"},
+                ]
+            },
+            "only_if must reference an earlier check",
+        ),
+        (
+            {
+                "checks": [
+                    {
+                        "check_id": "asked",
+                        "question": "Did the agent ask?",
+                        "expect": "yes",
+                        "only_if": {"check_id": "asked", "answer": "yes"},
+                    }
+                ]
+            },
+            "only_if must reference an earlier check",
+        ),
+        ({"disabled_rubrics": ["style"]}, "default rubric IDs: style"),
+        ({"disabled_rubrics": ["test-quality", "test-quality"]}, "must be unique"),
+    ],
+)
+def test_case_content_rejects_invalid_checks_and_disabled_rubrics(changes, message) -> None:
+    from dryheave.cases import CaseContent
+    from dryheave.serialization import canonical_json
+
+    with pytest.raises(ValidationError, match=message):
+        CaseContent.model_validate_json(canonical_json(LEGACY_CONTENT | changes))
+
+
+def test_case_checks_and_disabled_rubrics_round_trip() -> None:
+    from dryheave.cases import CaseContent
+    from dryheave.serialization import canonical_json, parse_model
+
+    payload = LEGACY_CONTENT | {
+        "checks": [
+            {"check_id": "asked", "question": "Did the agent ask first?", "expect": "yes"},
+            {
+                "check_id": "kept",
+                "question": "Was the old setting kept?",
+                "expect": "no",
+                "only_if": {"check_id": "asked", "answer": "yes"},
+            },
+        ],
+        "disabled_rubrics": ["test-quality"],
+    }
+    content = parse_model(canonical_json(payload), CaseContent)
+    assert content.checks[1].only_if.check_id == "asked"
+    assert content.disabled_rubrics == ("test-quality",)
+    assert parse_model(canonical_json(content), CaseContent) == content
+
+
+@pytest.mark.integration
+def test_frozen_case_keeps_declared_checks(
+    store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path
+) -> None:
+    from dryheave.cases import CaseCheck, CheckCondition
+
+    checks = (
+        CaseCheck(check_id="asked", question="Did the agent ask first?", expect="yes"),
+        CaseCheck(
+            check_id="kept",
+            question="Was the old greeting kept?",
+            expect="no",
+            only_if=CheckCondition(check_id="asked", answer="yes"),
+        ),
+    )
+    draft = curated(store, historical_repo, tmp_path).model_copy(
+        update={"checks": checks, "disabled_rubrics": ("test-quality",)}
+    )
+    case = load_frozen_case(store, freeze_case(store, draft, tmp_path))
+    assert (case.checks, case.disabled_rubrics) == (checks, ("test-quality",))
+
+
+METRICS_COMMAND = {
+    "metrics_id": "tests",
+    "description": "Count tests and measure line coverage of the final workspace.",
+    "command": {"argv": ["/bin/sh", "{verifier}/metrics.sh"]},
+    "entrypoint": "metrics.sh",
+}
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"metrics": [METRICS_COMMAND, METRICS_COMMAND]}, "metrics IDs must be unique"),
+        (
+            {"metrics": [METRICS_COMMAND | {"command": {"argv": ["/bin/sh", "metrics.sh"]}}]},
+            "must invoke the supplied hidden entrypoint",
+        ),
+        (
+            {"metrics": [METRICS_COMMAND | {"description": "TODO: describe the metrics"}]},
+            "metrics description cannot be a placeholder",
+        ),
+    ],
+)
+def test_case_content_rejects_invalid_metrics_commands(changes, message) -> None:
+    from dryheave.cases import CaseContent
+    from dryheave.serialization import canonical_json
+
+    with pytest.raises(ValidationError, match=message):
+        CaseContent.model_validate_json(canonical_json(LEGACY_CONTENT | changes))
+
+
+def test_frozen_case_requires_hidden_metrics_entrypoint() -> None:
+    from dryheave.serialization import canonical_json
+
+    frozen = LEGACY_CONTENT | {
+        "repository_id": "b" * 64,
+        "persona_id": "c" * 64,
+        "source_session_id": "a" * 64,
+        "source_path_hash": "d" * 64,
+        "source_start_event": "e1",
+        "source_end_event": "e1",
+        "metrics": [METRICS_COMMAND],
+    }
+    with pytest.raises(ValidationError, match="hidden metrics entrypoint is missing"):
+        FrozenCase.model_validate_json(canonical_json(frozen | {"hidden_files": {}}))
+    case = FrozenCase.model_validate_json(
+        canonical_json(frozen | {"hidden_files": {"metrics.sh": "verifiers/metrics.sh"}})
+    )
+    assert case.metrics[0].command.argv == ("/bin/sh", "{verifier}/metrics.sh")
+
+
+@pytest.mark.integration
+def test_frozen_case_keeps_metrics_command_and_its_hidden_script(
+    store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path
+) -> None:
+    from dryheave.cases import MetricsCommand
+    from dryheave.serialization import canonical_json
+
+    draft = curated(store, historical_repo, tmp_path)
+    command = MetricsCommand.model_validate_json(canonical_json(METRICS_COMMAND))
+    with_metrics = draft.model_copy(update={"metrics": (command,)})
+    assert validate_case(store, with_metrics, tmp_path) == (
+        "Hidden metrics entrypoint is missing: metrics.sh.",
+    )
+    script = tmp_path / "metrics.sh"
+    script.write_text('printf \'{"metrics": []}\' > "$DRYHEAVE_METRICS_OUTPUT"\n')
+    with_metrics = with_metrics.model_copy(
+        update={"hidden_files": {**draft.hidden_files, "metrics.sh": str(script)}}
+    )
+    identifier = freeze_case(store, with_metrics, tmp_path)
+    case = load_frozen_case(store, identifier)
+    assert case.metrics == (command,)
+    assert store.read_blobs(identifier)[case.hidden_files["metrics.sh"]] == script.read_bytes()
+    assert freeze_case(store, draft, tmp_path) != identifier

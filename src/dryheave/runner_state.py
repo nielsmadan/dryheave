@@ -2,6 +2,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from pydantic import JsonValue
+
 from dryheave.drivers.models import CleanupReport, ProcessIdentity
 from dryheave.errors import InputError
 from dryheave.journals import RunJournal
@@ -28,15 +30,39 @@ CLEANUP_EVENTS = {
     "ownership-reconciled",
 }
 
+ASSESSMENT_EVENTS = frozenset(
+    {
+        "criterion-intent",
+        "criterion-result",
+        "check-result",
+        "metrics-intent",
+        "metrics-result",
+        "judge-intent",
+        "judge-result",
+    }
+)
+REGRADE_KEY = "regrade_id"
+
+
+def _regrade_scope(event: JournalEvent) -> str | None:
+    value = event.data.get(REGRADE_KEY)
+    return value if isinstance(value, str) else None
+
+
+def _unscoped(event: JournalEvent) -> JournalEvent:
+    data = {key: value for key, value in event.data.items() if key != REGRADE_KEY}
+    return event.model_copy(update={"data": data}, deep=True)
+
 
 class ExecutionJournal:
-    def __init__(self, journal: RunJournal) -> None:
+    def __init__(self, journal: RunJournal, *, regrade_id: str | None = None) -> None:
         self.journal = journal
+        self.regrade_id = regrade_id
         self.options: RunOptions | None = None
         self.attempts: dict[str, AttemptState] = {}
         self.cleanup_reports: dict[str, CleanupReport] = {}
         self.unreconciled: set[str] = set()
-        self._assessment_events: dict[tuple[str, str], list[JournalEvent]] = {}
+        self._assessment_events: dict[tuple[str, str | None, str], list[JournalEvent]] = {}
         events = journal.events
         self._indexed_sequence = len(events)
         self._index_assessment_events(events)
@@ -75,25 +101,32 @@ class ExecutionJournal:
 
     def _index_assessment_events(self, events: tuple[JournalEvent, ...]) -> None:
         for event in events:
-            if event.attempt_id and event.event in {
-                "criterion-intent",
-                "criterion-result",
-                "judge-intent",
-                "judge-result",
-            }:
-                self._assessment_events.setdefault((event.attempt_id, event.event), []).append(
-                    event
-                )
+            if event.attempt_id and event.event in ASSESSMENT_EVENTS:
+                key = (event.attempt_id, _regrade_scope(event), event.event)
+                self._assessment_events.setdefault(key, []).append(event)
 
     def events_for(self, attempt_id: str, *names: str) -> tuple[JournalEvent, ...]:
         fresh = self.journal.events_since(self._indexed_sequence)
         self._index_assessment_events(fresh)
         self._indexed_sequence += len(fresh)
         events = (
-            event for name in names for event in self._assessment_events.get((attempt_id, name), ())
+            event
+            for name in names
+            for event in self._assessment_events.get((attempt_id, self.regrade_id, name), ())
         )
-        return tuple(
-            event.model_copy(deep=True) for event in sorted(events, key=lambda item: item.sequence)
+        return tuple(_unscoped(event) for event in sorted(events, key=lambda item: item.sequence))
+
+    def _scoped(self, name: str, data: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        if self.regrade_id is None or name not in ASSESSMENT_EVENTS:
+            return data
+        return {**data, REGRADE_KEY: self.regrade_id}
+
+    def record(self, state: AttemptState, name: str, data: dict[str, JsonValue]) -> None:
+        self.journal.append(
+            name,
+            self._scoped(name, data),
+            trial_id=state.trial_id,
+            attempt_id=state.attempt_id,
         )
 
     def own(self, state: AttemptState, identity: ProcessIdentity) -> AttemptState:
@@ -161,12 +194,7 @@ class ExecutionJournal:
         return state
 
     def evidence(self, state: AttemptState, name: str, model: StrictModel) -> None:
-        self.journal.append(
-            name,
-            model.model_dump(mode="json"),
-            trial_id=state.trial_id,
-            attempt_id=state.attempt_id,
-        )
+        self.record(state, name, model.model_dump(mode="json"))
         if name in CLEANUP_EVENTS:
             self.cleanup_reports[state.attempt_id] = parse_model(
                 canonical_json(model), CleanupReport
@@ -178,3 +206,9 @@ class ExecutionJournal:
         if Path(state.workspace) != expected:
             raise InputError("Saved attempt workspace is outside its owned run directory.")
         return expected.parent
+
+    def assessment_root(self, state: AttemptState) -> Path:
+        root = self.attempt_root(state)
+        if self.regrade_id is None:
+            return root / "assessment"
+        return root / "regrades" / self.regrade_id / "assessment"

@@ -38,11 +38,51 @@ by attempt. A running assessor extends its local index from newly durable events
 completed judge calls and unmatched intents remain visible without rescanning
 the whole journal for each attempt.
 
+## Regrade
+
+```sh
+uv run dryheave --store .dryheave assess RUN_ID --regrade --json
+uv run dryheave --store .dryheave assess RUN_ID --regrade --case CASE --json
+```
+
+`--regrade` is a separate assessment pass with its own `regrade_id`. It grades
+every attempt with a published capture in `captured`, `audited`, `grading` or
+`finished`, including finished ones, and never relaunches subjects. Each attempt
+gets a new assessment whose `previous_id` names the attempt's current assessment;
+older assessment IDs stay unchanged and reviews of findings the new audit still
+reports carry over. The pass uses the current default rubrics and the price-table
+rule (experiment table, else the built-in table). Judge recipe and budget come from
+the experiment's scoring; when the graded case has rubric criteria or checks and
+the experiment has no judge, regrade fails before changing anything.
+
+`--case CASE` grades against a replacement case: its criteria, checks, metrics
+commands, hidden files and reference patch. It must share the original case's
+`repository_id` and `initial_prompt`, and the input-integrity audit, help needed
+and `case_id` still use the capture's own case. The assessment records the
+replacement as `graded_case_id`, and `criteria_id` reflects the graded case.
+
+Every criterion, check, metrics and judge event of a regrade carries its
+`regrade_id`, so ordinary assessment resume and report reconstruction never see
+them, and a regrade never reuses judge calls or evidence from an earlier pass.
+Grading files live under `attempts/<id>/regrades/<regrade_id>/assessment`, and the
+new assessment's evidence and judge spend cover only that pass. An interrupted
+regrade resumes under the same `regrade_id` when the same command is re-run;
+interrupted intents become errors as in ordinary resume. The new assessment itself
+records the `regrade_id` that produced it, so resume recognizes an attempt as
+already regraded in this pass even if the process died after saving that
+assessment but before appending its `regrade-assessed` marker, and never chains a
+second assessment onto it. While a regrade is
+unfinished, plain `assess` and a regrade with another `--case` refuse and print
+the resume command. A completed regrade is not repeated by `assess`; another
+`--regrade` starts a new pass. The response adds `regrade_id`.
+
 `assess` returns `assessment_ids` and `report`. Assessment objects use kind `result`,
 schema version 1 and payload kind `assessment`. IDs for the experiment, case,
 profile, capture, scoring, raw grading evidence and earlier result are provenance.
 They do not pull raw artifacts into structured-result reference closure. Regrading
 or reviewing requires independently verified exact inputs and capture bytes.
+`graded_case_id` is present only on regrades against a replacement case.
+`regrade_id` is present only on assessments a regrade pass produced.
 
 The audit runs after capture and checks immutable closures, hidden verifier bytes,
 known disallowed future Git objects and observed native tool requests for forbidden

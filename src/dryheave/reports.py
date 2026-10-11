@@ -1,3 +1,4 @@
+import math
 import re
 import statistics
 from collections import Counter, defaultdict
@@ -12,24 +13,43 @@ from dryheave.experiment_models import TrialSpec
 from dryheave.experiments import inspect_experiment
 from dryheave.integrity import load_assessment
 from dryheave.journals import RunStore
-from dryheave.models import ObjectKind, TrialStage
+from dryheave.models import ObjectId, ObjectKind, TokenUsage, TrialStage
 from dryheave.report_models import (
     AttemptReport,
+    CheckSummary,
     Comparison,
+    CriterionSummary,
     Distribution,
     GroupMetrics,
+    MetricSummary,
     PairChange,
     RunReport,
 )
-from dryheave.result_models import Assessment
+from dryheave.result_models import Assessment, CheckResult, CriterionResult, MetricValue
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json, digest
 from dryheave.storage import ObjectStore
 
 
+def _finite_float(value: float | int) -> float | None:
+    try:
+        converted = float(value)
+    except OverflowError:
+        return None
+    return converted if math.isfinite(converted) else None
+
+
 def distribution(values: Iterable[float | int | None]) -> Distribution:
     numbers = list(values)
-    observed = [float(value) for value in numbers if value is not None]
+    observed = [
+        converted
+        for value in numbers
+        if value is not None and (converted := _finite_float(value)) is not None
+    ]
+    try:
+        stdev = statistics.stdev(observed) if len(observed) > 1 else None
+    except (OverflowError, statistics.StatisticsError):
+        stdev = None
     return Distribution(
         count=len(observed),
         unknown=len(numbers) - len(observed),
@@ -37,8 +57,95 @@ def distribution(values: Iterable[float | int | None]) -> Distribution:
         maximum=max(observed) if observed else None,
         mean=statistics.mean(observed) if observed else None,
         median=statistics.median(observed) if observed else None,
-        stdev=statistics.stdev(observed) if len(observed) > 1 else None,
+        stdev=stdev,
     )
+
+
+def _total_input(tokens: TokenUsage) -> float | None:
+    if tokens.uncached_input is None or tokens.cache_read is None or tokens.cache_write is None:
+        return None
+    return tokens.uncached_input + tokens.cache_read + tokens.cache_write
+
+
+def _criteria_summary(eligible: list[Assessment]) -> tuple[CriterionSummary, ...]:
+    by_case_criterion: dict[tuple[ObjectId, str], list[CriterionResult]] = defaultdict(list)
+    for result in eligible:
+        if result.case_id is None:
+            continue
+        for item in result.criteria:
+            by_case_criterion[(result.case_id, item.criterion_id)].append(item)
+    return tuple(
+        CriterionSummary(
+            case_id=case_id,
+            criterion_id=criterion_id,
+            passes=sum(item.outcome == "pass" for item in items),
+            graded=sum(item.outcome in {"pass", "fail"} for item in items),
+            scores=distribution(item.score for item in items),
+        )
+        for (case_id, criterion_id), items in by_case_criterion.items()
+    )
+
+
+MIN_AGREEMENT_SAMPLE = 2
+
+
+def _agreement(items: list[CheckResult]) -> float | None:
+    applicable = [item.outcome for item in items if item.outcome in {"pass", "fail"}]
+    if len(applicable) < MIN_AGREEMENT_SAMPLE:
+        return None
+    return max(Counter(applicable).values()) / len(applicable)
+
+
+def _checks_summary(eligible: list[Assessment]) -> tuple[CheckSummary, ...]:
+    by_case_check: dict[tuple[ObjectId, str], list[CheckResult]] = defaultdict(list)
+    for result in eligible:
+        if result.case_id is None:
+            continue
+        for item in result.checks:
+            by_case_check[(result.case_id, item.check_id)].append(item)
+    return tuple(
+        CheckSummary(
+            case_id=case_id,
+            check_id=check_id,
+            passes=sum(item.outcome == "pass" for item in items),
+            fails=sum(item.outcome == "fail" for item in items),
+            not_applicable=sum(item.outcome == "not_applicable" for item in items),
+            errors=sum(item.outcome == "error" for item in items),
+            agreement=_agreement(items),
+        )
+        for (case_id, check_id), items in by_case_check.items()
+    )
+
+
+def _metrics_summary(eligible: list[Assessment]) -> tuple[MetricSummary, ...]:
+    by_case_metric: dict[tuple[ObjectId, str], list[MetricValue]] = defaultdict(list)
+    for result in eligible:
+        if result.case_id is None:
+            continue
+        for metrics_result in result.metrics:
+            for value in metrics_result.values:
+                by_case_metric[(result.case_id, value.metric_id)].append(value)
+    return tuple(
+        MetricSummary(
+            case_id=case_id,
+            metric_id=metric_id,
+            label=items[0].label,
+            unit=items[0].unit,
+            values=distribution(
+                item.value for item in items if isinstance(item.value, int | float)
+            ),
+        )
+        for (case_id, metric_id), items in by_case_metric.items()
+    )
+
+
+def _latest_eligible(attempts: list[AttemptReport]) -> list[Assessment]:
+    latest = {item.trial_id: item for item in attempts}
+    return [
+        item.result
+        for item in latest.values()
+        if item.result and item.result.eligible and not item.current_exclusions
+    ]
 
 
 def _group(
@@ -50,6 +157,7 @@ def _group(
         for item in attempts
         if item.result and item.result.eligible and not item.current_exclusions
     ]
+    latest_eligible = _latest_eligible(attempts)
     reasons = Counter(
         reason
         for item in attempts
@@ -60,20 +168,30 @@ def _group(
     spend: dict[str, float] = defaultdict(float)
     unknown = partial = 0
     costs = []
+    role_costs: dict[str, list[float | None]] = defaultdict(list)
+    subject_tokens: list[TokenUsage | None] = []
     for attempt in attempts:
         roles = attempt.roles or (attempt.result.roles if attempt.result else ())
+        subject_tokens.append(roles[0].known_tokens if roles else None)
         totals = []
         currency = set()
         for role in roles:
+            role_totals = []
+            role_currency = set()
             for record in role.records:
                 if record.cost is not None:
                     if record.cost or record.currency:
                         spend[record.currency or "UNSPECIFIED"] += record.cost
                     totals.append(record.cost)
+                    role_totals.append(record.cost)
                     if record.cost or record.currency:
                         currency.add(record.currency)
+                        role_currency.add(record.currency)
                 else:
                     unknown += 1
+            role_costs[role.role].append(
+                sum(role_totals) if role_totals and len(role_currency) <= 1 else None
+            )
         incomplete = not roles or any(role.coverage in {"partial", "unknown"} for role in roles)
         partial += int(incomplete)
         costs.append(sum(totals) if totals and len(currency) <= 1 and not incomplete else None)
@@ -111,6 +229,23 @@ def _group(
         unknown_cost_records=unknown,
         partial_cost_attempts=partial,
         costs=distribution(costs),
+        cache_read_tokens=distribution(
+            tokens.cache_read if tokens else None for tokens in subject_tokens
+        ),
+        cache_write_tokens=distribution(
+            tokens.cache_write if tokens else None for tokens in subject_tokens
+        ),
+        total_input_tokens=distribution(
+            _total_input(tokens) if tokens else None for tokens in subject_tokens
+        ),
+        criteria=_criteria_summary(latest_eligible),
+        checks=_checks_summary(latest_eligible),
+        metrics=_metrics_summary(latest_eligible),
+        simulator_replies=distribution(
+            item.help_needed.simulator_replies if item.help_needed else None
+            for item in latest_eligible
+        ),
+        cost_by_role={role: distribution(values) for role, values in role_costs.items()},
     )
 
 

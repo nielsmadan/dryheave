@@ -5,25 +5,38 @@ from pathlib import Path
 
 from pydantic import JsonValue
 
-from dryheave.assessments import assess_run, review_assessment
+from dryheave.assessments import assess_run, regrade_run, review_assessment
 from dryheave.bundles import SENSITIVE_CLASSES, export_bundle, import_bundle
 from dryheave.commands import CommandRegistry
-from dryheave.errors import CancelledError
+from dryheave.errors import CancelledError, InputError
 from dryheave.reports import compare_runs, report_run
 from dryheave.result_models import AuditReview
 from dryheave.storage import ObjectStore
 
 
 def _assess(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
+    if args.case is not None and not args.regrade:
+        raise InputError("--case requires --regrade.")
+    regrade: dict[str, JsonValue] = {}
     try:
-        identifiers = assess_run(store, args.run_id)
+        if args.regrade:
+            regrade_id, identifiers = regrade_run(store, args.run_id, case=args.case)
+            regrade = {"regrade_id": regrade_id}
+        else:
+            identifiers = assess_run(store, args.run_id)
     except KeyboardInterrupt as error:
-        resume = shlex.join(("dryheave", "--store", str(store.root), "assess", args.run_id))
+        options = (
+            ("--regrade", *(("--case", args.case) if args.case else ())) if args.regrade else ()
+        )
+        resume = shlex.join(
+            ("dryheave", "--store", str(store.root), "assess", args.run_id, *options)
+        )
         raise CancelledError(
             f"Assessment interrupted; captured output and grading progress are retained. Resume with: {resume}"
         ) from error
     return {
         "assessment_ids": list(identifiers),
+        **regrade,
         "report": report_run(store, args.run_id).model_dump(mode="json"),
     }
 
@@ -79,6 +92,15 @@ def register_results(registry: CommandRegistry) -> None:
         help_text="Audit stopped attempts, run hidden checks and optional judge, and retain finished results.",
     )
     assess.add_argument("run_id")
+    assess.add_argument(
+        "--regrade",
+        action="store_true",
+        help="Grade every captured attempt again, including finished ones, as a new chained assessment.",
+    )
+    assess.add_argument(
+        "--case",
+        help="With --regrade, grade against this replacement case (same repository and initial prompt).",
+    )
     registry.handler(assess, _assess)
     report = registry.add(
         "report",

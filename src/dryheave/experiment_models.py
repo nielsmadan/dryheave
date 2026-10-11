@@ -1,6 +1,6 @@
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from dryheave.controller_models import ControllerRecipe
 from dryheave.models import Name, ObjectId, RelativePath, StrictModel
@@ -26,7 +26,15 @@ class PriceRate(StrictModel):
     uncached_input: float = Field(ge=0)
     cache_read: float = Field(ge=0)
     cache_write: float = Field(ge=0)
+    cache_write_1h: float | None = Field(default=None, ge=0)
     output: float = Field(ge=0)
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.cache_write_1h is None:
+            value.pop("cache_write_1h", None)
+        return value
 
 
 class PriceTable(StrictModel):

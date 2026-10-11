@@ -23,6 +23,15 @@ def usage_record(agent: AgentKind, event: NativeEvent) -> NativeUsage:
 
     provenance = f"{agent}.native-log:{event.source}:{event.line}"
     thinking: JsonValue | None = mapping(raw.get("output_tokens_details")).get("thinking_tokens")
+    cache_write = number("cache_creation_input_tokens")
+    cache_write_1h = mapping(raw.get("cache_creation")).get("ephemeral_1h_input_tokens")
+    cache_write_1h = (
+        cache_write_1h
+        if type(cache_write_1h) is int
+        and cache_write_1h >= 0
+        and (cache_write is None or cache_write_1h <= cache_write)
+        else None
+    )
     try:
         usage = (
             codex_usage(raw, protocol="native-log", provenance=provenance)
@@ -30,7 +39,8 @@ def usage_record(agent: AgentKind, event: NativeEvent) -> NativeUsage:
             else TokenUsage(
                 uncached_input=number("input_tokens"),
                 cache_read=number("cache_read_input_tokens"),
-                cache_write=number("cache_creation_input_tokens"),
+                cache_write=cache_write,
+                cache_write_1h=cache_write_1h,
                 output=number("output_tokens"),
                 reasoning=thinking if type(thinking) is int else None,
                 provenance=provenance,

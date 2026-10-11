@@ -279,6 +279,22 @@ def test_usage_model_is_observed_not_requested_and_ambiguous_models_stay_unknown
     assert (partial.uncached_input, partial.cache_write, partial.output) == (None, None, 4)
 
 
+def test_claude_observation_extracts_the_1h_cache_write_split():
+    payload = json.loads(FIXTURE.read_bytes())
+    payload["usage"]["cache_creation"]["ephemeral_1h_input_tokens"] = 5
+    observed = claude_observation(json.dumps(payload).encode())
+    assert observed.usage.cache_write_1h == 5
+
+
+def test_claude_observation_drops_only_the_split_when_1h_exceeds_cache_write():
+    payload = json.loads(FIXTURE.read_bytes())
+    payload["usage"]["cache_creation"]["ephemeral_1h_input_tokens"] = 99
+    observed = claude_observation(json.dumps(payload).encode())
+    assert observed.usage.cache_write_1h is None
+    assert observed.usage.cache_write == 5
+    assert observed.usage.output == 12
+
+
 def test_newer_result_fields_and_structured_output_tool_stop_are_accepted():
     payload = json.loads(FIXTURE.read_bytes())
     payload |= {"stop_reason": "tool_use", "terminal_reason": "completed", "ttft_ms": 2924}

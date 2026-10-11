@@ -12,6 +12,7 @@ from dryheave.models import (
     RunCheckpoint,
     TokenUsage,
 )
+from dryheave.serialization import canonical_json
 
 
 @pytest.mark.parametrize("version", [0, 2, "1", True, 1.0, None])
@@ -103,6 +104,23 @@ def test_usage_preserves_unknowns_and_validates_reasoning_subset() -> None:
         TokenUsage(provenance="native-response-1", output=3, reasoning=4)
     with pytest.raises(ValidationError):
         TokenUsage(provenance="native-response-1", cache_read=-1)
+
+
+def test_usage_validates_cache_write_1h_subset() -> None:
+    usage = TokenUsage(provenance="native-response-1", cache_write=10, cache_write_1h=4)
+    assert usage.cache_write_1h == 4
+    with pytest.raises(ValidationError, match="exceed"):
+        TokenUsage(provenance="native-response-1", cache_write=3, cache_write_1h=4)
+
+
+def test_usage_without_cache_write_1h_round_trips_byte_identically() -> None:
+    old = (
+        b'{"uncached_input":10,"cache_read":0,"cache_write":0,"output":5,'
+        b'"reasoning":0,"provenance":"old-capture"}'
+    )
+    usage = TokenUsage.model_validate_json(old)
+    assert usage.cache_write_1h is None
+    assert canonical_json(usage) == canonical_json(json.loads(old))
 
 
 def test_evidence_requires_visibility_and_immutable_session_id() -> None:

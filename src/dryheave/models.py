@@ -10,8 +10,10 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
+    SerializerFunctionWrapHandler,
     StringConstraints,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -156,6 +158,7 @@ class TokenUsage(StrictModel):
     uncached_input: NonnegativeInt | None = None
     cache_read: NonnegativeInt | None = None
     cache_write: NonnegativeInt | None = None
+    cache_write_1h: NonnegativeInt | None = None
     output: NonnegativeInt | None = None
     reasoning: NonnegativeInt | None = None
     provenance: str = Field(min_length=1)
@@ -165,6 +168,23 @@ class TokenUsage(StrictModel):
         if self.reasoning is not None and self.output is not None and self.reasoning > self.output:
             raise ValueError("reasoning tokens exceed output tokens")
         return self
+
+    @model_validator(mode="after")
+    def cache_write_1h_is_subset(self) -> Self:
+        if (
+            self.cache_write_1h is not None
+            and self.cache_write is not None
+            and self.cache_write_1h > self.cache_write
+        ):
+            raise ValueError("1-hour cache-write tokens exceed cache-write tokens")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.cache_write_1h is None:
+            value.pop("cache_write_1h", None)
+        return value
 
 
 class RunMetadata(StrictModel):

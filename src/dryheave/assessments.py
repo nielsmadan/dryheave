@@ -1,5 +1,7 @@
 import os
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
@@ -14,16 +16,21 @@ from dryheave.assessment_inputs import (
     saved_judge_calls,
 )
 from dryheave.assessment_recovery import reconcile_grading
+from dryheave.case_metrics import run_metrics
 from dryheave.cases import (
     CapturePolicy,
     DeterministicCriterion,
+    FrozenCase,
     RubricCriterion,
+    load_frozen_case,
 )
 from dryheave.controller_models import RoleCall
 from dryheave.controllers import CallContext
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.models import ProcessIdentity
 from dryheave.errors import DryheaveError, InputError
+from dryheave.experiment_models import ScoringConfig
+from dryheave.experiments import load_experiment, load_role
 from dryheave.final_capture import CaptureBuilder, IgnoreSelection
 from dryheave.grading import GradingContext, grade_criterion
 from dryheave.integrity import (
@@ -33,24 +40,85 @@ from dryheave.integrity import (
     load_assessment,
 )
 from dryheave.journals import RunStore
-from dryheave.judges import invoke_judge, judge_projection
-from dryheave.models import ObjectKind, TrialStage
+from dryheave.judges import check_results, invoke_judge, judge_projection
+from dryheave.models import JournalEvent, ObjectKind, TrialStage
 from dryheave.native_recovery import reconcile_store_ownership
 from dryheave.result_models import (
     Assessment,
     AssessmentEvidence,
     AuditReview,
+    CheckResult,
     CriterionResult,
+    HelpNeeded,
+    MetricsResult,
+    RegradeRecord,
+)
+from dryheave.rubrics import (
+    DEFAULT_RUBRIC_SET,
+    graded_criteria,
+    grading_identity,
+    uses_default_rubrics,
 )
 from dryheave.runner import cancellation_signals, load_capture
-from dryheave.runner_models import AttemptState
+from dryheave.runner_models import AttemptState, CapturedAttempt
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json, digest, parse_model
 from dryheave.storage import ObjectStore
 
+REGRADE_STAGES = frozenset(
+    {TrialStage.CAPTURED, TrialStage.AUDITED, TrialStage.GRADING, TrialStage.FINISHED}
+)
+
+
+@dataclass(frozen=True)
+class GradedCase:
+    case_id: str
+    case: FrozenCase
+
+
+def _has_judge(scoring: ScoringConfig | None) -> bool:
+    judge = scoring.judge if scoring else None
+    return judge is not None and judge.budget.max_calls > 0
+
+
+def _judged(inputs: AssessmentInputs) -> bool:
+    return _has_judge(inputs.scoring)
+
+
+def _help_needed(store: ObjectStore, capture: CapturedAttempt | None) -> HelpNeeded | None:
+    if capture is None:
+        return None
+    try:
+        case = load_frozen_case(store, capture.case_id)
+    except (DryheaveError, OSError):
+        return None
+    replies = tuple(
+        call.decision
+        for call in capture.controller_calls
+        if call.role == "simulator"
+        and call.decision is not None
+        and call.decision.action == "reply"
+    )
+    disclosed = tuple(dict.fromkeys(fact_id for reply in replies for fact_id in reply.fact_ids))
+    kinds = {fact.fact_id: fact.disclosure for fact in case.allowed_facts}
+    return HelpNeeded(
+        simulator_replies=len(replies),
+        facts_disclosed=disclosed,
+        proactive_facts=tuple(
+            fact_id for fact_id in disclosed if kinds.get(fact_id) == "proactive"
+        ),
+        on_request_facts=tuple(
+            fact_id for fact_id in disclosed if kinds.get(fact_id) == "on_request"
+        ),
+    )
+
 
 def _initial(
-    store: ObjectStore, execution: ExecutionJournal, state: AttemptState, inputs: AssessmentInputs
+    store: ObjectStore,
+    execution: ExecutionJournal,
+    state: AttemptState,
+    inputs: AssessmentInputs,
+    graded: FrozenCase | None,
 ) -> Assessment:
     capture, trial, experiment = inputs.capture, inputs.trial, inputs.experiment
     if inputs.error is None and capture is not None and inputs.case is not None:
@@ -76,12 +144,9 @@ def _initial(
         if capture
         else None,
         scoring_id=experiment.scoring_id if experiment else capture.scoring_id if capture else None,
-        criteria_id=digest(
-            canonical_json(
-                {"criteria": [item.model_dump(mode="json") for item in inputs.case.criteria]}
-            )
-        )
-        if inputs.case
+        criteria_id=grading_identity(graded, judged=_judged(inputs)) if graded else None,
+        rubric_set=DEFAULT_RUBRIC_SET
+        if graded and _judged(inputs) and uses_default_rubrics(graded)
         else None,
         variant=trial.variant if trial else None,
         repetition=trial.repetition if trial else None,
@@ -98,6 +163,7 @@ def _initial(
         accepted_turns=capture.accepted_turns if capture else None,
         subject_seconds=capture.subject_seconds if capture else None,
         setup_seconds=capture.setup_seconds if capture else None,
+        help_needed=_help_needed(store, capture),
         roles=role_metrics(inputs, state, ()),
     )
 
@@ -120,6 +186,45 @@ def _saved_results(
     return results, bool(calls), calls
 
 
+def _saved_checks(execution: ExecutionJournal, state: AttemptState) -> dict[str, CheckResult]:
+    results = (
+        parse_model(canonical_json(event.data), CheckResult)
+        for event in execution.events_for(state.attempt_id, "check-result")
+    )
+    return {result.check_id: result for result in results}
+
+
+def _measure(
+    execution: ExecutionJournal, state: AttemptState, case: FrozenCase, context: GradingContext
+) -> tuple[MetricsResult, ...]:
+    saved = {
+        result.metrics_id: result
+        for result in (
+            parse_model(canonical_json(event.data), MetricsResult)
+            for event in execution.events_for(state.attempt_id, "metrics-result")
+        )
+    }
+    intents = {
+        event.data.get("metrics_id")
+        for event in execution.events_for(state.attempt_id, "metrics-intent")
+    }
+    for command in case.metrics:
+        if context.cancelled.is_set():
+            raise KeyboardInterrupt
+        if command.metrics_id in saved:
+            continue
+        if command.metrics_id in intents:
+            result = MetricsResult(
+                metrics_id=command.metrics_id, outcome="error", error="interrupted_metrics"
+            )
+        else:
+            execution.record(state, "metrics-intent", {"metrics_id": command.metrics_id})
+            result = run_metrics(context, command, os.environ)
+        saved[command.metrics_id] = result
+        execution.evidence(state, "metrics-result", result)
+    return tuple(saved[command.metrics_id] for command in case.metrics)
+
+
 def _save_criterion(
     execution: ExecutionJournal, state: AttemptState, result: CriterionResult
 ) -> None:
@@ -132,7 +237,7 @@ def _judge(
     inputs: AssessmentInputs,
     root: Path,
     cancelled: Event,
-) -> tuple[RoleCall, tuple[CriterionResult, ...]]:
+) -> tuple[RoleCall, tuple[CriterionResult, ...], tuple[CheckResult, ...]]:
     if (
         inputs.case is None
         or inputs.capture is None
@@ -157,9 +262,16 @@ def _judge(
         on_identity=own,
         runtime_root=execution.attempt_root(state) / "role-runtime" / call_id,
     )
-    call, results = invoke_judge(
+    workspace = str(Path(state.workspace))
+    call, results, answers = invoke_judge(
         recipe,
-        judge_projection(inputs.case, inputs.capture, inputs.files),
+        judge_projection(
+            inputs.case,
+            inputs.capture,
+            inputs.files,
+            roots=tuple(dict.fromkeys((workspace, os.path.realpath(workspace)))),
+            limit=recipe.budget.max_input_bytes,
+        ),
         ArtifactWriter(
             root / "judge" / call_id,
             recipe.budget.max_input_bytes + 8 * recipe.budget.max_output_bytes,
@@ -169,7 +281,7 @@ def _judge(
     execution.evidence(state, "judge-result", call)
     if cancelled.is_set():
         raise KeyboardInterrupt
-    return call, results
+    return call, results, check_results(inputs.case.checks, answers)
 
 
 def _grade(
@@ -178,12 +290,18 @@ def _grade(
     inputs: AssessmentInputs,
     store: ObjectStore,
     cancelled: Event,
-) -> tuple[tuple[CriterionResult, ...], tuple[RoleCall, ...]]:
+    hidden_case_id: str | None,
+) -> tuple[
+    tuple[CriterionResult, ...],
+    tuple[CheckResult, ...],
+    tuple[MetricsResult, ...],
+    tuple[RoleCall, ...],
+]:
     if inputs.case is None or inputs.capture is None:
-        return (), ()
+        return (), (), (), ()
     results, judge_intent, calls = _saved_results(execution, state)
-    root = execution.attempt_root(state) / "assessment" / uuid4().hex
-    hidden = store.read_blobs(inputs.capture.case_id)
+    root = execution.assessment_root(state) / uuid4().hex
+    hidden = store.read_blobs(hidden_case_id or inputs.capture.case_id)
 
     def own(identity: ProcessIdentity) -> None:
         execution.own(execution.attempts[state.attempt_id], identity)
@@ -223,34 +341,57 @@ def _grade(
                 error="interrupted_verifier",
             )
         else:
-            execution.journal.append(
-                "criterion-intent",
-                {"criterion_id": criterion.criterion_id},
-                trial_id=state.trial_id,
-                attempt_id=state.attempt_id,
-            )
+            execution.record(state, "criterion-intent", {"criterion_id": criterion.criterion_id})
             result = grade_criterion(context, criterion)
         results[criterion.criterion_id] = result
         _save_criterion(execution, state, result)
+    metrics = _measure(execution, state, inputs.case, context)
+    criteria = graded_criteria(inputs.case, judged=_judged(inputs))
+    judged, checks, calls = _judge_phase(
+        execution, state, inputs, results, (judge_intent, calls), (root, cancelled)
+    )
+    graded = results | judged
+    return tuple(graded[item.criterion_id] for item in criteria), checks, metrics, calls
+
+
+def _judge_phase(
+    execution: ExecutionJournal,
+    state: AttemptState,
+    inputs: AssessmentInputs,
+    graded: Mapping[str, CriterionResult],
+    saved: tuple[bool, tuple[RoleCall, ...]],
+    runtime: tuple[Path, Event],
+) -> tuple[dict[str, CriterionResult], tuple[CheckResult, ...], tuple[RoleCall, ...]]:
+    judge_intent, calls = saved
+    results: dict[str, CriterionResult] = {}
+    if inputs.case is None:
+        return results, (), calls
+    criteria = graded_criteria(inputs.case, judged=_judged(inputs))
+    case_checks = inputs.case.checks if _judged(inputs) else ()
+    checks = _saved_checks(execution, state)
     rubrics = [
         item
-        for item in inputs.case.criteria
-        if isinstance(item, RubricCriterion) and item.criterion_id not in results
+        for item in criteria
+        if isinstance(item, RubricCriterion) and item.criterion_id not in graded
     ]
+    pending = [item for item in case_checks if item.check_id not in checks]
     recipe = inputs.scoring.judge if inputs.scoring else None
     delivered = inputs.capture is None or inputs.capture.accepted_turns > 0
     if (
-        rubrics
+        (rubrics or pending)
         and not judge_intent
         and delivered
         and recipe is not None
         and recipe.budget.max_calls
     ):
-        call, judgments = _judge(execution, state, inputs, root, cancelled)
+        call, judgments, answered = _judge(execution, state, inputs, runtime[0], runtime[1])
         calls = (*calls, call)
         for result in judgments:
             results[result.criterion_id] = result
             _save_criterion(execution, state, result)
+        for check in answered:
+            checks[check.check_id] = check
+            execution.evidence(state, "check-result", check)
     for criterion in rubrics:
         if criterion.criterion_id not in results:
             result = CriterionResult(
@@ -266,13 +407,18 @@ def _grade(
             )
             results[criterion.criterion_id] = result
             _save_criterion(execution, state, result)
-    return tuple(results[item.criterion_id] for item in inputs.case.criteria), calls
+    for item in case_checks:
+        if item.check_id not in checks:
+            check = CheckResult(check_id=item.check_id, outcome="error")
+            checks[item.check_id] = check
+            execution.evidence(state, "check-result", check)
+    return results, tuple(checks[item.check_id] for item in case_checks), calls
 
 
 def _evidence(
     store: ObjectStore, execution: ExecutionJournal, state: AttemptState
 ) -> tuple[str | None, tuple[str, ...]]:
-    root = execution.attempt_root(state) / "assessment"
+    root = execution.assessment_root(state)
     if not root.exists():
         return None, ()
     builder = CaptureBuilder(
@@ -297,11 +443,35 @@ def _evidence(
     return store.put(ObjectKind.ASSESSMENT_EVIDENCE, model, files=builder.blobs), omissions
 
 
+def _carried_reviews(
+    store: ObjectStore, previous_id: str | None, initial: Assessment
+) -> Assessment:
+    if previous_id is None:
+        return initial
+    findings = {item.finding_id for item in initial.audit.findings}
+    reviews = tuple(
+        item for item in load_assessment(store, previous_id).reviews if item.finding_id in findings
+    )
+    return initial.model_copy(
+        update={"reviews": reviews, "exclusion_reasons": exclusions(initial.audit, reviews)}
+    )
+
+
 def _assess_one(
-    store: ObjectStore, execution: ExecutionJournal, state: AttemptState, cancelled: Event
+    store: ObjectStore,
+    execution: ExecutionJournal,
+    state: AttemptState,
+    cancelled: Event,
+    graded: GradedCase | None = None,
 ) -> str:
     inputs = load_assessment_inputs(store, execution, state)
-    initial = _initial(store, execution, state, inputs)
+    case = graded.case if graded and inputs.case else inputs.case
+    initial = _initial(store, execution, state, inputs, case)
+    if execution.regrade_id is not None:
+        initial = _carried_reviews(store, state.assessment_id, initial)
+    if graded is not None:
+        initial = initial.model_copy(update={"graded_case_id": graded.case_id})
+    grading = replace(inputs, case=case)
     if state.stage == TrialStage.STOPPING:
         execution.save(
             state.model_copy(
@@ -322,6 +492,8 @@ def _assess_one(
         execution.save(state.model_copy(update={"stage": TrialStage.GRADING}))
         state = execution.attempts[state.attempt_id]
     criteria: tuple[CriterionResult, ...] = ()
+    checks: tuple[CheckResult, ...] = ()
+    metrics: tuple[MetricsResult, ...] = ()
     calls: tuple[RoleCall, ...] = ()
     if (
         initial.audit.input_integrity == "verified"
@@ -329,8 +501,10 @@ def _assess_one(
         and initial.audit.cleanup == "stopped"
         and initial.audit.capture_complete
     ):
-        criteria, calls = _grade(execution, state, inputs, store, cancelled)
-    elif inputs.case:
+        criteria, checks, metrics, calls = _grade(
+            execution, state, grading, store, cancelled, graded.case_id if graded else None
+        )
+    elif case:
         criteria = tuple(
             CriterionResult(
                 criterion_id=item.criterion_id,
@@ -339,7 +513,7 @@ def _assess_one(
                 outcome="not_run",
                 error="audit_exclusion",
             )
-            for item in inputs.case.criteria
+            for item in graded_criteria(case, judged=_judged(inputs))
         )
     _, _, saved_calls = _saved_results(execution, state)
     calls = calls or saved_calls
@@ -368,6 +542,8 @@ def _assess_one(
         update={
             "phase": "finished",
             "criteria": criteria,
+            "checks": checks,
+            "metrics": metrics,
             "completion": completion,
             "deterministic_completion": _completion(
                 tuple(item for item in criteria if item.kind == "deterministic")
@@ -378,6 +554,7 @@ def _assess_one(
             "evidence_id": evidence_id,
             "evidence_complete": not evidence_omissions,
             "previous_id": state.assessment_id,
+            "regrade_id": execution.regrade_id,
         }
     )
     identifier = store.put(ObjectKind.RESULT, result)
@@ -400,6 +577,12 @@ def assess_run(
         store.native_lock(),
         cancellation_signals(cancelled),
     ):
+        unfinished = _open_regrade(journal.events)
+        if unfinished is not None:
+            raise InputError(
+                f"Regrade {unfinished.regrade_id} is unfinished; resume it before assessing with: "
+                + _regrade_command(run_id, unfinished.case_id)
+            )
         execution = ExecutionJournal(journal)
         reconcile_store_ownership(store, execution)
         for state in tuple(execution.attempts.values()):
@@ -429,6 +612,147 @@ def assess_run(
         result_ids: list[JsonValue] = list(identifiers)
         journal.write_result({"assessments": result_ids})
     return tuple(identifiers)
+
+
+def _open_regrade(events: tuple[JournalEvent, ...]) -> RegradeRecord | None:
+    started: dict[str, RegradeRecord] = {}
+    for event in events:
+        if event.event in {"regrade-start", "regrade-finished"}:
+            record = parse_model(canonical_json(event.data), RegradeRecord)
+            if event.event == "regrade-start":
+                started[record.regrade_id] = record
+            else:
+                started.pop(record.regrade_id, None)
+    return next(reversed(started.values()), None)
+
+
+def _regraded(events: tuple[JournalEvent, ...], regrade_id: str) -> set[str]:
+    return {
+        event.attempt_id
+        for event in events
+        if event.event == "regrade-assessed"
+        and event.attempt_id
+        and event.data.get("regrade_id") == regrade_id
+    }
+
+
+def _regrade_command(run_id: str, case_id: str | None) -> str:
+    return f"dryheave assess {run_id} --regrade" + (f" --case {case_id}" if case_id else "")
+
+
+def _needs_judge(case: FrozenCase) -> bool:
+    return bool(case.checks) or any(isinstance(item, RubricCriterion) for item in case.criteria)
+
+
+def _validate_regrade(
+    store: ObjectStore,
+    experiment_id: str,
+    states: tuple[AttemptState, ...],
+    graded: GradedCase | None,
+) -> None:
+    experiment = load_experiment(store, experiment_id)
+    scoring = load_role(store, experiment.scoring_id, ScoringConfig, ObjectKind.SCORING)
+    trials = {item.trial_id: item.case_id for item in experiment.trials}
+    for case_id in sorted({trials[state.trial_id] for state in states if state.trial_id in trials}):
+        original = load_frozen_case(store, case_id)
+        if graded is not None and (graded.case.repository_id, graded.case.initial_prompt) != (
+            original.repository_id,
+            original.initial_prompt,
+        ):
+            raise InputError(
+                "A replacement case must share the original case's repository_id and initial_prompt."
+            )
+        if not _has_judge(scoring) and _needs_judge(graded.case if graded else original):
+            raise InputError(
+                "Regrade needs a judge for the case's rubric criteria or checks, "
+                "but the experiment's scoring has none."
+            )
+
+
+def _regrade_one(
+    store: ObjectStore,
+    execution: ExecutionJournal,
+    state: AttemptState,
+    cancelled: Event,
+    graded: GradedCase | None,
+) -> str:
+    if state.stage == TrialStage.GRADING:
+        reconcile_grading(execution, state)
+    try:
+        return _assess_one(store, execution, state, cancelled, graded)
+    except BaseException:
+        reconcile_grading(execution, execution.attempts[state.attempt_id])
+        raise
+
+
+def regrade_run(
+    store: ObjectStore,
+    run_id: str,
+    *,
+    case: str | None = None,
+    cancelled: Event | None = None,
+) -> tuple[str, tuple[str, ...]]:
+    cancelled = cancelled or Event()
+    case_id = store.resolve(case) if case else None
+    identifiers: list[str] = []
+    with (
+        RunStore(store.root).open(run_id) as journal,
+        store.native_lock(),
+        cancellation_signals(cancelled),
+    ):
+        unfinished = _open_regrade(journal.events)
+        if unfinished is not None and unfinished.case_id != case_id:
+            raise InputError(
+                f"Regrade {unfinished.regrade_id} is unfinished; resume it with: "
+                + _regrade_command(run_id, unfinished.case_id)
+            )
+        regrade_id = unfinished.regrade_id if unfinished else "r-" + uuid4().hex
+        execution = ExecutionJournal(journal, regrade_id=regrade_id)
+        reconcile_store_ownership(store, execution)
+        graded = GradedCase(case_id, load_frozen_case(store, case_id)) if case_id else None
+        states = tuple(
+            state
+            for state in execution.attempts.values()
+            if state.capture_id and state.stage in REGRADE_STAGES
+        )
+        _validate_regrade(store, journal.metadata.experiment_id, states, graded)
+        if unfinished is None:
+            record = RegradeRecord(regrade_id=regrade_id, case_id=case_id)
+            journal.append("regrade-start", record.model_dump(mode="json"))
+        done = _regraded(journal.events, regrade_id)
+
+        def mark_regraded(state: AttemptState, assessment_id: str) -> None:
+            journal.append(
+                "regrade-assessed",
+                RegradeRecord(regrade_id=regrade_id, assessment_id=assessment_id).model_dump(
+                    mode="json"
+                ),
+                trial_id=state.trial_id,
+                attempt_id=state.attempt_id,
+            )
+
+        for state in states:
+            if cancelled.is_set():
+                raise KeyboardInterrupt
+            if state.attempt_id in done and state.assessment_id:
+                identifiers.append(state.assessment_id)
+                continue
+            if (
+                state.assessment_id
+                and load_assessment(store, state.assessment_id).regrade_id == regrade_id
+            ):
+                mark_regraded(state, state.assessment_id)
+                identifiers.append(state.assessment_id)
+                continue
+            identifier = _regrade_one(store, execution, state, cancelled, graded)
+            mark_regraded(state, identifier)
+            identifiers.append(identifier)
+        journal.append(
+            "regrade-finished", RegradeRecord(regrade_id=regrade_id).model_dump(mode="json")
+        )
+        result_ids: list[JsonValue] = list(identifiers)
+        journal.write_result({"assessments": result_ids, "regrade_id": regrade_id})
+    return regrade_id, tuple(identifiers)
 
 
 def review_assessment(store: ObjectStore, run_id: str, attempt_id: str, review: AuditReview) -> str:

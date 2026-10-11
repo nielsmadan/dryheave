@@ -24,6 +24,7 @@ from dryheave.experiment_models import ExperimentDraft, ScoringConfig, VariantSp
 from dryheave.journals import RunStore
 from dryheave.live_config import live_source, require_servers, snapshot_live_config
 from dryheave.models import AgentKind, CommandSpec, EnvironmentReference, TrialStage
+from dryheave.pricing import builtin_price_table
 from dryheave.profile_launch import LaunchOptions, launch_environment, materialize_profile
 from dryheave.profile_models import CaptureSpec, LiveConfigManifest, NativeRecipe
 from dryheave.profiles import capture_profile
@@ -142,7 +143,7 @@ def bench_draft(
         repetitions=repetitions,
         seed=seed,
         simulator=simulator,
-        scoring=ScoringConfig(judge=judge),
+        scoring=ScoringConfig(judge=judge, prices=builtin_price_table()),
     )
 
 

@@ -10,6 +10,7 @@ from dryheave.experiments import inspect_experiment, load_experiment, load_role
 from dryheave.integrity import native_events
 from dryheave.metrics import call_metrics, subject_metrics
 from dryheave.models import ObjectKind
+from dryheave.pricing import builtin_price_table
 from dryheave.profiles import load_profile
 from dryheave.result_models import RoleMetrics
 from dryheave.runner import load_capture
@@ -107,10 +108,20 @@ def load_assessment_inputs(
     return inputs
 
 
+def _controller_raw_stdout(files: dict[str, bytes]) -> dict[str, bytes]:
+    raw = {}
+    for path, content in files.items():
+        prefix, _, rest = path.partition("evidence/controller/")
+        call_id, _, name = rest.partition("/")
+        if not prefix and call_id and name == "stdout.bin":
+            raw[call_id] = content
+    return raw
+
+
 def role_metrics(
     inputs: AssessmentInputs, state: AttemptState, judge_calls: tuple[RoleCall, ...]
 ) -> tuple[RoleMetrics, ...]:
-    table = inputs.scoring.prices if inputs.scoring else None
+    table = (inputs.scoring.prices if inputs.scoring else None) or builtin_price_table()
     events: tuple[NativeEvent, ...] = ()
     with suppress(DryheaveError):
         events = native_events(inputs.files)
@@ -121,6 +132,7 @@ def role_metrics(
             inputs.capture.controller_calls if inputs.capture else state.calls,
             inputs.simulator,
             table,
+            _controller_raw_stdout(inputs.files),
         ),
         call_metrics("judge", judge_calls, inputs.scoring.judge if inputs.scoring else None, table),
     )

@@ -245,8 +245,10 @@ The simulator receives only approved facts, reviewed persona strings and current
 dialogue. It uses explicit native authentication independently of the subject.
 A scripted simulator is suitable only when its literal matching and divergence
 behavior are intentional. Optional judge configuration belongs in `scoring.judge`;
-it has separate budgets and usage. No current pricing is assumed: add an explicitly
-dated/versioned `scoring.prices` table only when you want saved rate estimates.
+it has separate budgets and usage. Assessment always prices against a table: an
+explicitly dated/versioned `scoring.prices` pins the rates used, and omitting it
+falls back to dryheave's built-in table (recorded on each estimate as its
+price_version).
 
 ```sh
 dryheave --store bench-store experiment validate experiment.json --json

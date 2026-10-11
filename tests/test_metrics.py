@@ -145,3 +145,195 @@ def test_partial_reasoning_observations_preserve_valid_aggregate_subset():
     )
     assert result.output == 2
     assert result.reasoning is None
+
+
+def test_token_sum_requires_every_cache_write_record_to_carry_the_1h_split():
+    from dryheave.metrics import token_sum
+
+    known = token_sum(
+        (
+            TokenUsage(cache_write=10, cache_write_1h=4, provenance="a"),
+            TokenUsage(cache_write=20, cache_write_1h=6, provenance="b"),
+        )
+    )
+    assert known.cache_write == 30
+    assert known.cache_write_1h == 10
+    unknown = token_sum(
+        (
+            TokenUsage(cache_write=10, cache_write_1h=4, provenance="a"),
+            TokenUsage(cache_write=20, provenance="b"),
+        )
+    )
+    assert unknown.cache_write == 30
+    assert unknown.cache_write_1h is None
+
+
+def test_cumulative_clips_a_1h_delta_that_would_exceed_the_cache_write_delta():
+    from dryheave.metrics import _cumulative
+
+    def usage(cache_write, cache_write_1h):
+        return TokenUsage(
+            cache_write=cache_write, cache_write_1h=cache_write_1h, provenance="native"
+        )
+
+    first = NativeUsage(
+        identity="r1",
+        session_id="s",
+        thread_id="s",
+        turn_id=None,
+        root_turn_id=None,
+        response_id=None,
+        source="native",
+        line=1,
+        accounting="cumulative",
+        usage=usage(10, 2),
+        raw={},
+    )
+    second = NativeUsage(
+        identity="r2",
+        session_id="s",
+        thread_id="s",
+        turn_id=None,
+        root_turn_id=None,
+        response_id=None,
+        source="native",
+        line=2,
+        accounting="cumulative",
+        usage=usage(12, 10),
+        raw={},
+    )
+    converted, reset = _cumulative([first, second])
+    assert not reset
+    assert converted[1].usage.cache_write == 2
+    assert converted[1].usage.cache_write_1h is None
+
+
+def _mixed_usage(cache_write, cache_write_1h):
+    return TokenUsage(
+        uncached_input=0,
+        cache_read=0,
+        cache_write=cache_write,
+        cache_write_1h=cache_write_1h,
+        output=0,
+        reasoning=0,
+        provenance="fixture",
+    )
+
+
+def _usage_charge(usage):
+    from dryheave.result_models import UsageCharge
+
+    return UsageCharge(
+        identity="x",
+        usage=usage,
+        observed_model="root-model",
+        requested_model=None,
+        model_basis="observed",
+        raw_evidence_sha256="0" * 64,
+        reason="fixture usage",
+    )
+
+
+def test_charge_prices_a_mixed_5m_and_1h_cache_write_record_exactly():
+    from dryheave.metrics import _charge
+
+    rate_table = PriceTable(
+        version="fixture-2026-v2",
+        effective_date="2026-01-01",
+        currency="EUR",
+        rates=(
+            PriceRate(
+                model="root-model",
+                uncached_input=1.0,
+                cache_read=0.5,
+                cache_write=1.0,
+                cache_write_1h=2.0,
+                output=2.0,
+            ),
+        ),
+    )
+    charge = _usage_charge(_mixed_usage(100, 40))
+    priced = _charge(charge, rate_table)
+    assert priced.cost == (60 * 1.0 + 40 * 2.0) / 1e6
+
+
+def test_charge_without_a_1h_rate_prices_all_writes_at_the_5m_rate():
+    from dryheave.metrics import _charge
+
+    rate_table = PriceTable(
+        version="fixture-2026-v2",
+        effective_date="2026-01-01",
+        currency="EUR",
+        rates=(
+            PriceRate(
+                model="root-model", uncached_input=1.0, cache_read=0.5, cache_write=1.0, output=2.0
+            ),
+        ),
+    )
+    charge = _usage_charge(_mixed_usage(100, 40))
+    priced = _charge(charge, rate_table)
+    assert priced.cost == 100 * 1.0 / 1e6
+    assert "5-minute rate" in priced.reason
+
+
+@pytest.mark.integration
+def test_subject_metrics_derives_the_1h_split_from_raw_usage_evidence_when_missing(
+    store, benchmark
+):
+    summary = run_experiment(
+        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+    )
+    capture = load_capture(store, summary.pending_assessment[0])
+    launch = capture.launch.model_copy(
+        update={"observed_session_id": "root", "observed_model": "root-model"}
+    )
+    record = NativeUsage(
+        identity="response",
+        session_id="root",
+        thread_id="root",
+        turn_id=None,
+        root_turn_id=None,
+        response_id="response",
+        source="native",
+        line=1,
+        accounting="response",
+        usage=TokenUsage(
+            uncached_input=0,
+            cache_read=0,
+            cache_write=100,
+            output=0,
+            reasoning=0,
+            provenance="native usage",
+        ),
+        raw={"cache_creation": {"ephemeral_1h_input_tokens": 40}},
+    )
+    capture = capture.model_copy(
+        update={
+            "mode": "native",
+            "launch": launch,
+            "usage": UsageObservation(
+                records=(record,),
+                unattributed=(),
+                session_graph={"root": None},
+                missing_session_usage=(),
+            ),
+        }
+    )
+    rate_table = PriceTable(
+        version="fixture-2026-v2",
+        effective_date="2026-01-01",
+        currency="EUR",
+        rates=(
+            PriceRate(
+                model="root-model",
+                uncached_input=1.0,
+                cache_read=0.5,
+                cache_write=1.0,
+                cache_write_1h=2.0,
+                output=2.0,
+            ),
+        ),
+    )
+    metrics = subject_metrics(capture, rate_table, requested_model="root-model")
+    assert metrics.records[0].usage.cache_write_1h == 40
+    assert metrics.known_cost == (60 * 1.0 + 40 * 2.0) / 1e6

@@ -150,6 +150,21 @@ in-memory sequence used for later hash chaining.
 rejects cursors outside the current prefix. Assessment indexes use that suffix
 to observe appends while preserving the read-only report's original prefix.
 
+Assessment events (`criterion-intent`, `criterion-result`, `check-result`,
+`metrics-intent`, `metrics-result`, `judge-intent`, `judge-result`) written by a
+regrade add a `regrade_id` key to their data. `ExecutionJournal` indexes them by
+attempt, regrade scope and name; an unscoped journal never returns regrade events,
+and a scoped one returns only its own regrade's events with that key removed.
+Cleanup and ownership events are never scoped. Run-level `regrade-start`
+(`regrade_id`, optional replacement `case_id`) and `regrade-finished` events
+bracket a pass; an attempt-level `regrade-assessed` event records each new
+`assessment_id` so a resumed pass skips attempts it already finished. Each
+assessment a regrade produces also records that pass's `regrade_id` on itself, so
+a resumed pass still recognizes an attempt as done from the attempt's current
+assessment alone when the process died after saving it but before the
+`regrade-assessed` event was appended, instead of chaining a second assessment
+onto the first.
+
 These checks detect corruption and serialize cooperating processes. They are not
 a security sandbox: a native process with filesystem access can still alter data,
 reach source repositories or access other host resources. Journal hashes are not

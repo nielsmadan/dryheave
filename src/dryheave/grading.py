@@ -42,11 +42,11 @@ class GradingContext(VerifierContext):
     capture: CapturedAttempt
 
 
-def _command(
-    criterion: DeterministicCriterion, hidden: Path, forbidden: tuple[Path, ...]
+def trusted_command(
+    spec: CommandSpec, relative: str, hidden: Path, forbidden: tuple[Path, ...]
 ) -> CommandSpec:
-    entrypoint = str(hidden / criterion.entrypoint)
-    argv = tuple(argument.replace("{verifier}", str(hidden)) for argument in criterion.command.argv)
+    entrypoint = str(hidden / relative)
+    argv = tuple(argument.replace("{verifier}", str(hidden)) for argument in spec.argv)
     index = argv.index(entrypoint)
     if index > 0 and not Path(argv[0]).is_absolute() and "/" in argv[0]:
         raise InputError(
@@ -67,7 +67,7 @@ def _command(
         )
     if index == 0:
         resolved.chmod(0o700)
-    return criterion.command.model_copy(update={"argv": (str(resolved), *argv[1:])})
+    return spec.model_copy(update={"argv": (str(resolved), *argv[1:])})
 
 
 def _environment(command: CommandSpec) -> dict[str, str]:
@@ -116,7 +116,7 @@ def execute_check(
             workspace,
             *((context.original_workspace,) if context.original_workspace else ()),
         )
-        command = _command(criterion, hidden, forbidden)
+        command = trusted_command(criterion.command, criterion.entrypoint, hidden, forbidden)
         artifacts.record("command", command)
         executable = Path(command.argv[0])
         artifacts.record(
@@ -174,7 +174,7 @@ def execute_check(
     return execution
 
 
-def _hidden(context: VerifierContext, root: Path) -> Path:
+def hidden_inputs(context: VerifierContext, root: Path) -> Path:
     hidden = root / "hidden"
     if not hidden.exists():
         for name, blob in context.case.hidden_files.items():
@@ -205,14 +205,14 @@ def check_copy(
     try:
         workspace = root / "workspace"
         if not workspace.exists():
-            _materialize_check(context, kind, workspace)
-        hidden = _hidden(context, root)
+            materialize_check(context, kind, workspace)
+        hidden = hidden_inputs(context, root)
         execution = execute_check(criterion, workspace, hidden, artifacts, context)
     except (DryheaveError, OSError) as error:
         artifacts.record("error", {"type": type(error).__name__, "message": str(error)})
         execution = CheckExecution(outcome="error", error=type(error).__name__)
     try:
-        _hidden(context, root)
+        hidden_inputs(context, root)
     except (DryheaveError, OSError):
         execution = execution.model_copy(
             update={"outcome": "error", "error": "hidden_verifier_changed"}
@@ -221,7 +221,7 @@ def check_copy(
     return execution
 
 
-def _materialize_check(context: VerifierContext, kind: str, workspace: Path) -> None:
+def materialize_check(context: VerifierContext, kind: str, workspace: Path) -> None:
     if kind == "final":
         if not isinstance(context, GradingContext):
             raise InputError("Final grading requires a captured workspace.")

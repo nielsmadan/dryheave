@@ -18,8 +18,11 @@ from dryheave.bench import (
 )
 from dryheave.cli import main
 from dryheave.errors import InputError
-from dryheave.experiments import create_experiment, load_experiment
+from dryheave.experiment_models import ScoringConfig
+from dryheave.experiments import create_experiment, load_experiment, load_role
 from dryheave.journals import RunStore
+from dryheave.models import ObjectKind
+from dryheave.pricing import builtin_price_table
 from dryheave.profiles import load_profile
 from dryheave.report_models import AttemptReport, RunReport
 from dryheave.result_models import Assessment, CriterionResult
@@ -102,6 +105,10 @@ def test_bench_experiment_is_content_addressed_and_resumable(store, benchmark):
     previous = resumable_run(store, identifier)
     assert previous is not None
     assert (previous.run_id, previous.finished) == (run_id, False)
+    scoring = load_role(
+        store, load_experiment(store, identifier).scoring_id, ScoringConfig, ObjectKind.SCORING
+    )
+    assert scoring.prices == builtin_price_table()
 
 
 def criterion(identifier, outcome):

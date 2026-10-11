@@ -64,3 +64,19 @@ def test_claude_input_is_already_uncached():
         )
     )
     assert ledger.snapshot()[0].usage.uncached_input == 2
+
+
+def test_claude_usage_extracts_the_1h_cache_write_split():
+    ledger = UsageLedger(AgentKind.CLAUDE)
+    ledger.add(
+        usage(
+            input_tokens=3,
+            cache_creation_input_tokens=8072,
+            cache_read_input_tokens=0,
+            output_tokens=249,
+            cache_creation={"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 8072},
+        )
+    )
+    record = ledger.snapshot()[0]
+    assert record.usage.cache_write == 8072
+    assert record.usage.cache_write_1h == 8072

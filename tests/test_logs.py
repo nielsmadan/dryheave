@@ -254,6 +254,56 @@ def test_streaming_claude_usage_dedupes_by_message(tmp_path: Path) -> None:
     assert session.usage[0].usage.output == 9
 
 
+def _claude_usage_record(tmp_path: Path, usage: dict, name: str = "log.jsonl") -> Session:
+    records = [
+        {
+            "type": "assistant",
+            "uuid": "u1",
+            "message": {
+                "id": "m1",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Hello"}],
+                "usage": usage,
+            },
+        }
+    ]
+    return claude.parse(write_log(tmp_path / name, records))
+
+
+def test_claude_log_import_extracts_the_1h_cache_write_split(tmp_path: Path) -> None:
+    session = _claude_usage_record(
+        tmp_path,
+        {
+            "input_tokens": 10,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 5,
+            "output_tokens": 1,
+            "cache_creation": {"ephemeral_1h_input_tokens": 5},
+        },
+    )
+    assert session.usage[0].usage.cache_write_1h == 5
+    assert session.parser_version == "2"
+
+
+def test_claude_log_import_drops_only_the_split_when_1h_exceeds_cache_write(
+    tmp_path: Path,
+) -> None:
+    session = _claude_usage_record(
+        tmp_path,
+        {
+            "input_tokens": 10,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 5,
+            "output_tokens": 1,
+            "cache_creation": {"ephemeral_1h_input_tokens": 99},
+        },
+    )
+    assert len(session.usage) == 1
+    assert session.usage[0].usage.cache_write_1h is None
+    assert session.usage[0].usage.cache_write == 5
+    assert "invalid_usage" not in {warning.code for warning in session.warnings}
+
+
 def test_malformed_truncated_and_ambiguous_metadata(tmp_path: Path) -> None:
     path = write_log(
         tmp_path / "log.jsonl",
