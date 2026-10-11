@@ -102,6 +102,21 @@ pending completion until later native evidence establishes another terminal
 response. This deliberately conservative contract can stop unsupported Claude
 versions rather than claiming their turns completed.
 
+Curated Claude slash commands are typed like other Claude input. Claude 2.1.296
+shows its command menu above the composer, highlighting one `❯ /name` entry, and
+closes it once arguments are typed. Enter is sent only when the highlighted entry is
+exactly the typed name, or when the menu is closed and the command has arguments; an
+unmatched or differently highlighted menu stops as `partial_input`. Escape is never
+sent. Claude records the command as a user record of `<command-message>`,
+`<command-name>` and optional `<command-args>` tags, accepted as `/name args`; the
+expanded skill text follows as an `isMeta` user record in the same turn. A curated
+local command that produces no model turn is instead followed by a non-meta
+`<local-command-stdout>` (or `<local-command-stderr>`) user record parented on the
+command; that record completes the command's own turn with its text as the
+assistant text, rather than starting a new human turn. The bench launch check
+probes slash steps only when the caller says workflows are enabled, and types each
+offered workflow command name and full text, then clears it unsent.
+
 Native Codex logs omit approval, request-user-input and MCP elicitation dialogs.
 Pinned terminal anchors therefore distinguish `approval`, `structured_input` and
 `unsupported` observations; auth/trust/hooks/permission dialogs never become

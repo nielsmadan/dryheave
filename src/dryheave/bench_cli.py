@@ -21,6 +21,7 @@ from dryheave.bench import (
     parse_variant,
     resumable_run,
     simulator_budget,
+    slash_prompts,
     snapshot_for_check,
     summarize,
 )
@@ -60,6 +61,7 @@ def _launch_checks(
     store: ObjectStore,
     profiles: dict[str, str],
     paths: tuple[Path, Path],
+    commands: tuple[str, ...] = (),
 ) -> None:
     root = store.root / "checks" / uuid4().hex
     manifest = snapshot_for_check(root, os.environ)
@@ -71,9 +73,10 @@ def _launch_checks(
                 store,
                 profile,
                 root,
-                runtime_root=paths[0],
-                transport=paths[1],
+                paths=paths,
                 environment=os.environ,
+                workflow=True,
+                commands=commands,
             )
         except TransportError as error:
             raise InputError(
@@ -139,7 +142,7 @@ def _bench(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]
         run_id = previous.run_id
     else:
         if not args.skip_launch_check:
-            _launch_checks(args, store, profiles, paths)
+            _launch_checks(args, store, profiles, paths, slash_prompts(store, case_id))
         if args.check_only:
             return {
                 "experiment_id": experiment_id,

@@ -202,3 +202,117 @@ def test_synthetic_278_composer_paste_and_linked_lifecycle(tmp_path, driver_plan
             assert session.launch.observed_model == "claude-haiku-4-5-20251001"
             assert session.launch.observed_effort is None
     assert terminal.closed
+
+
+def command(name, arguments=None, *, order=("message", "name", "args")):
+    tags = {
+        "message": f"<command-message>{name[1:]}</command-message>",
+        "name": f"<command-name>{name}</command-name>",
+        "args": None if arguments is None else f"<command-args>{arguments}</command-args>",
+    }
+    content = "\n".join(tags[tag] for tag in order if tags[tag] is not None)
+    return human("command", message={"role": "user", "content": content}, promptId="prompt")
+
+
+def expansion(parent="command"):
+    return {
+        "type": "user",
+        "uuid": "expansion",
+        "parentUuid": parent,
+        "sessionId": "root",
+        "isMeta": True,
+        "promptId": "prompt",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": "Base directory for this skill: /x\n\n# Review"}],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("record", "accepted"),
+    [
+        (command("/code-review", "--quick"), "/code-review --quick"),
+        (command("/code-review", "--staged\nonly src"), "/code-review --staged\nonly src"),
+        (command("/simplify"), "/simplify"),
+        (command("/simplify", ""), "/simplify"),
+        (command("/model", "", order=("name", "message", "args")), "/model"),
+    ],
+)
+def test_slash_command_record_is_accepted_as_the_typed_command(record, accepted):
+    events = ClaudeAdapter().feed(record)
+    assert [(event.kind, event.text) for event in events[1:]] == [
+        ("accepted", accepted),
+        ("started", ""),
+    ]
+    assert events[1].data == {"command": accepted.split()[0]}
+
+
+def test_expanded_skill_content_stays_in_the_command_turn_and_completes_once():
+    adapter = ClaudeAdapter()
+    records = [
+        command("/code-review", "--quick"),
+        expansion(),
+        {"type": "attachment", "uuid": "context", "parentUuid": "expansion", "sessionId": "root"},
+        assistant(parentUuid="context"),
+        {"type": "system", "subtype": "turn_duration", "sessionId": "root"},
+    ]
+    events = [event for record in records for event in adapter.feed(record)]
+    assert [(event.kind, event.turn_id) for event in events if event.kind != "metadata"] == [
+        ("accepted", "command"),
+        ("started", "command"),
+        ("assistant", "command"),
+        ("completed", "command"),
+    ]
+
+
+@pytest.mark.parametrize("tag", ["stdout", "stderr"])
+def test_local_command_output_completes_the_command_turn_without_a_new_human_turn(tag):
+    adapter = ClaudeAdapter()
+    adapter.feed(command("/model", ""))
+    text = "Set model to `Fable 5` for this session only"
+    events = adapter.feed(
+        {
+            "type": "user",
+            "uuid": "output",
+            "parentUuid": "command",
+            "sessionId": "root",
+            "message": {
+                "role": "user",
+                "content": f"<local-command-{tag}>{text}</local-command-{tag}>",
+            },
+        }
+    )
+    assert [(event.kind, event.turn_id, event.text) for event in events] == [
+        ("assistant", "command", text),
+        ("completed", "command", ""),
+    ]
+
+
+def test_local_command_output_without_a_tracked_parent_turn_is_unsupported():
+    events = ClaudeAdapter().feed(
+        {
+            "type": "user",
+            "uuid": "stray",
+            "parentUuid": "unknown",
+            "sessionId": "root",
+            "message": {
+                "role": "user",
+                "content": "<local-command-stdout>Hi</local-command-stdout>",
+            },
+        }
+    )
+    assert [event.kind for event in events] == ["unsupported"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Explain <command-name>/code-review</command-name> please",
+        "<command-name>code-review</command-name>",
+        "<command-name>/a</command-name><command-name>/b</command-name>",
+    ],
+)
+def test_text_that_only_mentions_command_tags_is_accepted_verbatim(content):
+    events = ClaudeAdapter().feed(human(message={"role": "user", "content": content}))
+    assert (events[1].kind, events[1].text, events[1].data) == ("accepted", content, {})

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.base import DeliveryUncertain, EventSource, Terminal, TransportError
-from dryheave.drivers.dialogs import composer, composer_matches, dialog
+from dryheave.drivers.dialogs import composer, composer_matches, dialog, submittable
 from dryheave.drivers.models import (
     CleanupReport,
     DriverLimits,
@@ -210,12 +210,14 @@ class DriverSession:
             blocked = self._blocked(screen)
             if blocked is not None:
                 return blocked
-            if composer_matches(self.agent, screen, prompt):
+            if submittable(self.agent, screen, prompt):
                 return None
             self.cancelled.wait(min(self.limits.poll_seconds, max(0, deadline - time.monotonic())))
         return self._observation(
             "partial_input",
-            "Exact composer content was not observed within bounds; Enter was not sent.",
+            "The command menu did not highlight the typed command; Enter was not sent."
+            if screen is not None and composer_matches(self.agent, screen, prompt)
+            else "Exact composer content was not observed within bounds; Enter was not sent.",
             "" if screen is None else screen.text,
         )
 

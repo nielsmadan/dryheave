@@ -396,3 +396,155 @@ def test_claude_types_over_a_suggestion_but_never_sends_mixed_text(
         result = session.deliver(session.prepare("Hello"))
         assert terminal.pastes == ["Hello"], (result.state, result.reason)
         assert terminal.enters == enters, (result.state, result.reason, result.text)
+
+
+class MenuTerminal(FakeTerminal):
+    def __init__(self, highlighted):
+        super().__init__([])
+        self.highlighted = highlighted
+        self.current = Screen(text="\u276f", exited=None, cursor={"x": 2, "y": 0})
+
+    def paste(self, text):
+        self.pastes.append(text)
+        rule = "\u2500" * 40
+        menu = f"  \u276f {self.highlighted:<30}Review code.\n    /review-perf{' ' * 22}Perf."
+        self.current = Screen(
+            text=f"{menu}\n{rule}\n\u276f {text}\n{rule}",
+            exited=None,
+            cursor={"x": 2 + len(text), "y": 3},
+        )
+
+    def enter(self):
+        self.enters += 1
+        self.current = Screen(text="Working\n\u276f", exited=None)
+
+
+def claude_command_turn(plan, name, arguments):
+    adapter = ClaudeAdapter()
+    content = f"<command-message>{name[1:]}</command-message>\n<command-name>{name}</command-name>"
+    records = [
+        {
+            "type": "user",
+            "uuid": "command",
+            "sessionId": "root",
+            "cwd": plan.cwd,
+            "message": {"role": "user", "content": content + arguments},
+        },
+        {
+            "type": "user",
+            "uuid": "expansion",
+            "parentUuid": "command",
+            "sessionId": "root",
+            "isMeta": True,
+            "message": {"role": "user", "content": [{"type": "text", "text": "# Skill body"}]},
+        },
+        {
+            "type": "assistant",
+            "uuid": "answer",
+            "parentUuid": "expansion",
+            "sessionId": "root",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Reviewed."}],
+                "stop_reason": "end_turn",
+            },
+        },
+        {"type": "system", "subtype": "turn_duration", "sessionId": "root"},
+    ]
+    return [event for record in records for event in adapter.feed(record)]
+
+
+@pytest.mark.parametrize(
+    ("prompt", "arguments"),
+    [("/code-review", ""), ("/code-review --quick", "\n<command-args>--quick</command-args>")],
+)
+def test_claude_slash_command_is_delivered_through_its_menu_as_one_turn(
+    tmp_path, driver_plan, prompt, arguments
+):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal = MenuTerminal("/code-review")
+    source = FakeEventSource([])
+    session = DriverSession(
+        terminal,
+        source,
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        agent=AgentKind.CLAUDE,
+        limits=DriverLimits(duration_seconds=2, max_polls=10, poll_seconds=0.01),
+    )
+    with session:
+        assert session.start(plan, {}).state == "ready"
+        intent = session.prepare(prompt, policy="curated-native-command")
+        source.batches.extend([[], claude_command_turn(plan, "/code-review", arguments)])
+        result = session.deliver(intent)
+        assert (result.state, result.text, result.turn_id) == ("completed", "Reviewed.", "command")
+        assert (terminal.pastes, terminal.enters, session.accepted_count) == ([prompt], 1, 1)
+
+
+def claude_local_command_turn(plan, name, output):
+    adapter = ClaudeAdapter()
+    content = f"<command-message>{name[1:]}</command-message>\n<command-name>{name}</command-name>"
+    records = [
+        {
+            "type": "user",
+            "uuid": "command",
+            "sessionId": "root",
+            "cwd": plan.cwd,
+            "message": {"role": "user", "content": content},
+        },
+        {
+            "type": "user",
+            "uuid": "stdout",
+            "parentUuid": "command",
+            "sessionId": "root",
+            "message": {
+                "role": "user",
+                "content": f"<local-command-stdout>{output}</local-command-stdout>",
+            },
+        },
+    ]
+    return [event for record in records for event in adapter.feed(record)]
+
+
+def test_claude_local_command_completes_its_own_turn_without_a_new_human_turn(
+    tmp_path, driver_plan
+):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal = MenuTerminal("/model")
+    source = FakeEventSource([])
+    session = DriverSession(
+        terminal,
+        source,
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        agent=AgentKind.CLAUDE,
+        limits=DriverLimits(duration_seconds=2, max_polls=10, poll_seconds=0.01),
+    )
+    with session:
+        assert session.start(plan, {}).state == "ready"
+        intent = session.prepare("/model", policy="curated-native-command")
+        output = "Set model to `Fable 5` for this session only"
+        source.batches.extend([[], claude_local_command_turn(plan, "/model", output)])
+        result = session.deliver(intent)
+        assert (result.state, result.text, result.turn_id) == ("completed", output, "command")
+        assert (terminal.pastes, terminal.enters, session.accepted_count) == (["/model"], 1, 1)
+
+
+def test_claude_slash_command_is_not_entered_while_the_menu_highlights_another(
+    tmp_path, driver_plan
+):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal = MenuTerminal("/review-plan")
+    session = DriverSession(
+        terminal,
+        FakeEventSource([]),
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        agent=AgentKind.CLAUDE,
+        limits=DriverLimits(duration_seconds=2, max_polls=10, poll_seconds=0.01),
+    )
+    with session:
+        assert session.start(plan, {}).state == "ready"
+        result = session.deliver(session.prepare("/review", policy="curated-native-command"))
+        assert (result.state, result.reason) == (
+            "partial_input",
+            "The command menu did not highlight the typed command; Enter was not sent.",
+        )
+        assert (terminal.pastes, terminal.enters) == (["/review"], 0)

@@ -51,3 +51,26 @@ def test_launch_check_transport_failure_names_its_retained_evidence(store, monke
         "Variant sonnet launch check lost its terminal transport (Terminal command ended without "
         f"a delivery acknowledgement.). Nothing was sent to a model. Evidence: {root}"
     )
+
+
+def test_launch_checks_probe_the_case_slash_commands_for_each_variant(store, monkeypatch):
+    seen = []
+
+    def ready(*args, workflow, commands, **kwargs):
+        seen.append((workflow, commands))
+        return Observation(state="ready", reason="Composer is empty.", text="> ")
+
+    monkeypatch.setattr(bench_cli, "snapshot_for_check", lambda root, environment: None)
+    monkeypatch.setattr(bench_cli, "check_removals", lambda manifest, variants: None)
+    monkeypatch.setattr(bench_cli, "launch_check", ready)
+    bench_cli._launch_checks(
+        Namespace(variant=["a=claude-sonnet-4-6@low", "b=claude-haiku-4-5"]),
+        store,
+        {"a": "a" * 64, "b": "b" * 64},
+        (store.root / "rt", store.root / "tui-test"),
+        ("/code-review --quick",),
+    )
+    assert seen == [
+        (True, ("/code-review --quick",)),
+        (True, ("/code-review --quick",)),
+    ]

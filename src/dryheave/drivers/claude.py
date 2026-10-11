@@ -1,8 +1,32 @@
+import re
+
 from pydantic import JsonValue
 
 from dryheave.drivers.models import NativeEvent
 from dryheave.errors import InputError
 from dryheave.logs.base import mapping, string, text_content
+
+COMMAND_TAG = re.compile(r"<(command-message|command-name|command-args)>(.*?)</\1>", re.S)
+LOCAL_OUTPUT_TAG = re.compile(r"<local-command-(stdout|stderr)>(.*)</local-command-\1>", re.S)
+
+
+def command_line(content: JsonValue) -> tuple[str, str] | None:
+    if not isinstance(content, str):
+        return None
+    tags = COMMAND_TAG.findall(content)
+    fields = dict(tags)
+    name = fields.get("command-name", "")
+    if len(fields) != len(tags) or not name.startswith("/") or COMMAND_TAG.sub("", content).strip():
+        return None
+    arguments = fields.get("command-args", "")
+    return (f"{name} {arguments}" if arguments else name), name
+
+
+def local_command_output(content: JsonValue) -> str | None:
+    if not isinstance(content, str):
+        return None
+    match = LOCAL_OUTPUT_TAG.fullmatch(content)
+    return match.group(2) if match else None
 
 
 class ClaudeAdapter:
@@ -36,7 +60,31 @@ class ClaudeAdapter:
         role = message.get("role")
         native_id, parent_id = string(record.get("uuid")), string(record.get("parentUuid"))
         parent_turn = self.chain.get(parent_id or "")
-        if self._human(record, message):
+        local_output = self._local_output(record, message)
+        if local_output is not None:
+            if native_id is None:
+                events.append(
+                    self._event(
+                        "unsupported", record, text="Local command output lacks UUID identity."
+                    )
+                )
+            elif parent_turn is None:
+                events.append(
+                    self._event(
+                        "unsupported",
+                        record,
+                        text="Local command output has no tracked parent turn.",
+                    )
+                )
+            else:
+                self.turn_id = parent_turn
+                events.extend(
+                    (
+                        self._event("assistant", record, text=local_output),
+                        self._event("completed", record, turn_id=parent_turn),
+                    )
+                )
+        elif self._human(record, message):
             if native_id is None:
                 events.append(
                     self._event("unsupported", record, text="Human input lacks UUID identity.")
@@ -45,9 +93,17 @@ class ClaudeAdapter:
                 self.turn_id = native_id
                 self.chain[native_id] = native_id
                 self.pending_completion = None
+                command = command_line(message.get("content"))
                 events.extend(
                     (
-                        self._event("accepted", record, text=text_content(message.get("content"))),
+                        self._event(
+                            "accepted",
+                            record,
+                            text=text_content(message.get("content"))
+                            if command is None
+                            else command[0],
+                            data={} if command is None else {"command": command[1]},
+                        ),
                         self._event("started", record),
                     )
                 )
@@ -61,6 +117,16 @@ class ClaudeAdapter:
         if native_id is not None and parent_turn is not None:
             self.chain.setdefault(native_id, parent_turn)
         return tuple(events)
+
+    @staticmethod
+    def _local_output(record: dict[str, JsonValue], message: dict[str, JsonValue]) -> str | None:
+        if (
+            message.get("role") != "user"
+            or record.get("isMeta") is True
+            or record.get("isSidechain") is True
+        ):
+            return None
+        return local_command_output(message.get("content"))
 
     @staticmethod
     def _human(record: dict[str, JsonValue], message: dict[str, JsonValue]) -> bool:

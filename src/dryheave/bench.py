@@ -4,21 +4,22 @@ import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from threading import Event
 from uuid import uuid4
 
 from pydantic import JsonValue
 
-from dryheave.cases import load_frozen_case
+from dryheave.cases import PromptStep, load_frozen_case
 from dryheave.controller_models import ClaudeControllerRuntime, ControllerRecipe, RoleBudget
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.auth import RuntimeBindings
 from dryheave.drivers.base import TransportError
-from dryheave.drivers.dialogs import composer, composer_matches
+from dryheave.drivers.dialogs import composer, submittable
 from dryheave.drivers.log_source import NativeLogSource, native_log_root
 from dryheave.drivers.models import DriverLimits, Observation, Screen
-from dryheave.drivers.session import DriverSession
+from dryheave.drivers.session import DriverSession, normalize_input
 from dryheave.drivers.tui_test import TuiTestTerminal
 from dryheave.errors import InputError
 from dryheave.experiment_models import ExperimentDraft, ScoringConfig, VariantSpec
@@ -172,6 +173,14 @@ def check_case(store: ObjectStore, reference: str, *, judged: bool) -> str:
     return case_id
 
 
+def slash_prompts(store: ObjectStore, case_id: str) -> tuple[str, ...]:
+    return tuple(
+        step.prompt
+        for step in load_frozen_case(store, case_id).workflow
+        if isinstance(step, PromptStep) and step.prompt.startswith("/")
+    )
+
+
 def check_removals(manifest: LiveConfigManifest, variants: tuple[VariantChoice, ...]) -> None:
     require_servers(
         manifest.mcp_servers,
@@ -184,15 +193,17 @@ def snapshot_for_check(root: Path, environment: Mapping[str, str]) -> LiveConfig
     return snapshot_live_config(source, state, root / "live-config")
 
 
-def launch_check(
+def launch_check(  # noqa: PLR0913
     store: ObjectStore,
     profile_id: str,
     root: Path,
     *,
-    runtime_root: Path,
-    transport: Path,
+    paths: tuple[Path, Path],
     environment: Mapping[str, str],
+    workflow: bool,
+    commands: tuple[str, ...] = (),
 ) -> Observation:
+    runtime_root, transport = paths
     workspace = root / profile_id[:12] / "workspace"
     workspace.mkdir(parents=True)
     plan = materialize_profile(
@@ -223,7 +234,7 @@ def launch_check(
         if observation.state != "ready":
             return observation
         try:
-            return _probe(terminal, plan.agent, observation)
+            return _probe(terminal, plan.agent, observation, commands if workflow else ())
         except TransportError as error:
             return Observation(
                 state="unsupported",
@@ -232,15 +243,36 @@ def launch_check(
             )
 
 
-def _probe(terminal: TuiTestTerminal, agent: AgentKind, ready: Observation) -> Observation:
-    terminal.paste(PROBE)
-    if not _settles(terminal, lambda screen: composer_matches(agent, screen, PROBE)):
-        return _unsupported(terminal, "Typed text did not appear in the input box as typed.")
+def _probe(
+    terminal: TuiTestTerminal, agent: AgentKind, ready: Observation, commands: tuple[str, ...]
+) -> Observation:
+    typed = (PROBE, *dict.fromkeys(text for command in commands for text in _typings(command)))
+    for text in typed:
+        terminal.paste(text)
+        if not _settles(terminal, partial(submittable, agent, text=text)):
+            return _unsupported(
+                terminal,
+                "Typed text did not appear in the input box as typed."
+                if text == PROBE
+                else f"Workflow command {text!r} was not ready to submit as typed; "
+                "check that Claude's command menu offers it.",
+            )
+        if not _clears(terminal, agent):
+            return _unsupported(terminal, "The input box could not be cleared after typing.")
+    return ready
+
+
+def _typings(command: str) -> tuple[str, ...]:
+    normalized = normalize_input(command)
+    return normalized.split(maxsplit=1)[0], normalized
+
+
+def _clears(terminal: TuiTestTerminal, agent: AgentKind) -> bool:
     for _ in range(4):
         terminal.clear_line()
         if _settles(terminal, lambda screen: composer(agent, screen) == ""):
-            return ready
-    return _unsupported(terminal, "The input box could not be cleared after typing.")
+            return True
+    return False
 
 
 def _settles(terminal: TuiTestTerminal, condition: Callable[[Screen], bool]) -> bool:

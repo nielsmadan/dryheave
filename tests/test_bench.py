@@ -333,10 +333,46 @@ class _ProbeTerminal:
         return Screen(text="> dryheave launch check", exited=None, ready=True)
 
 
-@pytest.mark.parametrize("fail_on", ["paste", "clear"])
-def test_launch_check_reports_a_lost_probe_acknowledgement_as_unsupported(
-    store, tmp_path, monkeypatch, fail_on
-):
+class _MenuTerminal:
+    def __init__(self, transport, runtime, *, limits, commands):
+        self.limits = limits
+        self.commands = commands
+        self.typed = ""
+        self.pastes = []
+        self.clears = 0
+        self.enters = 0
+
+    def paste(self, text):
+        self.pastes.append(text)
+        self.typed = text
+
+    def clear_line(self):
+        self.clears += 1
+        self.typed = ""
+
+    def enter(self):
+        self.enters += 1
+
+    def state(self):
+        from dryheave.drivers.models import Screen
+
+        rule = "\u2500" * 60
+        offered = [name for name in self.commands if name.startswith(self.typed)]
+        menu = (
+            [f"  \u276f {offered[0]:<30}Skill.", *(f"    {name:<30}Skill." for name in offered[1:])]
+            if self.typed.startswith("/") and " " not in self.typed and offered
+            else [f'  No commands match "{self.typed}"']
+            if self.typed.startswith("/") and " " not in self.typed
+            else []
+        )
+        return Screen(
+            text="\n".join([*menu, rule, f"\u276f {self.typed}", rule]),
+            exited=None,
+            cursor={"x": 2 + len(self.typed), "y": len(menu) + 1},
+        )
+
+
+def _launch_check(store, tmp_path, monkeypatch, terminal, commands=(), workflow=True):
     from contextlib import nullcontext
     from types import SimpleNamespace
 
@@ -346,8 +382,8 @@ def test_launch_check_reports_a_lost_probe_acknowledgement_as_unsupported(
 
     terminals = []
 
-    def terminal(*args, **kwargs):
-        terminals.append(_ProbeTerminal(*args, **kwargs, fail_on=fail_on))
+    def build(*args, **kwargs):
+        terminals.append(terminal(*args, **kwargs))
         return terminals[-1]
 
     class Session:
@@ -371,21 +407,119 @@ def test_launch_check_reports_a_lost_probe_acknowledgement_as_unsupported(
     monkeypatch.setattr(bench, "launch_environment", lambda *args: {})
     monkeypatch.setattr(bench, "NativeLogSource", lambda *args, **kwargs: None)
     monkeypatch.setattr(bench, "DriverSession", Session)
-    monkeypatch.setattr(bench, "TuiTestTerminal", terminal)
+    monkeypatch.setattr(bench, "TuiTestTerminal", build)
     monkeypatch.setattr(bench, "_settles", lambda terminal, condition: condition(terminal.state()))
-    monkeypatch.setattr(bench, "composer_matches", lambda agent, screen, text: True)
     observation = bench.launch_check(
         store,
         "a" * 64,
         tmp_path / "checks",
-        runtime_root=tmp_path / "rt",
-        transport=tmp_path / "tui-test",
+        paths=(tmp_path / "rt", tmp_path / "tui-test"),
         environment={},
+        workflow=workflow,
+        commands=commands,
     )
-    assert terminals[0].limits.duration_seconds == bench.LAUNCH_CHECK_SECONDS == 180
+    return observation, terminals[0]
+
+
+@pytest.mark.parametrize("fail_on", ["paste", "clear"])
+def test_launch_check_reports_a_lost_probe_acknowledgement_as_unsupported(
+    store, tmp_path, monkeypatch, fail_on
+):
+    from functools import partial
+
+    from dryheave import bench
+
+    monkeypatch.setattr(bench, "submittable", lambda agent, screen, text: True)
+    observation, terminal = _launch_check(
+        store, tmp_path, monkeypatch, partial(_ProbeTerminal, fail_on=fail_on)
+    )
+    assert terminal.limits.duration_seconds == bench.LAUNCH_CHECK_SECONDS == 180
     assert (observation.state, observation.reason, observation.text) == (
         "unsupported",
         "The typing probe lost its terminal acknowledgement: "
         "Terminal command ended without a delivery acknowledgement.",
         "> ",
     )
+
+
+def test_launch_check_types_each_workflow_command_through_the_menu_without_submitting(
+    store, tmp_path, monkeypatch
+):
+    from functools import partial
+
+    offered = ("/code-review", "/review-plan")
+    observation, terminal = _launch_check(
+        store,
+        tmp_path,
+        monkeypatch,
+        partial(_MenuTerminal, commands=offered),
+        commands=("/code-review --quick", "/review-plan"),
+    )
+    assert observation.state == "ready"
+    assert terminal.pastes == [
+        "dryheave launch check",
+        "/code-review",
+        "/code-review --quick",
+        "/review-plan",
+    ]
+    assert (terminal.clears, terminal.enters, terminal.typed) == (4, 0, "")
+
+
+def test_launch_check_skips_slash_probing_when_workflows_are_disabled(store, tmp_path, monkeypatch):
+    from functools import partial
+
+    observation, terminal = _launch_check(
+        store,
+        tmp_path,
+        monkeypatch,
+        partial(_MenuTerminal, commands=()),
+        commands=("/code-review --quick",),
+        workflow=False,
+    )
+    assert observation.state == "ready"
+    assert terminal.pastes == ["dryheave launch check"]
+    assert (terminal.clears, terminal.enters) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    ("offered", "command"),
+    [(("/code-review",), "/simplify"), (("/review-plan", "/review"), "/review")],
+)
+def test_launch_check_fails_a_workflow_command_the_menu_does_not_highlight(
+    store, tmp_path, monkeypatch, offered, command
+):
+    from functools import partial
+
+    observation, terminal = _launch_check(
+        store,
+        tmp_path,
+        monkeypatch,
+        partial(_MenuTerminal, commands=offered),
+        commands=(command,),
+    )
+    assert (observation.state, observation.reason) == (
+        "unsupported",
+        f"Workflow command {command!r} was not ready to submit as typed; "
+        "check that Claude's command menu offers it.",
+    )
+    assert (terminal.pastes[-1], terminal.enters) == (command, 0)
+
+
+def test_slash_prompts_are_the_case_workflow_commands(store, monkeypatch):
+    from dryheave import bench
+    from dryheave.cases import CaseContent, InspectStep, PromptStep, RubricCriterion
+
+    case = CaseContent(
+        title="t",
+        initial_prompt="p",
+        criteria=(
+            RubricCriterion(criterion_id="quality", required=True, rubric="Quality rubric text."),
+        ),
+        workflow=(
+            InspectStep(step_id="check", criteria=("quality",)),
+            PromptStep(step_id="review", prompt="/code-review --quick"),
+            PromptStep(step_id="docs", prompt="Update the docs."),
+        ),
+    )
+    monkeypatch.setattr(bench, "load_frozen_case", lambda store, case_id: case)
+    assert bench.slash_prompts(store, "case") == ("/code-review --quick",)

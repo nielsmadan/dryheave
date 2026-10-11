@@ -3,7 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from dryheave.drivers.dialogs import CODEX_APPROVALS, composer, composer_matches, dialog
+from dryheave.drivers.dialogs import (
+    CODEX_APPROVALS,
+    command_menu,
+    command_ready,
+    composer,
+    composer_matches,
+    dialog,
+    submittable,
+)
 from dryheave.drivers.models import Screen
 from dryheave.models import AgentKind
 
@@ -218,3 +226,90 @@ def test_numbered_prompt_in_claude_composer_remains_composer_text(cursor):
     assert dialog(AgentKind.CLAUDE, screen) is None
     assert composer(AgentKind.CLAUDE, screen) == "1. Fix it\n2. Test it"
     assert composer_matches(AgentKind.CLAUDE, screen, "1. Fix it\n2. Test it")
+
+
+RULE = "\u2500" * 120
+FOOTER = "  \u23f5\u23f5 auto mode on (shift+tab to cycle)"
+
+
+def menu_screen(typed, entries, *, below=False, history=""):
+    rows = [
+        f"  {'\u276f' if index == 0 else ' '} {name:<48}{summary}"
+        for index, (name, summary) in enumerate(entries)
+    ]
+    box = [RULE, f"\u276f {typed}", RULE]
+    lines = [*box, *rows] if below else [*rows, *box, FOOTER]
+    text = history + "\n".join(lines)
+    row = text.splitlines().index(f"\u276f {typed}")
+    return Screen(text=text, exited=None, cursor={"x": 2 + len(typed), "y": row})
+
+
+REVIEW_ENTRIES = (
+    ("/review-plan", "Multi-agent review of implementation plans."),
+    ("/review-perf", "Performance analysis for algorithmic complexity."),
+)
+
+
+@pytest.mark.parametrize("below", [False, True])
+def test_claude_composer_matches_through_an_open_command_menu(below):
+    entries = (
+        ("/code-review", "Clean up code comments, then review code."),
+        ("/superpowers:receiving-code-review", "(superpowers) Use when receiving review."),
+    )
+    screen = menu_screen("/code-review", entries, below=below, history="\u276f Earlier ask\n\n")
+    assert composer(AgentKind.CLAUDE, screen) == "/code-review"
+    assert dialog(AgentKind.CLAUDE, screen) is None
+    assert command_menu(screen).highlighted == "/code-review"
+    assert submittable(AgentKind.CLAUDE, screen, "/code-review")
+
+
+@pytest.mark.parametrize("below", [False, True])
+def test_claude_command_menu_highlighting_another_command_blocks_submission(below):
+    screen = menu_screen("/review", REVIEW_ENTRIES, below=below)
+    assert composer_matches(AgentKind.CLAUDE, screen, "/review")
+    assert command_menu(screen).highlighted == "/review-plan"
+    assert not command_ready(screen, "/review")
+    assert not submittable(AgentKind.CLAUDE, screen, "/review")
+
+
+def test_claude_command_menu_without_a_match_blocks_submission():
+    screen = Screen(
+        text="\n".join(['  No commands match "/zzqq"', RULE, "\u276f /zzqq", RULE, FOOTER]),
+        exited=None,
+        cursor={"x": 7, "y": 2},
+    )
+    assert command_menu(screen).highlighted is None
+    assert not command_ready(screen, "/zzqq")
+
+
+def test_claude_closed_command_menu_submits_only_a_command_with_arguments():
+    typed = "/code-review --quick"
+    screen = Screen(
+        text="\n".join([RULE, f"\u276f {typed}", RULE, FOOTER]),
+        exited=None,
+        cursor={"x": 2 + len(typed), "y": 1},
+    )
+    bare = Screen(
+        text="\n".join([RULE, "\u276f /code-review", RULE, FOOTER]),
+        exited=None,
+        cursor={"x": 14, "y": 1},
+    )
+    assert command_menu(screen) is None
+    assert submittable(AgentKind.CLAUDE, screen, typed)
+    assert not submittable(AgentKind.CLAUDE, bare, "/code-review")
+
+
+def test_command_like_transcript_rows_away_from_the_composer_are_not_a_menu():
+    history = "  \u276f /usr/bin/env  python\n    /etc/hosts  entries\n\n"
+    screen = Screen(
+        text=history + "\n".join([RULE, "\u276f /code-review --quick", RULE, FOOTER]),
+        exited=None,
+        cursor={"x": 22, "y": 4},
+    )
+    assert command_menu(screen) is None
+    assert submittable(AgentKind.CLAUDE, screen, "/code-review --quick")
+
+
+def test_plain_claude_prompt_ignores_the_command_menu():
+    screen = menu_screen("review", REVIEW_ENTRIES)
+    assert submittable(AgentKind.CLAUDE, screen, "review")

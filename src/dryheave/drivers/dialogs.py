@@ -1,5 +1,6 @@
 import re
 import textwrap
+from dataclasses import dataclass
 from itertools import takewhile
 
 from pydantic import JsonValue
@@ -18,6 +19,16 @@ CODEX_APPROVALS = (
     "Would you like to grant these permissions?",
     "Hooks need review",
 )
+RULE = re.compile("\u2500+")
+MENU_HIGHLIGHT = re.compile(r"\s+\u276f (/\S+)(?:\s{2,}|$)")
+MENU_ROW = re.compile(r"\s+(?:[/\u2026]\S|No commands match \")")
+
+
+@dataclass(frozen=True)
+class CommandMenu:
+    highlighted: str | None
+
+
 CLAUDE_APPROVALS = (
     "Do you trust the files in this folder?",
     "Do you want to proceed?",
@@ -124,16 +135,56 @@ def selection_list(lines: list[str], position: int, cursor: dict[str, JsonValue]
     )
 
 
-def composer(agent: AgentKind, screen: Screen) -> str | None:
+def composer_row(agent: AgentKind, lines: list[str]) -> int | None:
     markers = ("\u203a", "\u00bb") if agent == AgentKind.CODEX else ("\u276f",)
-    lines = screen.text.splitlines()
     positions = [i for i, line in enumerate(lines) if line.lstrip().startswith(markers)]
     if not positions:
         return None
     indentation = min(len(lines[i]) - len(lines[i].lstrip()) for i in positions)
-    position = next(
+    return next(
         i for i in reversed(positions) if len(lines[i]) - len(lines[i].lstrip()) == indentation
     )
+
+
+def command_menu(screen: Screen) -> CommandMenu | None:
+    lines = screen.text.splitlines()
+    position = composer_row(AgentKind.CLAUDE, lines)
+    if position is None:
+        return None
+    indentation = len(lines[position]) - len(lines[position].lstrip())
+    rules = [i for i, line in enumerate(lines) if RULE.fullmatch(line.strip())]
+    top = max((i for i in rules if i < position), default=position)
+    bottom = min((i for i in rules if i > position), default=len(lines))
+    nearby = [
+        *takewhile(str.strip, reversed(lines[:top])),
+        *takewhile(str.strip, lines[bottom + 1 :]),
+    ]
+    rows = [line for line in nearby if len(line) - len(line.lstrip()) > indentation]
+    highlighted = [match[1] for line in rows if (match := MENU_HIGHLIGHT.match(line))]
+    if not highlighted and not any(map(MENU_ROW.match, rows)):
+        return None
+    return CommandMenu(highlighted=highlighted[0] if len(highlighted) == 1 else None)
+
+
+def command_ready(screen: Screen, prompt: str) -> bool:
+    name, *arguments = prompt.split(maxsplit=1)
+    menu = command_menu(screen)
+    if menu is None:
+        return bool(arguments)
+    return menu.highlighted == name
+
+
+def submittable(agent: AgentKind, screen: Screen, text: str) -> bool:
+    return composer_matches(agent, screen, text) and (
+        agent != AgentKind.CLAUDE or not text.startswith("/") or command_ready(screen, text)
+    )
+
+
+def composer(agent: AgentKind, screen: Screen) -> str | None:
+    lines = screen.text.splitlines()
+    position = composer_row(agent, lines)
+    if position is None:
+        return None
     first = lines[position].lstrip()[1:].strip()
     prefix_width = len(lines[position]) - len(lines[position].lstrip()) + 2
     placeholder = agent == AgentKind.CLAUDE or first in CODEX_EMPTY_PLACEHOLDERS
