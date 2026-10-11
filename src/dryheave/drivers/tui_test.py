@@ -27,7 +27,7 @@ from dryheave.drivers.models import (
 from dryheave.errors import InputError, LimitError
 from dryheave.filesystem import atomic_write
 from dryheave.logs.base import mapping, string
-from dryheave.models import CommandSpec
+from dryheave.models import AgentKind, CommandSpec
 from dryheave.process_ownership import ProcessOwner
 from dryheave.processes import run_command
 from dryheave.profile_models import LaunchPlan
@@ -58,6 +58,7 @@ class TuiTestTerminal:
         self.created = time.time()
         self.deadline = time.monotonic() + self.limits.duration_seconds
         self.started = False
+        self.agent: AgentKind | None = None
         self.daemon_identity: ProcessIdentity | None = None
         self.closed: CleanupReport | None = None
         self.watchdog_stop = threading.Event()
@@ -160,6 +161,7 @@ class TuiTestTerminal:
         self._check()
         if self.started or not plan.launchable:
             raise InputError("Terminal needs one launchable, unused LaunchPlan.")
+        self.agent = plan.agent
         self.environment = dict(environment)
         self.environment["TUI_TEST_HOME"] = str(self.runtime)
         version = run_command(
@@ -259,7 +261,18 @@ class TuiTestTerminal:
             raise InputError("Terminal text contains control characters.")
         if len(text.encode()) > self.limits.max_input_bytes:
             raise LimitError("Terminal text exceeds its input byte limit.")
-        self._call("type", "--", "\x1b[200~" + text + "\x1b[201~")
+        if self.agent != AgentKind.CLAUDE:
+            self._call("type", "--", "\x1b[200~" + text + "\x1b[201~")
+            return
+        # Claude wraps bracketed pastes in pasted_content tags, so type it as a user would.
+        for index, line in enumerate(text.split("\n")):
+            if index:
+                self._call("key", "press", "Shift+Enter")
+            if line:
+                self._call("type", "--", line)
+
+    def clear_line(self) -> None:
+        self._call("key", "press", "Ctrl+U")
 
     def enter(self) -> None:
         try:

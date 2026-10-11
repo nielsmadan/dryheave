@@ -38,10 +38,10 @@ def selected_capture(args: argparse.Namespace) -> CaptureSpec:
         raise InputError(
             "Claude profile creation requires an explicit --model; Haiku must omit --effort."
         )
-    version = args.native_version or ("2.1.278" if claude else "0.154.0")
-    if version != ("2.1.278" if claude else "0.154.0"):
+    version = args.native_version if claude else args.native_version or "0.154.0"
+    if not claude and version != "0.154.0":
         raise InputError(
-            "Friendly setup supports Codex 0.154.0 or Claude 2.1.278; use profile capture for legacy recipes."
+            "Friendly setup supports the Codex 0.154.0 protocol; use profile capture for legacy recipes."
         )
     environment = list(args.environment)
     if claude and "CLAUDE_CODE_OAUTH_TOKEN" not in environment:
@@ -95,7 +95,10 @@ def capture_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("name")
     parser.add_argument("--agent", choices=["codex", "claude"], default="codex")
     parser.add_argument("--executable")
-    parser.add_argument("--native-version", choices=["0.154.0", "2.1.278"])
+    parser.add_argument(
+        "--native-version",
+        help="Version to record for Claude (observed at launch when omitted); Codex supports 0.154.0.",
+    )
     parser.add_argument(
         "--model",
         help="Explicit provider model; required for Claude, defaults to gpt-5.6-terra for Codex.",

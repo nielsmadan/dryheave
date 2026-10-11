@@ -7,6 +7,7 @@ from dryheave.drivers.base import DeliveryUncertain, TransportError
 from dryheave.drivers.models import DriverLimits
 from dryheave.drivers.tui_test import TuiTestTerminal
 from dryheave.errors import InputError
+from dryheave.models import AgentKind
 from dryheave.processes import CommandResult
 
 
@@ -135,3 +136,27 @@ def test_cli_parse_rejection_retains_original_diagnostics(tmp_path, monkeypatch)
         assert evidence["exit_code"] == 2
         assert evidence["stderr"] == diagnostic.decode()
         assert evidence["stdout"] == ""
+
+
+def test_claude_input_is_typed_with_shift_enter_newlines(tmp_path, monkeypatch):
+    calls = []
+
+    def run(command, root, **kwargs):
+        calls.append(command.argv)
+        return CommandResult(command.argv, 0, b'{"ok":true,"data":{}}', b"", "exited")
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    with terminal(tmp_path, monkeypatch) as transport:
+        transport.agent = AgentKind.CLAUDE
+        transport.paste("Add settings:\n\nshow branch")
+    assert [argv[argv.index("--session") + 2 :] for argv in calls] == [
+        ("type", "--", "Add settings:"),
+        ("key", "press", "Shift+Enter"),
+        ("key", "press", "Shift+Enter"),
+        ("type", "--", "show branch"),
+    ]
+
+
+@pytest.mark.parametrize(("seconds", "polls"), [(180, 4000), (2400, 25000), (86400, 100000)])
+def test_poll_budget_scales_with_the_subject_time_budget(seconds, polls):
+    assert DriverLimits.for_duration(seconds).max_polls == polls

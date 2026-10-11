@@ -20,6 +20,12 @@ class DriverLimits(StrictModel):
     max_command_bytes: int = Field(default=1024 * 1024, gt=0, le=8 * 1024 * 1024)
     max_processes: int = Field(default=256, gt=0, le=4096)
 
+    @classmethod
+    def for_duration(cls, seconds: float) -> "DriverLimits":
+        return cls(
+            duration_seconds=seconds, max_polls=min(100_000, max(4000, int(seconds / 0.1) + 1000))
+        )
+
 
 class Screen(StrictModel):
     text: str

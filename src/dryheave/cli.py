@@ -8,6 +8,7 @@ from typing import TextIO
 from pydantic import JsonValue, ValidationError
 
 from dryheave.authoring_cli import register_authoring
+from dryheave.bench_cli import register_bench
 from dryheave.commands import ArgumentParser, CommandHandler, CommandRegistrar, CommandRegistry
 from dryheave.constants import VERSION
 from dryheave.errors import DryheaveError, InputError
@@ -89,6 +90,7 @@ def build_parser(registrars: Sequence[CommandRegistrar] = ()) -> ArgumentParser:
     register_authoring(registry)
     register_profiles(registry)
     register_runner(registry)
+    register_bench(registry)
     register_results(registry)
     register_operators(registry)
     register_workspace(registry)

@@ -284,3 +284,47 @@ def test_unfinished_assessment_and_export_reconstruct_durable_judge_spend(
             {"UNSPECIFIED": 0.25} if completed else {}
         )
         assert inspected.groups[0].unknown_cost_records == int(pending)
+
+
+@pytest.mark.integration
+def test_judge_is_not_called_when_the_subject_accepted_no_prompt(store, graded_benchmark, tmp_path):
+    case_id = graded_benchmark.cases[0]
+    case = load_frozen_case(store, case_id)
+    case = case.model_copy(
+        update={
+            "criteria": (
+                *case.criteria,
+                RubricCriterion(criterion_id="quality", rubric="The code stays readable."),
+            )
+        }
+    )
+    changed = store.put(
+        ObjectKind.CASE,
+        case,
+        files=store.read_blobs(case_id),
+        references=(case.persona_id, case.repository_id),
+    )
+    marker = tmp_path / "judge-called"
+    script = tmp_path / "judge.py"
+    script.write_text(f"import pathlib\npathlib.Path({str(marker)!r}).touch()\nprint('{{}}')\n")
+    scoring = ScoringConfig(
+        judge=ControllerRecipe(
+            kind="json-command",
+            isolation="trusted-native",
+            command=CommandSpec(argv=(sys.executable, str(script))),
+        )
+    )
+    fixture = (graded_benchmark.fixture[0].model_copy(update={"state": "approval"}),)
+    benchmark = graded_benchmark.model_copy(
+        update={"cases": (changed,), "scoring": scoring, "fixture": fixture}
+    )
+    summary = run_experiment(
+        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+    )
+    result = load_assessment(store, assess_run(store, summary.run_id)[0])
+    assert result.accepted_turns == 0
+    assert (result.criteria[-1].outcome, result.criteria[-1].error) == (
+        "not_run",
+        "subject_accepted_no_prompt",
+    )
+    assert not marker.exists()

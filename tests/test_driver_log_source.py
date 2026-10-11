@@ -44,7 +44,7 @@ def test_native_roots_exclude_plugin_files_and_unrelated_jsonl(tmp_path, agent, 
     content = (
         record(id="root", cwd="/fixture")
         if agent == AgentKind.CODEX
-        else b'{"type":"user","sessionId":"root","uuid":"u","message":{"content":"hello"}}\n'
+        else b'{"type":"user","sessionId":"root","cwd":"/fixture","uuid":"u","message":{"content":"hello"}}\n'
     )
     (root / "root.jsonl").write_bytes(content)
     events = reader.poll()

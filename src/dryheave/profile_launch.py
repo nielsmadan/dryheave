@@ -1,14 +1,16 @@
 import json
 import os
-import re
 import shutil
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from dryheave.errors import InputError, PathError
 from dryheave.filesystem import atomic_write, ensure_directory, read_bytes
+from dryheave.live_config import materialize_live_config
 from dryheave.models import AgentKind, CommandSpec, EnvironmentReference
+from dryheave.native_version import parse_version
 from dryheave.processes import run_command
 from dryheave.profile_models import (
     DiscoveryRoot,
@@ -24,6 +26,12 @@ from dryheave.serialization import canonical_json, digest
 from dryheave.storage import ObjectStore
 
 BASE_ENVIRONMENT = ("PATH", "TERM", "LANG", "LC_ALL", "LC_CTYPE")
+NESTED_SESSION = {
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SSE_PORT",
+}
 
 
 def _issue(code: str, message: str) -> ProfileIssue:
@@ -59,7 +67,7 @@ def _environment(
     else:
         names.add("HOME")
         names.update({"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"})
-    if recipe.agent == AgentKind.CLAUDE:
+    if recipe.agent == AgentKind.CLAUDE and recipe.config_source != "live":
         generated["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     return generated, tuple(EnvironmentReference(name=name) for name in sorted(names))
 
@@ -164,14 +172,9 @@ def _resolution(
         )
         result = run_command(command, workspace)
         if result.outcome == "exited" and result.returncode == 0:
-            match = re.fullmatch(
-                rb"(?:codex-cli )?([0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?)(?: \(Claude Code\))?\s*",
-                result.stdout,
-            )
-            if match:
-                observed = match[1].decode("ascii")
-                if recipe.version:
-                    status = "matched" if observed == recipe.version else "mismatch"
+            observed = parse_version(result.stdout)
+            if observed is not None and recipe.version:
+                status = "matched" if observed == recipe.version else "mismatch"
     return ExecutableResolution(
         requested=recipe.executable,
         resolved=resolved,
@@ -291,7 +294,21 @@ def _discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[DiscoveryR
                 ),
             ]
         )
-    return found
+    return _live_discovery(found) if recipe.config_source == "live" else found
+
+
+def _live_discovery(found: list[DiscoveryRoot]) -> list[DiscoveryRoot]:
+    return [
+        root.model_copy(
+            update={
+                "status": "generated",
+                "mechanism": "Per-attempt copy of the run's snapshot of the operator's live Claude config, with generated workspace trust and MCP removals.",
+            }
+        )
+        if root.status == "frozen"
+        else root
+        for root in found
+    ]
 
 
 def _codex_discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[DiscoveryRoot]:
@@ -363,11 +380,13 @@ def _launch_issues(
                 "Selected native executable is unavailable on PATH or at its explicit path.",
             )
         )
-    if resolution.version_status != "matched":
+    if resolution.observed_version is None:
+        issues.append(_issue("version-unobserved", "Native executable version was not observed."))
+    elif resolution.version_status == "mismatch":
         issues.append(
             _issue(
-                "version-" + resolution.version_status,
-                "Native executable version has not been verified to match the frozen version.",
+                "version-changed",
+                f"Observed native version {resolution.observed_version} differs from the recorded {resolution.expected_version}.",
             )
         )
     for root in discovery:
@@ -378,11 +397,20 @@ def _launch_issues(
                     f"Unverified discovery source: {root.path}. {root.mechanism}",
                 )
             )
+    if profile.recipe.config_source == "live":
+        issues.append(
+            _issue(
+                "live-config",
+                "Subject runs with a snapshot of the operator's live Claude config and inherited environment; its hooks, plugins and MCP servers act on the host.",
+            )
+        )
     issues.extend(
         [
             _issue(
                 "native-environment",
-                "Only required OS basics and explicitly named runtime variables are inherited; omitted variables may affect native tools. Repository isolation does not isolate host access.",
+                "The operator environment is inherited apart from owned roots. Repository isolation does not isolate host access."
+                if profile.recipe.config_source == "live"
+                else "Only required OS basics and explicitly named runtime variables are inherited; omitted variables may affect native tools. Repository isolation does not isolate host access.",
             ),
             _issue(
                 "authentication-unverified",
@@ -482,14 +510,26 @@ def preflight_profile(
         overlays=_overlays(profile, roots),
         discovery_roots=tuple(discovery),
         issues=tuple(issues),
+        environment_policy="inherited"
+        if profile.recipe.config_source == "live"
+        else "only-generated-and-explicit-references",
         fidelity="strict" if strict else "captured",
         launchable=not any(
-            item.code in {"executable-missing", "launcher-missing", "version-mismatch"}
-            for item in issues
+            item.code in {"executable-missing", "launcher-missing"} for item in issues
         ),
         required_environment=tuple(item.name for item in profile.recipe.environment),
         workspace_trust=profile.recipe.workspace_trust,
     )
+
+
+@dataclass(frozen=True)
+class LaunchOptions:
+    strict: bool = False
+    probe_version: bool = False
+    live_config: Path | None = None
+
+
+DEFAULT_LAUNCH = LaunchOptions()
 
 
 def materialize_profile(
@@ -497,12 +537,15 @@ def materialize_profile(
     reference: str,
     destination: Path,
     workspace: Path,
-    *,
-    strict: bool = False,
-    probe_version: bool = False,
+    options: LaunchOptions = DEFAULT_LAUNCH,
 ) -> LaunchPlan:
     plan = preflight_profile(
-        store, reference, destination, workspace, strict=strict, probe_version=probe_version
+        store,
+        reference,
+        destination,
+        workspace,
+        strict=options.strict,
+        probe_version=options.probe_version,
     )
     profile = load_profile(store, plan.profile_id)
     files = store.read_blobs(plan.profile_id)
@@ -513,6 +556,16 @@ def materialize_profile(
         ensure_directory(root / name)
     if profile.recipe.home_policy == "isolated":
         ensure_directory(root / "home")
+    if profile.recipe.config_source == "live":
+        if options.live_config is None:
+            raise InputError("Live config profiles launch only from a run's config snapshot.")
+        materialize_live_config(
+            options.live_config,
+            root / "config",
+            Path(plan.cwd),
+            removed_mcp_servers=profile.recipe.removed_mcp_servers,
+            trusted=profile.recipe.workspace_trust == "trusted",
+        )
     for overlay in plan.overlays:
         if overlay.action in {"preserve", "identical"}:
             continue
@@ -542,10 +595,14 @@ def launch_environment(plan: LaunchPlan, inherited: Mapping[str, str]) -> dict[s
         raise InputError(
             "Required runtime environment references are unavailable: " + ", ".join(missing)
         )
-    values = {
-        item.name: inherited[item.name]
-        for item in plan.environment_references
-        if item.name in inherited
-    }
+    values = (
+        {name: value for name, value in inherited.items() if name not in NESTED_SESSION}
+        if plan.environment_policy == "inherited"
+        else {
+            item.name: inherited[item.name]
+            for item in plan.environment_references
+            if item.name in inherited
+        }
+    )
     values.update(plan.generated_environment)
     return values

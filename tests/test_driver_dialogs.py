@@ -73,6 +73,51 @@ def test_claude_approval_requires_active_controls():
         assert dialog(AgentKind.CLAUDE, Screen(text=ordinary, exited=None)) is None
 
 
+def test_claude_composer_wrapped_narrower_than_the_terminal_still_matches():
+    reply = (
+        "looks good. one thing \u2014 when folder path is hidden but branch is still shown, "
+        "does the branch move up into the folder line's position or does it leave an empty gap?"
+    )
+    screen = Screen(
+        text="\u2500"
+        * 120
+        + "\n\u276f looks good. one thing \u2014 when folder path is hidden but branch is still"
+        " shown, does the branch move up into the\n  folder line's position or does it leave an"
+        " empty gap?\n" + "\u2500" * 120,
+        exited=None,
+        cols=120,
+    )
+    assert composer_matches(AgentKind.CLAUDE, screen, reply)
+    assert not composer_matches(AgentKind.CLAUDE, screen, reply.replace("empty gap", "gap"))
+
+
+def test_claude_suggestion_placeholder_is_an_empty_composer():
+    text = "\u2500" * 20 + '\n\u276f\xa0Try "how does <filepath> work?"\n' + "\u2500" * 20
+    placeholder = Screen(text=text, exited=None, cursor={"x": 2, "y": 1})
+    typed = Screen(text=text, exited=None, cursor={"x": 34, "y": 1})
+    assert composer(AgentKind.CLAUDE, placeholder) == ""
+    assert composer(AgentKind.CLAUDE, typed) == 'Try "how does <filepath> work?"'
+
+
+@pytest.mark.parametrize("suggestion", ["go ahead", "commit this"])
+def test_claude_suggested_next_prompt_is_an_empty_composer(suggestion):
+    text = "\u2500" * 20 + f"\n\u276f\xa0{suggestion}\n" + "\u2500" * 20
+    assert composer(AgentKind.CLAUDE, Screen(text=text, exited=None, cursor={"x": 2, "y": 1})) == ""
+    typed = Screen(text=text, exited=None, cursor={"x": 2 + len(suggestion), "y": 1})
+    assert composer(AgentKind.CLAUDE, typed) == suggestion
+
+
+def test_claude_collapsed_multiline_paste_matches_its_line_count():
+    prompt = "Can you add some settings:\n\nshow folder path\nshow branch\nreplace home path with ~"
+    screen = Screen(
+        text="\u2500" * 20 + "\n\u276f [Pasted text #1 +4 lines]\n" + "\u2500" * 20,
+        exited=None,
+    )
+    assert composer_matches(AgentKind.CLAUDE, screen, prompt)
+    assert not composer_matches(AgentKind.CLAUDE, screen, prompt + "\nextra line")
+    assert not composer_matches(AgentKind.CODEX, screen, prompt)
+
+
 def test_large_paste_placeholder_and_multiline_composer():
     screen = Screen(
         text="Old transcript\n\u203a [Pasted Content 1001 chars]\n\n? for shortcuts", exited=None
@@ -143,3 +188,33 @@ def test_hard_wrapping_and_nested_prompt_marker_preserve_content():
         exited=None,
     )
     assert composer_matches(AgentKind.CODEX, screen, text)
+
+
+def test_claude_theme_picker_is_an_unrecognized_dialog():
+    screen = Screen.model_validate_json(
+        Path("tests/fixtures/claude-2.1.281-theme-picker.json").read_text()
+    )
+    result = dialog(AgentKind.CLAUDE, screen)
+    assert (result.state, result.reason, result.text) == (
+        "unsupported",
+        "Unrecognized native dialog requires input.",
+        screen.text,
+    )
+
+
+def test_first_option_selected_with_cursor_on_marker_is_an_unrecognized_dialog():
+    text = "Pick a mode\n\n \u276f 1. Fast\n   2. Slow\n\n Syntax theme: Monokai"
+    result = dialog(AgentKind.CLAUDE, Screen(text=text, exited=None, cursor={"x": 1, "y": 2}))
+    assert (result.state, result.reason) == (
+        "unsupported",
+        "Unrecognized native dialog requires input.",
+    )
+
+
+@pytest.mark.parametrize("cursor", [{}, {"x": 11, "y": 3}])
+def test_numbered_prompt_in_claude_composer_remains_composer_text(cursor):
+    text = "────\n\n\u276f 1. Fix it\n  2. Test it\n\n────\n? for shortcuts"
+    screen = Screen(text=text, exited=None, cursor=cursor)
+    assert dialog(AgentKind.CLAUDE, screen) is None
+    assert composer(AgentKind.CLAUDE, screen) == "1. Fix it\n2. Test it"
+    assert composer_matches(AgentKind.CLAUDE, screen, "1. Fix it\n2. Test it")

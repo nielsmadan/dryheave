@@ -69,12 +69,20 @@ class ProcessOwner:
                         continue
                     children = process.children()
                     for child in children:
-                        self.add(child)
+                        self._track(child)
                     pending.extend(children)
                 except psutil.NoSuchProcess:
                     continue
-                except psutil.AccessDenied:
+                except (psutil.AccessDenied, PermissionError):
                     self.errors.add("process_visibility_denied")
+
+    def _track(self, process: psutil.Process) -> None:
+        try:
+            self.add(process)
+        except psutil.NoSuchProcess:
+            return
+        except (psutil.AccessDenied, PermissionError):
+            self.errors.add("process_visibility_denied")
 
     def _prune(self) -> None:
         for key, process in tuple(self.processes.items()):
@@ -83,7 +91,7 @@ class ProcessOwner:
                     del self.processes[key]
             except psutil.NoSuchProcess:
                 del self.processes[key]
-            except psutil.AccessDenied:
+            except (psutil.AccessDenied, PermissionError):
                 self.errors.add("process_visibility_denied")
 
     def _monitor(self) -> None:
@@ -101,7 +109,7 @@ class ProcessOwner:
                     result.append(process)
             except psutil.NoSuchProcess:
                 continue
-            except psutil.AccessDenied:
+            except (psutil.AccessDenied, PermissionError):
                 self.errors.add("process_visibility_denied")
                 result.append(process)
         return result
@@ -125,7 +133,7 @@ class ProcessOwner:
                             process.terminate()
                     except psutil.NoSuchProcess:
                         continue
-                    except psutil.AccessDenied:
+                    except (psutil.AccessDenied, PermissionError):
                         self.errors.add("process_signal_denied")
                 remaining = max(0.0, deadline - time.monotonic())
                 wait_deadline = time.monotonic() + remaining / (1 if hard else 2)

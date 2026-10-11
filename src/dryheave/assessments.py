@@ -238,7 +238,14 @@ def _grade(
         if isinstance(item, RubricCriterion) and item.criterion_id not in results
     ]
     recipe = inputs.scoring.judge if inputs.scoring else None
-    if rubrics and not judge_intent and recipe is not None and recipe.budget.max_calls:
+    delivered = inputs.capture is None or inputs.capture.accepted_turns > 0
+    if (
+        rubrics
+        and not judge_intent
+        and delivered
+        and recipe is not None
+        and recipe.budget.max_calls
+    ):
         call, judgments = _judge(execution, state, inputs, root, cancelled)
         calls = (*calls, call)
         for result in judgments:
@@ -251,7 +258,11 @@ def _grade(
                 kind="judge",
                 required=criterion.required,
                 outcome="error" if judge_intent else "not_run",
-                error="interrupted_judge" if judge_intent else "judge_not_available",
+                error="interrupted_judge"
+                if judge_intent
+                else "judge_not_available"
+                if delivered
+                else "subject_accepted_no_prompt",
             )
             results[criterion.criterion_id] = result
             _save_criterion(execution, state, result)

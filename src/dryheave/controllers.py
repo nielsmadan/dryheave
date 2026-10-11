@@ -30,6 +30,7 @@ from dryheave.errors import DryheaveError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.logs.base import mapping
 from dryheave.models import CommandSpec, TokenUsage
+from dryheave.native_version import parse_version
 from dryheave.personas import Persona, subject_persona
 from dryheave.process_ownership import ProcessOwner
 from dryheave.processes import CommandControl, CommandResult, run_command
@@ -157,6 +158,13 @@ def controller_environment(
             selected[reference.name] = inherited[reference.name]
     selected.setdefault("PATH", os.defpath)
     return selected
+
+
+def native_decision(content: bytes) -> SimulatorDecision:
+    value = parse_json(content)
+    if value.get("action") == "stop":
+        value = {**value, "text": ""}
+    return parse_model(canonical_json(value), SimulatorDecision)
 
 
 def _scripted(recipe: ControllerRecipe, request: SimulatorInput, index: int) -> ControllerResponse:
@@ -328,13 +336,12 @@ def _native(
     if result.returncode or result.outcome != "exited":
         raise InputError("Controller command did not complete successfully.")
     if recipe.kind == "claude":
-        response = parse_model(claude_payload(result.stdout), SimulatorDecision)
+        response = native_decision(claude_payload(result.stdout))
         observation = claude_observation(result.stdout)
         return ControllerResponse(decision=response, **observation.model_dump())
     if recipe.kind == "codex":
-        response = parse_model(
-            read_bytes(root / "response.json", limit=recipe.budget.max_output_bytes),
-            SimulatorDecision,
+        response = native_decision(
+            read_bytes(root / "response.json", limit=recipe.budget.max_output_bytes)
         )
         return ControllerResponse(
             decision=response, usage=_codex_usage(result.stdout, recipe.version or "0.153.4")
@@ -430,14 +437,9 @@ def run_role_command(
             if (
                 version.returncode
                 or version.outcome != "exited"
-                or version.stdout.strip()
-                != (
-                    f"{recipe.version} (Claude Code)"
-                    if recipe.kind == "claude"
-                    else f"codex-cli {recipe.version}"
-                ).encode()
+                or parse_version(version.stdout) is None
             ):
-                raise InputError("Controller version does not match the verified adapter.")
+                raise InputError("Controller executable did not report a native version.")
         if (
             context.cancelled.is_set()
             or watch.cancelled.is_set()

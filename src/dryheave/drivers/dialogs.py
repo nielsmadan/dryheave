@@ -1,5 +1,8 @@
 import re
 import textwrap
+from itertools import takewhile
+
+from pydantic import JsonValue
 
 from dryheave.drivers.models import Observation, Screen
 from dryheave.models import AgentKind
@@ -58,11 +61,13 @@ def dialog(agent: AgentKind, screen: Screen) -> Observation | None:
             reason="Native structured question requires a dialog-specific response adapter.",
             text=text,
         )
-    if not re.match(r"\d+\. ", selected) or not re.fullmatch(
+    numbered = re.match(r"\d+\. ", selected) is not None
+    if not numbered or not re.fullmatch(
         r"(?:press )?enter to (?:confirm|continue)(?: or esc to (?:cancel|go back))?|esc to cancel",
         footer,
     ):
-        return None
+        listed = numbered and selection_list(lines, position, screen.cursor)
+        return unrecognized(text) if listed else None
     anchors = CODEX_APPROVALS if agent == AgentKind.CODEX else CLAUDE_APPROVALS
     if any(line in anchors for line in titles) or (
         agent == AgentKind.CODEX
@@ -91,8 +96,31 @@ def dialog(agent: AgentKind, screen: Screen) -> Observation | None:
             reason="Unanswered-question confirmation requires a dialog-specific policy.",
             text=text,
         )
+    return unrecognized(text)
+
+
+def unrecognized(text: str) -> Observation:
     return Observation(
         state="unsupported", reason="Unrecognized native dialog requires input.", text=text
+    )
+
+
+def selection_list(lines: list[str], position: int, cursor: dict[str, JsonValue]) -> bool:
+    column = len(lines[position]) - len(lines[position].lstrip()[1:].lstrip())
+
+    def option(line: str) -> bool:
+        return not line[:column].strip() and re.match(r"\d+\. ", line[column:]) is not None
+
+    above = takewhile(str.strip, reversed(lines[:position]))
+    below = takewhile(str.strip, lines[position + 1 :])
+    if any(map(option, above)):
+        return True
+    x, y = cursor.get("x"), cursor.get("y")
+    return (
+        type(x) is int
+        and type(y) is int
+        and (y < position or (y == position and x < column))
+        and any(map(option, below))
     )
 
 
@@ -108,9 +136,9 @@ def composer(agent: AgentKind, screen: Screen) -> str | None:
     )
     first = lines[position].lstrip()[1:].strip()
     prefix_width = len(lines[position]) - len(lines[position].lstrip()) + 2
+    placeholder = agent == AgentKind.CLAUDE or first in CODEX_EMPTY_PLACEHOLDERS
     if (
-        agent == AgentKind.CODEX
-        and first in CODEX_EMPTY_PLACEHOLDERS
+        placeholder
         and screen.cursor.get("x") == prefix_width
         and screen.cursor.get("y") == position
     ):
@@ -145,8 +173,11 @@ def composer_matches(agent: AgentKind, screen: Screen, text: str) -> bool:
             re.fullmatch(rf"\[Pasted Content {len(text)} chars\](?: \+\d+ lines)?", value)
             is not None
         )
-    if value == text.strip():
+    if value == text.strip() or value.split() == text.split():
         return True
+    pasted = re.fullmatch(r"\[Pasted text #\d+ \+(\d+) lines\]", value)
+    if agent == AgentKind.CLAUDE and pasted is not None:
+        return int(pasted[1]) == text.strip().count("\n")
     width = screen.cols - 3
     if width <= 0:
         return False

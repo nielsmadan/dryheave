@@ -129,7 +129,6 @@ def test_claude_capture_targets_and_haiku_to_sonnet_derivation(store, tmp_path, 
         ["--plugins", "selected-plugins"],
         ["--workspace-trust", "prompt"],
         ["--auth-file-env", "OPAQUE", "--acknowledge-auth-source-writes"],
-        ["--native-version", "0.154.0"],
         ["--native-arg=--bare"],
         ["--native-arg=--print"],
         ["--native-arg=--dangerously-skip-permissions"],
@@ -158,6 +157,16 @@ def test_friendly_claude_rejects_unsupported_options(store, capsys, flags):
     )
     assert json.loads(capsys.readouterr().err)["error"]["code"] == "invalid_input"
     assert not store.root.exists()
+
+
+@pytest.mark.parametrize(
+    ("flags", "recorded"), [([], None), (["--native-version", "2.1.281"], "2.1.281")]
+)
+def test_friendly_claude_records_any_native_version(store, capsys, flags, recorded):
+    common = ["--store", str(store.root), "--json", "profile", "create", "haiku"]
+    assert main([*common, "--agent", "claude", "--model", "claude-haiku-4-5", *flags]) == 0
+    capsys.readouterr()
+    assert load_profile(store, "haiku").recipe.version == recorded
 
 
 def test_codex_capture_and_effort_only_variant_preserve_selected_config(store, tmp_path, capsys):

@@ -86,6 +86,8 @@ class NativeRecipe(StrictModel):
     runtime_files: tuple[RuntimeFileReference, ...] = ()
     codex_discovery: Literal["disabled-plugins", "selected-plugins"] | None = None
     claude_discovery: Literal["selected-2.1.278"] | None = None
+    config_source: Literal["selected", "live"] = "selected"
+    removed_mcp_servers: tuple[Text, ...] = ()
 
     @model_serializer(mode="wrap")
     def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
@@ -93,13 +95,29 @@ class NativeRecipe(StrictModel):
         for name in ("codex_discovery", "claude_discovery"):
             if getattr(self, name) is None:
                 value.pop(name, None)
+        if self.config_source == "selected":
+            value.pop("config_source", None)
+        if not self.removed_mcp_servers:
+            value.pop("removed_mcp_servers", None)
         return value
+
+    @model_validator(mode="after")
+    def live_contract(self) -> Self:
+        if self.config_source == "live":
+            if self.agent != AgentKind.CLAUDE or self.claude_discovery is not None:
+                raise ValueError("Live config snapshots are supported only for Claude")
+            validate_effort(self.model, self.effort)
+        elif self.removed_mcp_servers:
+            raise ValueError("MCP server removal applies only to live config snapshots")
+        if len(set(self.removed_mcp_servers)) != len(self.removed_mcp_servers):
+            raise ValueError("Removed MCP server names must be unique")
+        return self
 
     @model_validator(mode="after")
     def environment_contract(self) -> Self:
         if self.claude_discovery is not None:
-            if self.agent != AgentKind.CLAUDE or self.version != "2.1.278":
-                raise ValueError("Explicit Claude discovery policy requires version 2.1.278")
+            if self.agent != AgentKind.CLAUDE:
+                raise ValueError("Explicit Claude discovery policy requires the Claude agent")
             validate_effort(self.model, self.effort)
             if self.launcher or any(argument != "--verbose" for argument in self.arguments):
                 raise ValueError(
@@ -117,7 +135,11 @@ class NativeRecipe(StrictModel):
             self.agent != AgentKind.CODEX or self.version != "0.154.0"
         ):
             raise ValueError("explicit Codex discovery policy requires version 0.154.0")
-        if self.agent != AgentKind.CODEX and self.workspace_trust != "prompt":
+        if (
+            self.agent != AgentKind.CODEX
+            and self.config_source != "live"
+            and self.workspace_trust != "prompt"
+        ):
             raise ValueError("explicit workspace trust is currently verified only for Codex")
         names = [item.name for item in self.environment]
         reserved = {
@@ -174,6 +196,8 @@ class FrozenProfile(StrictModel):
 
     @model_validator(mode="after")
     def distinct_assets(self) -> Self:
+        if self.recipe.config_source == "live" and self.assets:
+            raise ValueError("Live config profiles take their files from the run snapshot")
         names: set[str] = set()
         portable_names: set[str] = set()
         for asset in self.assets:
@@ -206,6 +230,21 @@ class DeriveSpec(StrictModel):
     additions: CaptureSpec | None = None
     remove: tuple[RelativePath, ...] = ()
     replace: tuple[RelativePath, ...] = ()
+
+
+class LiveConfigManifest(StrictModel):
+    schema_version: Literal[1] = 1
+    source: Text
+    entries: tuple[Text, ...]
+    files: int = Field(ge=0)
+    bytes: int = Field(ge=0)
+    tree_sha256: ObjectId
+    settings_sha256: ObjectId | None
+    instructions_sha256: ObjectId | None
+    skills: tuple[Text, ...]
+    enabled_plugins: tuple[Text, ...]
+    mcp_servers: tuple[Text, ...]
+    hook_events: tuple[Text, ...]
 
 
 class DiscoveryRoot(StrictModel):
@@ -241,7 +280,7 @@ class LaunchPlan(StrictModel):
     config_roots: dict[str, str]
     generated_environment: dict[str, str]
     environment_references: tuple[EnvironmentReference, ...]
-    environment_policy: Literal["only-generated-and-explicit-references"] = (
+    environment_policy: Literal["only-generated-and-explicit-references", "inherited"] = (
         "only-generated-and-explicit-references"
     )
     runtime_files: tuple[RuntimeFileReference, ...]

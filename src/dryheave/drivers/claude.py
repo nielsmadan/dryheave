@@ -11,6 +11,7 @@ class ClaudeAdapter:
         self.turn_id: str | None = None
         self.chain: dict[str, str] = {}
         self.pending_completion: str | None = None
+        self.described = False
 
     def feed(self, record: dict[str, JsonValue]) -> tuple[NativeEvent, ...]:
         session = string(record.get("sessionId")) or string(record.get("session_id"))
@@ -18,8 +19,9 @@ class ClaudeAdapter:
             return ()
         if self.session_id is not None and session != self.session_id:
             raise InputError("Native Claude log changed its session identity.")
-        first = self.session_id is None
         self.session_id = session
+        describes = not self.described and "cwd" in record
+        self.described = self.described or describes
         metadata = self._event(
             "metadata",
             record,
@@ -29,7 +31,7 @@ class ClaudeAdapter:
                 if key in record
             },
         )
-        events = [metadata] if first else []
+        events = [metadata] if describes else []
         message = mapping(record.get("message"))
         role = message.get("role")
         native_id, parent_id = string(record.get("uuid")), string(record.get("parentUuid"))
@@ -56,6 +58,8 @@ class ClaudeAdapter:
             events.extend(self._response(record, message))
         elif record.get("type") == "system":
             events.extend(self._system(record))
+        if native_id is not None and parent_turn is not None:
+            self.chain.setdefault(native_id, parent_turn)
         return tuple(events)
 
     @staticmethod
@@ -142,7 +146,8 @@ class ClaudeAdapter:
                 )
             ]
         if subtype in {"stop_hook_summary", "stop_hook", "hook_started", "hook_response"}:
-            self.pending_completion = None
+            if record.get("preventedContinuation") is True:
+                self.pending_completion = None
             return [
                 self._event(
                     "hook",

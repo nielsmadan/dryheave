@@ -123,10 +123,12 @@ def test_failed_roles_retain_observed_metadata_through_durable_report_pricing(
     )
     report = report_run(store, summary.run_id)
     role = report.attempts[0].roles[role_index]
-    assert role.known_cost == 200 / 1e6
+    calls = 1 if invalid == "judge-ids" else 2
+    assert len(role.records) == calls
+    assert role.known_cost == calls * 200 / 1e6
     assert role.coverage == "partial"
     assert role.records[0].model_basis == "observed"
-    assert report.groups[0].known_spend_by_currency == {"EUR": 200 / 1e6}
+    assert report.groups[0].known_spend_by_currency == {"EUR": calls * 200 / 1e6}
 
 
 @pytest.mark.parametrize("model", [None, ["invalid"], "x" * 257, "model\ncontrol"])

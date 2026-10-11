@@ -12,8 +12,16 @@ from dryheave.errors import DryheaveError, InputError
 from dryheave.experiment_models import FrozenExperiment
 from dryheave.experiments import inspect_experiment, load_experiment
 from dryheave.journals import RunStore
+from dryheave.live_config import (
+    LIVE_CONFIG_DIRECTORY,
+    live_source,
+    load_snapshot_manifest,
+    require_servers,
+    snapshot_live_config,
+)
 from dryheave.models import ObjectKind, TrialStage
 from dryheave.native_recovery import reconcile_store_ownership
+from dryheave.profiles import load_profile
 from dryheave.runner_attempt import TrialExecution
 from dryheave.runner_models import CapturedAttempt, RunOptions, RunSummary
 from dryheave.runner_recovery import recover_attempt
@@ -176,10 +184,37 @@ def run_experiment(
                             )
                         )
                 raise
+            _prepare_live_config(store, execution, experiment, os.environ)
             _run_trials(store, execution, experiment, retry, cancelled, os.environ)
         result = _summary(execution, experiment)
         journal.write_result(result.model_dump(mode="json"))
         return result
+
+
+def _prepare_live_config(
+    store: ObjectStore,
+    execution: ExecutionJournal,
+    experiment: FrozenExperiment,
+    environment: Mapping[str, str],
+) -> None:
+    profiles = [
+        load_profile(store, identifier)
+        for identifier in sorted({trial.profile_id for trial in experiment.trials})
+    ]
+    live = [profile for profile in profiles if profile.recipe.config_source == "live"]
+    if not live:
+        return
+    snapshot = execution.journal.path / LIVE_CONFIG_DIRECTORY
+    if snapshot.exists():
+        manifest = load_snapshot_manifest(snapshot)
+    else:
+        source, state = live_source(environment, Path.home())
+        manifest = snapshot_live_config(source, state, snapshot)
+        execution.journal.append("live-config", manifest.model_dump(mode="json"))
+    require_servers(
+        manifest.mcp_servers,
+        (name for profile in live for name in profile.recipe.removed_mcp_servers),
+    )
 
 
 def _run_trials(

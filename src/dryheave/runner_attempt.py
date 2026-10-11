@@ -1,4 +1,5 @@
 import time
+import traceback
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,11 +33,12 @@ from dryheave.experiments import load_role
 from dryheave.filesystem import ensure_directory
 from dryheave.final_capture import CaptureBuilder, capture_workspace
 from dryheave.fixture_subject import FixtureTerminal
+from dryheave.live_config import LIVE_CONFIG_DIRECTORY
 from dryheave.models import ObjectKind, StrictModel, TrialStage
 from dryheave.personas import load_frozen_persona
 from dryheave.process_ownership import ProcessOwner
 from dryheave.processes import CommandControl, run_command
-from dryheave.profile_launch import launch_environment, materialize_profile
+from dryheave.profile_launch import LaunchOptions, launch_environment, materialize_profile
 from dryheave.repositories import materialize_repository
 from dryheave.runner_models import AttemptState, CapturedAttempt, QuarantinedCapture
 from dryheave.runner_state import ExecutionJournal
@@ -59,6 +61,12 @@ def _combine_cleanup(*reports: CleanupReport) -> CleanupReport:
         if all(report.coverage == "fixture" for report in reports)
         else "partial-native",
     )
+
+
+def describe_error(error: BaseException) -> str:
+    frames = traceback.extract_tb(error.__traceback__)
+    origin = f" ({Path(frames[-1].filename).name}:{frames[-1].lineno})" if frames else ""
+    return f"{type(error).__name__}: {error}{origin}"
 
 
 class TrialExecution:
@@ -184,7 +192,7 @@ class TrialExecution:
     def _driver(self) -> DriverSession:
         if self.state.launch_plan is None:
             raise InputError("Driver needs a saved launch plan.")
-        limits = DriverLimits(duration_seconds=float(self.case.budgets.subject_seconds))
+        limits = DriverLimits.for_duration(float(self.case.budgets.subject_seconds))
         artifacts = ArtifactWriter(self.root / "driver", limits.max_artifact_bytes)
         if self.options.mode == "offline-fixture":
             source = FakeEventSource([])
@@ -234,7 +242,11 @@ class TrialExecution:
                 self.trial.profile_id,
                 self.root / "profile",
                 self.workspace,
-                strict=self.options.strict,
+                LaunchOptions(
+                    strict=self.options.strict,
+                    probe_version=True,
+                    live_config=self.journal.journal.path / LIVE_CONFIG_DIRECTORY,
+                ),
             )
             self.update(launch_plan=plan)
             if not plan.launchable:
@@ -254,7 +266,7 @@ class TrialExecution:
             self.cancelled.set()
             self.update(stop_reason="cancelled")
         except (DryheaveError, OSError, psutil.Error) as error:
-            self.errors.append(str(error))
+            self.errors.append(describe_error(error))
             self.update(stop_reason="cancelled" if self.cancelled.is_set() else "error")
         finally:
             self.stop()
@@ -316,7 +328,7 @@ class TrialExecution:
             else observation.state
         )
 
-    def _simulate(self, inherited: Mapping[str, str]) -> str:
+    def _simulate(self, inherited: Mapping[str, str], *, retry: bool = True) -> str:
         spent = sum(call.elapsed_seconds or 0 for call in self.state.calls)
         if (
             len(self.state.calls) >= self.recipe.budget.max_calls
@@ -361,6 +373,14 @@ class TrialExecution:
             )
         self.journal.evidence(self.state, "controller-result", call)
         if call.status != "completed" or call.decision is None:
+            if (
+                retry
+                and not self.cancelled.is_set()
+                and time.monotonic() < self.deadline
+                and context.cleanup is not None
+                and context.cleanup.known_writers_stopped
+            ):
+                return self._simulate(inherited, retry=False)
             self.update(
                 stop_reason="cancelled"
                 if self.cancelled.is_set()

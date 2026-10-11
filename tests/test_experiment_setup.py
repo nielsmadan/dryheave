@@ -45,7 +45,7 @@ def test_claude_setup_freezes_explicit_configuration_without_launch(store, bench
     recipe = store.load(frozen.simulator_id, ControllerRecipe, kind=ObjectKind.SIMULATOR)
     assert (recipe.kind, recipe.version, recipe.model, recipe.effort) == (
         "claude",
-        "2.1.278",
+        None,
         "claude-sonnet-4-6",
         "low",
     )

@@ -1,0 +1,12 @@
+{
+  "cols": 120,
+  "cursor": {
+    "x": 1,
+    "y": 23
+  },
+  "cwd": null,
+  "exited": null,
+  "ready": false,
+  "rows": 40,
+  "text": "Welcome to Claude Code v2.1.281\n..........................................................\n\n     *                                       █████▓▓░\n                                 *         ███▓░     ░░\n            ░░░░░░                        ███▓░\n    ░░░   ░░░░░░░░░░                      ███▓░\n   ░░░░░░░░░░░░░░░░░░░    *                ██▓░░      ▓\n                                             ░▓▓███▓▓░\n *                                 ░░░░\n                                 ░░░░░░░░\n                               ░░░░░░░░░░░░░░░░\n       █████████                                        *\n      ██▄█████▄██                        *\n       █████████      *\n.......█ █   █ █..........................................\n\n Let's get started.\n\n Choose the text style that looks best with your terminal\n To change this later, run /theme\n\n   1. Auto (match terminal)\n ❯ 2. Dark mode ✔\n   3. Light mode\n   4. Dark mode (colorblind-friendly)\n   5. Light mode (colorblind-friendly)\n   6. Dark mode (ANSI colors only)\n   7. Light mode (ANSI colors only)\n\n ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n  1  function greet() {\n  2 -  console.log(\"Hello, World!\");\n  2 +  console.log(\"Hello, Claude!\");\n  3  }\n ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n  Syntax theme: Monokai Extended (ctrl+t to disable)"
+}

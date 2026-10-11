@@ -52,7 +52,7 @@ def _simulator(args: argparse.Namespace) -> ControllerRecipe:
         executable = str(Path(executable).absolute())
     return ControllerRecipe(
         kind=args.simulator,
-        version="2.1.278" if claude else "0.154.0",
+        version=None if claude else "0.154.0",
         model=args.simulator_model or "gpt-5.6-terra",
         effort=args.simulator_effort if claude else args.simulator_effort or "low",
         isolation="trusted-native",
@@ -125,7 +125,7 @@ def register_experiment_setup(
         "--simulator",
         choices=["none", "codex", "claude"],
         required=True,
-        help="Explicitly select no replies, Codex 0.154.0 or tool-disabled Claude 2.1.278.",
+        help="Explicitly select no replies, Codex 0.154.0 or tool-disabled Claude.",
     )
     parser.add_argument("--simulator-executable")
     parser.add_argument("--simulator-model")

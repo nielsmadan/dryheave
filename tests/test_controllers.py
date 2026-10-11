@@ -18,6 +18,7 @@ from dryheave.controllers import (
     _codex_usage,
     controller_command,
     invoke_controller,
+    native_decision,
     simulator_projection,
 )
 from dryheave.drivers.artifacts import ArtifactWriter
@@ -305,3 +306,17 @@ def test_controller_cleanup_failure_is_retained_in_role_result(
     assert result.cleanup.errors == ("process_signal_denied",)
     evidence = json.loads(next((tmp_path / "call").glob("*-cleanup.json")).read_bytes())
     assert evidence == result.cleanup.model_dump(mode="json")
+
+
+def test_a_stop_decision_drops_any_explanation_text():
+    decision = native_decision(
+        json.dumps(
+            {
+                "action": "stop",
+                "text": "The user has indicated the task is complete.",
+                "fact_ids": [],
+                "reason": "The user explicitly closed the task.",
+            }
+        ).encode()
+    )
+    assert (decision.action, decision.text) == ("stop", "")

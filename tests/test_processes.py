@@ -240,3 +240,13 @@ def test_drain_does_not_block_when_the_start_callback_fails(tmp_path: Path) -> N
     assert ready.exists()
     assert returned
     assert raised == [refusal]
+
+
+def test_timeout_survives_a_group_that_refuses_signals(tmp_path: Path, monkeypatch) -> None:
+    def refuse(pgid: int, signum: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr("dryheave.processes.os.killpg", refuse)
+    command = CommandSpec(argv=(sys.executable, "-c", "print('x')"), timeout_seconds=1)
+    result = run_command(command, tmp_path, control=CommandControl(deadline=time.monotonic() - 1))
+    assert result.outcome == "timeout"

@@ -314,7 +314,7 @@ def test_claude_native_settings_skills_and_ancestor_exclusion(store, tmp_path: P
     assert plan.generated_environment["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
 
 
-def test_version_preflight_is_bounded_and_reports_mismatch(
+def test_version_preflight_is_bounded_and_records_a_changed_version(
     store, tmp_path: Path, monkeypatch
 ) -> None:
     import dryheave.profile_launch as module
@@ -342,8 +342,10 @@ def test_version_preflight_is_bounded_and_reports_mismatch(
         ),
     )
     mismatched = preflight_profile(store, other, tmp_path / "other", workspace, probe_version=True)
-    assert mismatched.launchable is False
+    assert mismatched.launchable is True
     assert mismatched.executable.version_status == "mismatch"
+    assert mismatched.executable.observed_version == "0.153.4"
+    assert "version-changed" in {item.code for item in mismatched.issues}
 
 
 def test_missing_executable_is_visible_and_no_version_probe_is_implicit(

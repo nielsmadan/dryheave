@@ -7,7 +7,7 @@ from pydantic import JsonValue
 from dryheave.commands import CommandRegistry
 from dryheave.errors import InputError
 from dryheave.filesystem import read_bytes
-from dryheave.profile_launch import materialize_profile, preflight_profile
+from dryheave.profile_launch import LaunchOptions, materialize_profile, preflight_profile
 from dryheave.profile_models import CaptureSpec, DeriveSpec
 from dryheave.profiles import capture_profile, derive_profile, diff_profiles, load_profile
 from dryheave.serialization import parse_json, parse_model
@@ -84,14 +84,23 @@ def _derive(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue
 
 
 def _launch(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
-    operation = materialize_profile if args.profile_command == "materialize" else preflight_profile
-    plan = operation(
-        store,
-        args.reference,
-        args.destination,
-        args.workspace,
-        strict=args.strict,
-        probe_version=args.probe_version,
+    plan = (
+        materialize_profile(
+            store,
+            args.reference,
+            args.destination,
+            args.workspace,
+            LaunchOptions(strict=args.strict, probe_version=args.probe_version),
+        )
+        if args.profile_command == "materialize"
+        else preflight_profile(
+            store,
+            args.reference,
+            args.destination,
+            args.workspace,
+            strict=args.strict,
+            probe_version=args.probe_version,
+        )
     )
     return {
         "launch_plan": plan.model_dump(mode="json"),

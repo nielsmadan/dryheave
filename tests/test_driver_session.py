@@ -188,7 +188,8 @@ def test_partial_paste_never_sends_enter(tmp_path, driver_plan):
         tmp_path, driver_plan, terminal=FakeTerminal([], partial_paste=True)
     )
     with session:
-        assert session.deliver(session.prepare("Hello")).state == "partial_input"
+        result = session.deliver(session.prepare("Hello"))
+        assert (result.state, result.text) == ("partial_input", "\u203a H")
         assert terminal.enters == 0
     assert terminal.closed
 
@@ -313,3 +314,85 @@ def test_ambiguous_duplicate_acceptances_and_conflicting_roots_stop(tmp_path, dr
         source.batches.append([metadata(driver_plan, "other-root")])
         with pytest.raises(InputError, match="Multiple root"):
             session.reconcile()
+
+
+def test_claude_theme_picker_stops_delivery_before_paste(tmp_path, driver_plan):
+    picker = Screen.model_validate_json(
+        Path("tests/fixtures/claude-2.1.281-theme-picker.json").read_text()
+    )
+    terminal = FakeTerminal([Screen(text="\u276f", exited=None)])
+    session = DriverSession(
+        terminal,
+        FakeEventSource([]),
+        ArtifactWriter(tmp_path / "evidence", 100000),
+        agent=AgentKind.CLAUDE,
+        limits=DriverLimits(duration_seconds=2, max_polls=10, poll_seconds=0.01),
+    )
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    with session:
+        assert session.start(plan, {}).state == "ready"
+        intent = session.prepare("Hello")
+        terminal.screens.append(picker)
+        result = session.deliver(intent)
+        assert (result.state, result.reason, result.text) == (
+            "unsupported",
+            "Unrecognized native dialog requires input.",
+            picker.text,
+        )
+        assert terminal.pastes == []
+        assert terminal.enters == 0
+
+
+@pytest.mark.parametrize(
+    "text,state,reason",
+    [
+        ("Loading", "unsupported", "Native composer was not observed; delivery stopped."),
+        ("\u203a leftover", "partial_input", "Composer already contains text; delivery stopped."),
+    ],
+)
+def test_unusable_composer_stops_delivery_with_screen_evidence(
+    tmp_path, driver_plan, text, state, reason
+):
+    session, terminal, _source = build(tmp_path, driver_plan)
+    with session:
+        intent = session.prepare("Hello")
+        terminal.screens.append(Screen(text=text, exited=None))
+        result = session.deliver(intent)
+        assert (result.state, result.reason, result.text) == (state, reason, text)
+        assert terminal.pastes == []
+        assert terminal.enters == 0
+
+
+@pytest.mark.parametrize(
+    ("existing", "cursor", "enters"),
+    [("go ahead", {"x": 2, "y": 0}, 1), ("leftover", {"x": 10, "y": 0}, 0)],
+)
+def test_claude_types_over_a_suggestion_but_never_sends_mixed_text(
+    tmp_path, driver_plan, existing, cursor, enters
+):
+    class ClaudeTerminal(FakeTerminal):
+        def paste(self, text):
+            self.pastes.append(text)
+            kept = "" if cursor["x"] == 2 else existing
+            self.current = Screen(text="\u276f " + kept + text, exited=None)
+
+        def enter(self):
+            self.enters += 1
+            self.current = Screen(text="Working\n\u276f", exited=None)
+
+    terminal = ClaudeTerminal([])
+    terminal.current = Screen(text="\u276f", exited=None)
+    session = DriverSession(
+        terminal,
+        FakeEventSource([]),
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        agent=AgentKind.CLAUDE,
+        limits=DriverLimits(duration_seconds=1, max_polls=10, poll_seconds=0.01),
+    )
+    with session:
+        plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+        assert session.start(plan, {}).state == "ready"
+        terminal.current = Screen(text="\u276f " + existing, exited=None, cursor=cursor)
+        result = session.deliver(session.prepare("Hello"))
+        assert terminal.pastes == ["Hello"], (result.state, result.reason)
+        assert terminal.enters == enters, (result.state, result.reason, result.text)

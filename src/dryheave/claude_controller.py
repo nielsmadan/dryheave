@@ -1,7 +1,7 @@
 from contextlib import suppress
 from typing import Literal
 
-from pydantic import Field, JsonValue, ValidationError
+from pydantic import ConfigDict, Field, JsonValue, ValidationError
 
 from dryheave.controller_models import RoleObservation
 from dryheave.errors import InputError
@@ -10,6 +10,8 @@ from dryheave.serialization import canonical_json, parse_json, parse_model
 
 
 class ClaudeResult(StrictModel):
+    model_config = ConfigDict(extra="ignore", strict=True, frozen=True, allow_inf_nan=False)
+
     type: Literal["result"]
     subtype: str
     is_error: bool
@@ -37,7 +39,7 @@ def claude_payload(content: bytes) -> bytes:
         or result.errors
         or result.permission_denials
         or result.structured_output is None
-        or result.stop_reason not in {None, "end_turn", "stop_sequence"}
+        or result.stop_reason not in {None, "end_turn", "stop_sequence", "tool_use"}
     ):
         raise InputError("Claude controller did not return a successful structured result.")
     tools = result.usage.get("server_tool_use")

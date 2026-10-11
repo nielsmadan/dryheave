@@ -392,3 +392,41 @@ def test_load_capture_batch_traversal_does_not_grow_per_file(store, benchmark, m
     capture = load_capture(store, identifier)
     assert {entry.path for entry in capture.workspace.files} >= set(additions)
     assert visits.count(identifier) == 3
+
+
+@pytest.mark.integration
+def test_a_failed_simulator_call_is_retried_once(store, benchmark, tmp_path):
+    import sys
+
+    from dryheave.controller_models import ControllerRecipe
+    from dryheave.models import CommandSpec
+
+    marker = tmp_path / "failed-once"
+    script = (
+        "import pathlib,sys\n"
+        f"marker=pathlib.Path({str(marker)!r})\n"
+        "if not marker.exists():\n    marker.touch()\n    sys.exit(3)\n"
+        'print(\'{"decision":{"action":"stop","reason":"done"}}\')\n'
+    )
+    recipe = ControllerRecipe(
+        kind="json-command",
+        isolation="trusted-native",
+        command=CommandSpec(argv=(sys.executable, "-c", script)),
+    )
+    identifier = create_experiment(store, benchmark.model_copy(update={"simulator": recipe}))
+    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    captured = load_capture(store, result.pending_assessment[0])
+    assert [call.status for call in captured.controller_calls] == ["failed", "completed"]
+    assert captured.stop_reason == "simulator_stop"
+
+
+def test_attempt_errors_name_their_type_and_origin():
+    from dryheave.runner_attempt import describe_error
+
+    try:
+        raise PermissionError(1, "Operation not permitted")
+    except PermissionError as error:
+        described = describe_error(error)
+    assert described.startswith(
+        "PermissionError: [Errno 1] Operation not permitted (test_runner.py:"
+    )

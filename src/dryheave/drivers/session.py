@@ -177,9 +177,18 @@ class DriverSession:
             blocked = self._blocked(screen)
             if blocked is not None:
                 return blocked
-            if composer(self.agent, screen) != "":
+            current = composer(self.agent, screen)
+            if current is None:
                 return self._observation(
-                    "partial_input", "Composer already contains text; delivery stopped."
+                    "unsupported",
+                    "Native composer was not observed; delivery stopped.",
+                    screen.text,
+                )
+            if current and self.agent != AgentKind.CLAUDE:
+                return self._observation(
+                    "partial_input",
+                    "Composer already contains text; delivery stopped.",
+                    screen.text,
                 )
             self.terminal.paste(self.prompt)
             verification = self._verify_composer(self.prompt)
@@ -194,6 +203,7 @@ class DriverSession:
 
     def _verify_composer(self, prompt: str) -> Observation | None:
         deadline = min(self.deadline, time.monotonic() + self.limits.command_seconds)
+        screen = None
         while time.monotonic() < deadline and self.polls < self.limits.max_polls:
             self.polls += 1
             screen = self.terminal.state()
@@ -206,6 +216,7 @@ class DriverSession:
         return self._observation(
             "partial_input",
             "Exact composer content was not observed within bounds; Enter was not sent.",
+            "" if screen is None else screen.text,
         )
 
     def reconcile(self, *, wait: bool = False) -> Observation:
@@ -293,19 +304,20 @@ class DriverSession:
             }
         )
 
-    def _observation(self, state: str, reason: str) -> Observation:
+    def _observation(self, state: str, reason: str, text: str = "") -> Observation:
         return Observation.model_validate(
             {
                 "state": state,
                 "reason": reason,
                 "session_id": self.root_session_id,
                 "submission_id": self.submission.submission_id if self.submission else None,
+                "text": text,
             }
         )
 
     def _blocked(self, screen: Screen) -> Observation | None:
         if self.cancelled.is_set():
-            return self._observation("cancelled", "Controller cancellation requested.")
+            return self._observation("cancelled", "Controller cancellation requested.", screen.text)
         found = dialog(self.agent, screen)
         if found is not None:
             return found
@@ -315,7 +327,7 @@ class DriverSession:
                 completed
                 if completed.state in {"completed", "question", "cancelled"}
                 else self._observation(
-                    "exited", "Subject exited without matching completion evidence."
+                    "exited", "Subject exited without matching completion evidence.", screen.text
                 )
             )
         return None

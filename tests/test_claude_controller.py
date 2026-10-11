@@ -76,7 +76,7 @@ def fake_executable(
     return executable
 
 
-def invoke(tmp_path, recipe, request, *, cancelled=None, duration=3, **options):
+def invoke(tmp_path, recipe, request, *, cancelled=None, duration=BUDGET_SECONDS * 2, **options):
     identities = []
     context = CallContext(
         call_id="synthetic-call",
@@ -102,7 +102,7 @@ def invoke(tmp_path, recipe, request, *, cancelled=None, duration=3, **options):
 def test_synthetic_print_protocol_and_owned_runtime(store, benchmark, tmp_path):
     recipe = recipe_for(fake_executable(tmp_path))
     call, identities = invoke(tmp_path, recipe, request_for(store))
-    assert call.status == "completed"
+    assert call.status == "completed", call.error
     assert call.decision.text == "Use a comma after Hello."
     assert (
         call.usage.uncached_input,
@@ -136,7 +136,6 @@ def test_synthetic_print_protocol_and_owned_runtime(store, benchmark, tmp_path):
         {"structured_output": None, "result": '{"action":"stop","reason":"not structured"}'},
         {"subtype": "error_max_turns", "is_error": True, "errors": ["synthetic failure"]},
         {"stop_reason": "max_tokens"},
-        {"unrecognized_protocol_field": True},
         {"permission_denials": [{"tool_name": "Bash"}]},
     ],
 )
@@ -224,10 +223,22 @@ def test_prelaunch_failure_does_not_spawn_or_create_runtime(store, benchmark, tm
 
 
 @pytest.mark.integration
-def test_exact_version_mismatch_stops_before_model_call(store, benchmark, tmp_path):
+def test_changed_native_version_is_recorded_and_the_call_proceeds(store, benchmark, tmp_path):
+    call, _ = invoke(
+        tmp_path,
+        recipe_for(fake_executable(tmp_path, version="2.1.281 (Claude Code)")),
+        request_for(store),
+    )
+    assert call.status == "completed"
+    version = json.loads(next((tmp_path / "evidence").glob("*-version.json")).read_bytes())
+    assert version["stdout"] == "2.1.281 (Claude Code)\n"
+
+
+@pytest.mark.integration
+def test_unreported_version_stops_before_model_call(store, benchmark, tmp_path):
     call, identities = invoke(
         tmp_path,
-        recipe_for(fake_executable(tmp_path, version="2.1.263 (Claude Code)")),
+        recipe_for(fake_executable(tmp_path, version="Claude Code, version unknown")),
         request_for(store),
     )
     assert call.status == "failed"
@@ -268,6 +279,12 @@ def test_usage_model_is_observed_not_requested_and_ambiguous_models_stay_unknown
     assert (partial.uncached_input, partial.cache_write, partial.output) == (None, None, 4)
 
 
+def test_newer_result_fields_and_structured_output_tool_stop_are_accepted():
+    payload = json.loads(FIXTURE.read_bytes())
+    payload |= {"stop_reason": "tool_use", "terminal_reason": "completed", "ttft_ms": 2924}
+    assert json.loads(claude_payload(json.dumps(payload).encode())) == payload["structured_output"]
+
+
 def test_server_tools_violate_frozen_tool_disabled_policy():
     payload = json.loads(FIXTURE.read_bytes())
     payload["usage"]["server_tool_use"]["web_search_requests"] = 1
@@ -278,7 +295,6 @@ def test_server_tools_violate_frozen_tool_disabled_policy():
 @pytest.mark.parametrize(
     "changes",
     [
-        {"version": "2.1.263"},
         {"effort": "high"},
         {"runtime": ControllerRuntime()},
         {"runtime": {"discovery": "claude-tool-free-2.1.278", "sandbox": "read-only"}},

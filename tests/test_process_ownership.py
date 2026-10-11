@@ -125,3 +125,21 @@ def test_real_detached_writer_is_retained_and_stopped(tmp_path):
         if child is not None:
             with suppress(psutil.NoSuchProcess):
                 child.kill()
+
+
+def test_a_protected_child_limits_visibility_without_failing_the_scan(monkeypatch):
+    monkeypatch.setattr(psutil, "wait_procs", lambda processes, timeout: (processes, []))
+
+    class ProtectedProcess(FakeProcess):
+        def create_time(self):
+            raise PermissionError(1, "Operation not permitted")
+
+    visible = FakeProcess(pid=43)
+    parent = FakeProcess(children=(ProtectedProcess(pid=44), visible))
+    owner = ProcessOwner()
+    owner.add(parent)
+    owner.scan()
+    report = owner.stop(timeout=0.1, terminal_closed=True)
+    assert "process_visibility_denied" in report.errors
+    assert {item.pid for item in report.owned} == {42, 43}
+    assert visible.signals == ["terminate"]

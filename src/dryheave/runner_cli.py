@@ -16,7 +16,7 @@ from dryheave.experiments import (
 )
 from dryheave.native_recovery import cleanup_resolved
 from dryheave.runner import cancellation_signals, load_capture, run_experiment, run_status
-from dryheave.runner_models import RunOptions
+from dryheave.runner_models import RunOptions, RunSummary
 from dryheave.storage import ObjectStore
 from dryheave.workspaces import Workspace, resolve_transport, validate_runtime_root
 
@@ -92,32 +92,36 @@ def _run(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
         )
         if not args.assess:
             return summary.model_dump(mode="json")
-        run_id = summary.run_id
-        try:
-            if cancelled.is_set():
-                raise InputError("Capture was interrupted; assessment was not started.")
-            if (
-                summary.input_error
-                or summary.unstarted_trials
-                or any(
-                    state.capture_id is None or state.capture_error for state in summary.attempts
-                )
-            ):
-                raise InputError("Capture is incomplete; reconcile execution before assessment.")
-            for state in summary.attempts:
-                if state.capture_id is not None and not cleanup_resolved(
-                    load_capture(store, state.capture_id).cleanup
-                ):
-                    raise InputError("Owned cleanup is unresolved; assessment was not started.")
-            assessments = assess_run(store, run_id, cancelled=cancelled)
-        except (DryheaveError, OSError, KeyboardInterrupt) as error:
-            raise InputError(
-                f"Run {run_id} retains its evidence. {str(error) or 'Assessment interrupted.'} "
-                f"Use dryheave run --resume {run_id} to reconcile execution, or dryheave assess {run_id} for separate assessment."
-            ) from error
-        return run_status(store, run_id).model_dump(mode="json") | {
+        assessments = assess_captured_run(store, summary, cancelled)
+        return run_status(store, summary.run_id).model_dump(mode="json") | {
             "assessments": list(assessments)
         }
+
+
+def assess_captured_run(
+    store: ObjectStore, summary: RunSummary, cancelled: Event
+) -> tuple[str, ...]:
+    run_id = summary.run_id
+    try:
+        if cancelled.is_set():
+            raise InputError("Capture was interrupted; assessment was not started.")
+        if (
+            summary.input_error
+            or summary.unstarted_trials
+            or any(state.capture_id is None or state.capture_error for state in summary.attempts)
+        ):
+            raise InputError("Capture is incomplete; reconcile execution before assessment.")
+        for state in summary.attempts:
+            if state.capture_id is not None and not cleanup_resolved(
+                load_capture(store, state.capture_id).cleanup
+            ):
+                raise InputError("Owned cleanup is unresolved; assessment was not started.")
+        return assess_run(store, run_id, cancelled=cancelled)
+    except (DryheaveError, OSError, KeyboardInterrupt) as error:
+        raise InputError(
+            f"Run {run_id} retains its evidence. {str(error) or 'Assessment interrupted.'} "
+            f"Use dryheave run --resume {run_id} to reconcile execution, or dryheave assess {run_id} for separate assessment."
+        ) from error
 
 
 def _capture(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:

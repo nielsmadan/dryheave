@@ -37,7 +37,8 @@ class CommandResult:
 
 
 def _stop(process: subprocess.Popen[bytes]) -> None:
-    with suppress(ProcessLookupError):
+    # macOS reports EPERM, not ESRCH, when every process in the group is already a zombie.
+    with suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGKILL)
     process.wait()
 

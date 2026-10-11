@@ -102,6 +102,46 @@ def test_sidechain_tool_stop_and_hook_continuation_cannot_complete_human_turn():
     assert adapter.feed({"type": "system", "subtype": "turn_duration", "sessionId": "root"}) == ()
 
 
+def test_session_is_described_by_the_first_record_with_a_cwd():
+    adapter = ClaudeAdapter()
+    assert adapter.feed({"type": "last-prompt", "sessionId": "root"}) == ()
+    events = adapter.feed(human(version="2.1.281"))
+    assert [event.kind for event in events] == ["metadata", "accepted", "started"]
+    assert events[0].data == {"cwd": "/fixture", "version": "2.1.281"}
+    assert [event.kind for event in adapter.feed(human("later"))] == ["accepted", "started"]
+
+
+def test_attachments_between_prompt_and_answer_keep_the_turn_linked():
+    adapter = ClaudeAdapter()
+    adapter.feed(human())
+    adapter.feed(
+        {"type": "attachment", "uuid": "context", "parentUuid": "human", "sessionId": "root"}
+    )
+    events = adapter.feed(assistant(parentUuid="context"))
+    assert [(event.kind, event.turn_id) for event in events] == [("assistant", "human")]
+    adapter.feed({"type": "system", "subtype": "stop_hook_summary", "sessionId": "root"})
+    completed = adapter.feed({"type": "system", "subtype": "turn_duration", "sessionId": "root"})
+    assert [(event.kind, event.turn_id) for event in completed] == [("completed", "human")]
+
+
+def test_stop_hooks_that_let_the_turn_end_do_not_block_completion():
+    adapter = ClaudeAdapter()
+    adapter.feed(human())
+    adapter.feed(assistant())
+    summary = {
+        "type": "system",
+        "subtype": "stop_hook_summary",
+        "sessionId": "root",
+        "hookCount": 2,
+        "hookErrors": [],
+        "preventedContinuation": False,
+        "stopReason": "",
+    }
+    assert [event.kind for event in adapter.feed(summary)] == ["hook"]
+    completed = adapter.feed({"type": "system", "subtype": "turn_duration", "sessionId": "root"})
+    assert [(event.kind, event.turn_id) for event in completed] == [("completed", "human")]
+
+
 @pytest.mark.parametrize("partial,hook", [(False, False), (True, False), (False, True)])
 def test_synthetic_278_composer_paste_and_linked_lifecycle(tmp_path, driver_plan, partial, hook):
     from dryheave.drivers.artifacts import ArtifactWriter
@@ -155,7 +195,7 @@ def test_synthetic_278_composer_paste_and_linked_lifecycle(tmp_path, driver_plan
         intent = session.prepare(prompt)
         source.batches.extend([[], events])
         result = session.deliver(intent)
-        assert result.state == ("partial_input" if partial else "timeout" if hook else "question")
+        assert result.state == ("partial_input" if partial else "question")
         assert terminal.pastes == [prompt]
         assert terminal.enters == (0 if partial else 1)
         if not partial:
