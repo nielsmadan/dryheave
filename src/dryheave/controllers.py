@@ -34,6 +34,7 @@ from dryheave.controller_schema import controller_schema
 from dryheave.controller_watch import (
     CONTROLLER_LIMIT_ERRORS,
     MAX_CONTROLLER_FILES,
+    MAX_RUNTIME_BYTES,
     MAX_RUNTIME_FILES,
     ControllerWatch,
 )
@@ -174,17 +175,12 @@ def screen_projection(
 def screen_answer(decision: SimulatorDecision) -> bool:
     if decision.screen_kind == "question":
         return (
-            decision.action == "reply"
-            and decision.screen_action is not None
+            decision.screen_action is not None
             and not (decision.screen_action.text or "").lstrip()[:1].isdigit()
             and not decision.text
             and not decision.choices
         )
-    return (
-        decision.screen_kind is not None
-        and decision.action == "stop"
-        and decision.screen_action is None
-    )
+    return decision.screen_kind is not None and decision.screen_action is None
 
 
 def decision_schema(*, screen: bool) -> dict[str, JsonValue]:
@@ -573,7 +569,9 @@ def run_role_command(
     watch = ControllerWatch(
         (artifacts.root,) if runtime_root is None else (artifacts.root, runtime_root),
         context.cancelled,
-        max_bytes=recipe.budget.max_input_bytes + 8 * recipe.budget.max_output_bytes,
+        max_bytes=recipe.budget.max_input_bytes
+        + 8 * recipe.budget.max_output_bytes
+        + (0 if runtime_root is None else MAX_RUNTIME_BYTES),
         max_files=MAX_CONTROLLER_FILES if runtime_root is None else MAX_RUNTIME_FILES,
         output_bytes=recipe.budget.max_output_bytes,
         owned_symlinks={

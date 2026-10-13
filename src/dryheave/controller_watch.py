@@ -10,6 +10,7 @@ from dryheave.filesystem import directory_fd
 MAX_CONTROLLER_DEPTH = 16
 MAX_CONTROLLER_FILES = 256
 MAX_RUNTIME_FILES = 4096
+MAX_RUNTIME_BYTES = 64 * 1024 * 1024
 FILE_LIMIT = "controller_file_limit"
 DEPTH_LIMIT = "controller_file_depth"
 RESPONSE_FILE_LIMIT = "controller_response_file_limit"

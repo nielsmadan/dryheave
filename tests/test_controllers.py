@@ -575,7 +575,7 @@ def test_the_decision_schema_has_screen_fields_only_for_screen_requests():
             False,
         ),
         (screen_reply(key="Enter").model_copy(update={"choices": ("Fix all",)}), False),
-        (screen_reply(key="Down").model_copy(update={"action": "stop"}), False),
+        (screen_reply(key="1").model_copy(update={"action": "stop"}), True),
         (screen_reply(key="Down").model_copy(update={"screen_kind": "busy"}), False),
     ],
 )

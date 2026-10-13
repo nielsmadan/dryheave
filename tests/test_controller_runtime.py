@@ -140,6 +140,7 @@ def test_runtime_limits_cancel_controller_and_child_and_remove_auth_binding(
     store, benchmark, tmp_path, monkeypatch, mutation, expected
 ):
     monkeypatch.setattr("dryheave.controllers.MAX_RUNTIME_FILES", 256)
+    monkeypatch.setattr("dryheave.controllers.MAX_RUNTIME_BYTES", 0)
     child = (
         "import os,pathlib,time\n"
         "pathlib.Path('child.pid').write_text(str(os.getpid()))\n"
@@ -198,12 +199,19 @@ def test_runtime_limits_cancel_controller_and_child_and_remove_auth_binding(
 
 
 @pytest.mark.integration
-def test_a_burst_of_runtime_files_below_the_runtime_limit_completes(store, benchmark, tmp_path):
+@pytest.mark.parametrize(
+    "state",
+    [
+        "[pathlib.Path(os.environ['TMPDIR'], str(i)).mkdir() for i in range(300)]",
+        "pathlib.Path(os.environ['CODEX_HOME'], 'cache.json').write_bytes(b'x' * 3000000)",
+    ],
+)
+def test_native_state_below_the_runtime_limits_completes(store, benchmark, tmp_path, state):
     script = tmp_path / "synthetic-codex.py"
     script.write_text(
         "import json,os,pathlib,sys\n"
         "if sys.argv[-1]=='--version':\n    print('codex-cli 0.154.0')\n    raise SystemExit(0)\n"
-        "[pathlib.Path(os.environ['TMPDIR'], str(i)).mkdir() for i in range(300)]\n"
+        f"{state}\n"
         "argv=sys.argv\n"
         "json.load(sys.stdin)\n"
         "pathlib.Path(argv[argv.index('--output-last-message')+1]).write_text(json.dumps({'action':'stop','text':'','fact_ids':[],'reason':'Synthetic fixture'}))\n"
