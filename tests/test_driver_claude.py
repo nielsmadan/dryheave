@@ -316,3 +316,223 @@ def test_local_command_output_without_a_tracked_parent_turn_is_unsupported():
 def test_text_that_only_mentions_command_tags_is_accepted_verbatim(content):
     events = ClaudeAdapter().feed(human(message={"role": "user", "content": content}))
     assert (events[1].kind, events[1].text, events[1].data) == ("accepted", content, {})
+
+
+def background_launch(tool, task, *, parent="human", uuid="launch"):
+    result = (
+        {"isAsync": True, "status": "async_launched", "agentId": task}
+        if tool == "Agent"
+        else {"stdout": "", "stderr": "", "interrupted": False, "backgroundTaskId": task}
+    )
+    return [
+        {
+            "type": "assistant",
+            "uuid": uuid,
+            "parentUuid": parent,
+            "sessionId": "root",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"use-{task}",
+                        "name": tool,
+                        "input": {"run_in_background": True},
+                    }
+                ],
+                "stop_reason": "tool_use",
+            },
+        },
+        {
+            "type": "user",
+            "uuid": f"{uuid}-result",
+            "parentUuid": uuid,
+            "sessionId": "root",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": f"use-{task}", "content": "Started."}
+                ],
+            },
+            "toolUseResult": result,
+        },
+    ]
+
+
+def turn_end(parent, text, *, uuid, pending=None):
+    duration = {"type": "system", "subtype": "turn_duration", "uuid": f"{uuid}-duration"}
+    if pending is not None:
+        duration["pendingBackgroundAgentCount"] = pending
+    return [
+        assistant(
+            uuid=uuid,
+            parentUuid=parent,
+            message={
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+                "stop_reason": "end_turn",
+            },
+        ),
+        {
+            "type": "system",
+            "subtype": "stop_hook_summary",
+            "uuid": f"{uuid}-hooks",
+            "parentUuid": uuid,
+            "sessionId": "root",
+            "preventedContinuation": False,
+        },
+        {**duration, "parentUuid": f"{uuid}-hooks", "sessionId": "root"},
+    ]
+
+
+def notification_text(task, *, tool_use=True, status="completed"):
+    use = f"<tool-use-id>use-{task}</tool-use-id>\n" if tool_use else ""
+    return (
+        f"<task-notification>\n<task-id>{task}</task-id>\n{use}"
+        f"<status>{status}</status>\n<summary>Task finished</summary>\n</task-notification>"
+    )
+
+
+def notification(task, parent, *, uuid="notified", content=None):
+    return {
+        "type": "user",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": "root",
+        "message": {"role": "user", "content": content or notification_text(task)},
+        "origin": {"kind": "task-notification", "producer": "session-task"},
+        "promptSource": "system",
+        "turnOrigin": "task_notification",
+    }
+
+
+def queued_notification(task, parent, *, uuid="queued"):
+    return {
+        "type": "attachment",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": "root",
+        "attachment": {
+            "type": "queued_command",
+            "prompt": notification_text(task),
+            "commandMode": "task-notification",
+            "origin": {"kind": "task-notification", "producer": "session-task"},
+        },
+    }
+
+
+def lifecycle(adapter, records):
+    return [
+        (event.kind, event.turn_id, event.text)
+        for record in records
+        for event in adapter.feed(record)
+        if event.kind in {"accepted", "started", "assistant", "completed"}
+    ]
+
+
+@pytest.mark.parametrize(("tool", "pending"), [("Agent", 1), ("Bash", None)])
+def test_background_work_keeps_the_turn_open_until_claude_continues_and_ends(tool, pending):
+    adapter = ClaudeAdapter()
+    adapter.feed(human())
+    waiting = lifecycle(
+        adapter,
+        [
+            *background_launch(tool, "task-1"),
+            *turn_end("launch-result", "Review running.", uuid="first", pending=pending),
+        ],
+    )
+    assert waiting == [("assistant", "human", "Review running.")]
+    continued = lifecycle(
+        adapter,
+        [
+            notification("task-1", "first-duration"),
+            *turn_end("notified", "Review found nothing.", uuid="second"),
+        ],
+    )
+    assert continued == [
+        ("assistant", "human", "Review found nothing."),
+        ("completed", "human", ""),
+    ]
+
+
+def test_completion_waits_for_every_outstanding_background_task():
+    adapter = ClaudeAdapter()
+    adapter.feed(human())
+    records = [
+        *background_launch("Agent", "agent-1"),
+        *background_launch("Bash", "shell-1", parent="launch-result", uuid="shell"),
+        *turn_end("shell-result", "Both running.", uuid="first", pending=1),
+        notification("agent-1", "first-duration"),
+        *turn_end("notified", "Agent done; shell still running.", uuid="second"),
+    ]
+    assert [kind for kind, _, _ in lifecycle(adapter, records)] == ["assistant", "assistant"]
+    finished = lifecycle(
+        adapter,
+        [
+            notification("shell-1", "second-duration", uuid="notified-again"),
+            *turn_end("notified-again", "All done.", uuid="third"),
+        ],
+    )
+    assert finished == [("assistant", "human", "All done."), ("completed", "human", "")]
+
+
+def test_a_task_notification_is_never_accepted_as_human_input():
+    adapter = ClaudeAdapter()
+    adapter.feed(human())
+    for record in [
+        *background_launch("Bash", "shell-1"),
+        *turn_end("launch-result", "Running.", uuid="first"),
+    ]:
+        adapter.feed(record)
+    events = adapter.feed(notification("shell-1", "first-duration"))
+    assert (events, adapter.turn_id, adapter.background) == ((), "human", {})
+
+
+def test_a_notification_delivered_mid_turn_lets_that_turn_complete():
+    adapter = ClaudeAdapter()
+    adapter.feed(human())
+    records = [
+        *background_launch("Agent", "agent-1"),
+        queued_notification("agent-1", "launch-result"),
+        *turn_end("queued", "Agent reported back.", uuid="first"),
+    ]
+    assert lifecycle(adapter, records)[-1] == ("completed", "human", "")
+
+
+def test_a_notification_without_a_task_id_is_matched_by_its_tool_use():
+    adapter = ClaudeAdapter()
+    adapter.feed(human())
+    for record in [
+        *background_launch("Bash", "shell-1"),
+        *turn_end("launch-result", "Running.", uuid="first"),
+    ]:
+        adapter.feed(record)
+    content = notification_text("shell-1").replace("<task-id>shell-1</task-id>\n", "")
+    adapter.feed(notification("shell-1", "first-duration", content=content))
+    finished = lifecycle(adapter, turn_end("notified", "Done.", uuid="second"))
+    assert finished[-1] == ("completed", "human", "")
+
+
+def test_a_stopped_background_task_is_no_longer_outstanding():
+    adapter = ClaudeAdapter()
+    adapter.feed(human())
+    stop = {
+        "type": "user",
+        "uuid": "stopped",
+        "parentUuid": "launch-result",
+        "sessionId": "root",
+        "message": {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "stop", "content": "Stopped."}],
+        },
+        "toolUseResult": {"message": "Stopped", "task_id": "shell-1", "task_type": "local_bash"},
+    }
+    records = [*background_launch("Bash", "shell-1"), stop, *turn_end("stopped", "Ok.", uuid="end")]
+    assert lifecycle(adapter, records)[-1] == ("completed", "human", "")
+
+
+def test_claude_reported_pending_agents_hold_completion_without_a_tracked_launch():
+    adapter = ClaudeAdapter()
+    adapter.feed(human())
+    waiting = lifecycle(adapter, turn_end("human", "Waiting on agents.", uuid="first", pending=2))
+    assert waiting == [("assistant", "human", "Waiting on agents.")]

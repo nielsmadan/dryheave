@@ -29,6 +29,7 @@ from dryheave.controller_models import (
     RoleCall,
     SimulatorDecision,
 )
+from dryheave.controller_watch import LIMIT_ERRORS
 from dryheave.controllers import (
     CallContext,
     dialog_projection,
@@ -108,7 +109,11 @@ def _combine_cleanup(*reports: CleanupReport) -> CleanupReport:
         logs_drained=all(report.logs_drained for report in reports),
         owned=tuple(owned.values()),
         survivors=tuple(survivors.values()),
-        errors=tuple(dict.fromkeys(error for report in reports for error in report.errors)),
+        errors=tuple(
+            dict.fromkeys(
+                error for report in reports for error in report.errors if error not in LIMIT_ERRORS
+            )
+        ),
         coverage="fixture"
         if all(report.coverage == "fixture" for report in reports)
         else "partial-native",

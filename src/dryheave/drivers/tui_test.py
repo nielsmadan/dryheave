@@ -235,7 +235,10 @@ class TuiTestTerminal:
             raise
 
     def state(self) -> Screen:
-        data = self._call("state")
+        try:
+            data = self._call("state")
+        except DeliveryUncertain:
+            data = self._call("state")
         if (
             not isinstance(data.get("text"), str)
             or (data.get("exited") is not None and type(data.get("exited")) is not int)
@@ -328,24 +331,42 @@ class TuiTestTerminal:
         with suppress(LimitError):
             self.owner.scan()
         if self.started:
-            try:
-                status = self._call("daemon", "status", cleanup=True)
-                if status.get("running"):
-                    self._verify_daemon(status)
-                    self._call("close", cleanup=True)
-                terminal_closed = (
-                    self._call("daemon", "status", cleanup=True).get("running") is False
-                )
-            except (TransportError, InputError, OSError):
-                errors.append("terminal_close_failed")
+            terminal_closed = self._close_daemon() or self._close_daemon()
         report = self.owner.stop(
             timeout=self.limits.cleanup_seconds, terminal_closed=terminal_closed
         )
+        if not terminal_closed and self._daemon_gone():
+            report = report.model_copy(update={"terminal_closed": True})
+        elif not terminal_closed and self.started:
+            errors.append("terminal_close_failed")
         report = report.model_copy(update={"errors": report.errors + tuple(errors)})
         self.closed = report
         with suppress(LimitError, OSError):
             self.artifacts.record("cleanup", report)
         return report
+
+    def _close_daemon(self) -> bool:
+        try:
+            status = self._call("daemon", "status", cleanup=True)
+            if status.get("running"):
+                self._verify_daemon(status)
+                self._call("close", cleanup=True)
+            return self._call("daemon", "status", cleanup=True).get("running") is False
+        except (TransportError, InputError, OSError):
+            return False
+
+    def _daemon_gone(self) -> bool:
+        if self.daemon_identity is None:
+            return False
+        try:
+            return (
+                psutil.Process(self.daemon_identity.pid).create_time()
+                != self.daemon_identity.created
+            )
+        except psutil.NoSuchProcess:
+            return True
+        except psutil.Error:
+            return False
 
     def _verify_daemon(self, status: dict[str, JsonValue]) -> None:
         pid = status.get("pid")

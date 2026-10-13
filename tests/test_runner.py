@@ -1389,3 +1389,27 @@ def test_a_startup_trust_prompt_never_reaches_the_simulator(store, benchmark, mo
     capture = load_capture(store, result.pending_assessment[0])
     assert (capture.stop_reason, capture.last_observation.state) == ("needs_input", "approval")
     assert (capture.controller_calls, terminals[0].keys, terminals[0].pastes) == ((), [], [])
+
+
+def test_attempt_cleanup_drops_a_recovered_call_limit_but_keeps_real_cleanup_errors():
+    from dryheave.drivers.models import CleanupReport
+    from dryheave.runner_attempt import _combine_cleanup
+
+    def report(*errors: str, stopped: bool = True) -> CleanupReport:
+        return CleanupReport(
+            terminal_closed=True,
+            known_writers_stopped=stopped,
+            logs_drained=True,
+            owned=(),
+            survivors=(),
+            errors=errors,
+            coverage="partial-native",
+        )
+
+    combined = _combine_cleanup(
+        report(), report("controller_file_limit"), report("runtime_binding_cleanup_failed")
+    )
+    assert combined.errors == ("runtime_binding_cleanup_failed",)
+    assert combined.known_writers_stopped
+    unstopped = _combine_cleanup(report(), report("controller_file_limit", stopped=False))
+    assert (unstopped.errors, unstopped.known_writers_stopped) == ((), False)

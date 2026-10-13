@@ -201,6 +201,11 @@ and retain their historical projection.
 
 Call time includes native controller startup. Commands, pipes, schema/output
 files, role-directory size/count/depth and known process cleanup are bounded.
+A native role runtime may hold up to 4096 entries (its own Claude or Codex state);
+other controller directories up to 256. A call stopped by one of these limits records
+the limit on that call; the attempt's merged cleanup keeps only errors that leave
+cleanup unresolved. A terminal close is retried once, and a close whose
+acknowledgement is lost still counts once the daemon process is confirmed gone.
 The subject's overall deadline covers all simulator time, with independent role
 call/count/total budgets. A parent deadline can end a call before its own budget.
 SIGINT and SIGTERM request cancellation and cleanup. No new subject input follows

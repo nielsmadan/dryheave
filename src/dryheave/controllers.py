@@ -28,7 +28,7 @@ from dryheave.controller_models import (
 )
 from dryheave.controller_runtime import prepare_runtime
 from dryheave.controller_schema import controller_schema
-from dryheave.controller_watch import ControllerWatch
+from dryheave.controller_watch import MAX_CONTROLLER_FILES, MAX_RUNTIME_FILES, ControllerWatch
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.models import CleanupReport, DialogSelection, ProcessIdentity
 from dryheave.errors import DryheaveError, InputError
@@ -490,6 +490,9 @@ def run_role_command(
         else artifacts.root,
         context.cancelled,
         max_bytes=recipe.budget.max_input_bytes + 8 * recipe.budget.max_output_bytes,
+        max_files=MAX_RUNTIME_FILES
+        if recipe.runtime is not None and context.runtime_root is not None
+        else MAX_CONTROLLER_FILES,
         output_bytes=recipe.budget.max_output_bytes,
         owned_symlinks={
             Path(bindings.plan.config_roots["config"]) / name: identity

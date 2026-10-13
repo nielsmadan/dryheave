@@ -45,7 +45,7 @@ from dryheave.serialization import canonical_json, digest
 from dryheave.storage import ObjectStore
 
 
-def _finite_float(value: float | int) -> float | None:
+def _finite_float(value: float) -> float | None:
     try:
         converted = float(value)
     except OverflowError:

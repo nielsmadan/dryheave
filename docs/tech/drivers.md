@@ -102,6 +102,21 @@ pending completion until later native evidence establishes another terminal
 response. This deliberately conservative contract can stop unsupported Claude
 versions rather than claiming their turns completed.
 
+Background work also holds completion. Claude 2.1.2xx records a background launch
+as the tool result's `toolUseResult`: `isAsync: true` with `agentId` for Agent,
+`backgroundTaskId` for Bash, and `resumedAgentId` for a SendMessage resume. A
+TaskStop result (`task_id` with `task_type`) ends that task. When a task finishes
+during a turn, Claude records a `queued_command` attachment whose `commandMode` is
+`task-notification`. After a turn end it instead writes a non-meta user record of
+`<task-notification>` blocks (`origin.kind` `task-notification`) parented on the
+`turn_duration` record, then continues without user input. Each block names its
+`<task-id>`, and usually its launching `<tool-use-id>`. The adapter tracks
+outstanding task IDs for the session. A `turn_duration` completes the turn only
+when none remain and its `pendingBackgroundAgentCount` is absent or zero; that
+count covers agents only. Notification records are never human acceptance: they
+and the continuation they start stay in the same turn, so the turn completes once
+when Claude ends a turn with nothing outstanding, or reaches the driver timeout.
+
 Curated Claude slash commands are typed like other Claude input. Claude 2.1.296
 shows its command menu above the composer, highlighting one `❯ /name` entry, and
 closes it once arguments are typed. Enter is sent only when the highlighted entry is

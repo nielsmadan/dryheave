@@ -494,8 +494,10 @@ def test_launch_check_reports_a_lost_probe_acknowledgement_as_unsupported(
     assert terminal.limits.duration_seconds == bench.LAUNCH_CHECK_SECONDS == 180
     assert (observation.state, observation.reason, observation.text) == (
         "unsupported",
-        "The typing probe lost its terminal acknowledgement: "
-        "Terminal command ended without a delivery acknowledgement.",
+        (
+            "The typing probe lost its terminal acknowledgement: "
+            "Terminal command ended without a delivery acknowledgement."
+        ),
         "> ",
     )
 
@@ -557,8 +559,10 @@ def test_launch_check_fails_a_workflow_command_the_menu_does_not_highlight(
     )
     assert (observation.state, observation.reason) == (
         "unsupported",
-        f"Workflow command {command!r} was not ready to submit as typed; "
-        "check that Claude's command menu offers it.",
+        (
+            f"Workflow command {command!r} was not ready to submit as typed; "
+            "check that Claude's command menu offers it."
+        ),
     )
     assert (terminal.pastes[-1], terminal.enters) == (command, 0)
 

@@ -276,7 +276,7 @@ def test_claude_command_menu_highlighting_another_command_blocks_submission(belo
 
 def test_claude_command_menu_without_a_match_blocks_submission():
     screen = Screen(
-        text="\n".join(['  No commands match "/zzqq"', RULE, "\u276f /zzqq", RULE, FOOTER]),
+        text=f'  No commands match "/zzqq"\n{RULE}\n\u276f /zzqq\n{RULE}\n{FOOTER}',
         exited=None,
         cursor={"x": 7, "y": 2},
     )
@@ -292,7 +292,7 @@ def test_claude_closed_command_menu_submits_only_a_command_with_arguments():
         cursor={"x": 2 + len(typed), "y": 1},
     )
     bare = Screen(
-        text="\n".join([RULE, "\u276f /code-review", RULE, FOOTER]),
+        text=f"{RULE}\n\u276f /code-review\n{RULE}\n{FOOTER}",
         exited=None,
         cursor={"x": 14, "y": 1},
     )
@@ -304,7 +304,7 @@ def test_claude_closed_command_menu_submits_only_a_command_with_arguments():
 def test_command_like_transcript_rows_away_from_the_composer_are_not_a_menu():
     history = "  \u276f /usr/bin/env  python\n    /etc/hosts  entries\n\n"
     screen = Screen(
-        text=history + "\n".join([RULE, "\u276f /code-review --quick", RULE, FOOTER]),
+        text=history + f"{RULE}\n\u276f /code-review --quick\n{RULE}\n{FOOTER}",
         exited=None,
         cursor={"x": 22, "y": 4},
     )

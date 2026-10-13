@@ -114,7 +114,7 @@ class MetricValue(StrictModel):
     @classmethod
     def scalar_value(cls, value: object) -> object:
         if not isinstance(value, int | float | bool | str):
-            raise ValueError("metric value must be a number, boolean or string")
+            raise ValueError("metric value must be a number, boolean or string")  # noqa: TRY004
         if isinstance(value, str) and len(value) > MAX_METRIC_TEXT:
             raise ValueError(f"metric string value exceeds {MAX_METRIC_TEXT} characters")
         return value

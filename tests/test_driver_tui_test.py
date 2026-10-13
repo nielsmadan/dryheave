@@ -1,10 +1,12 @@
 import json
+import sys
 from pathlib import Path
 
+import psutil
 import pytest
 
 from dryheave.drivers.base import DeliveryUncertain, TransportError
-from dryheave.drivers.models import DriverLimits
+from dryheave.drivers.models import DriverLimits, ProcessIdentity
 from dryheave.drivers.tui_test import TuiTestTerminal
 from dryheave.errors import InputError
 from dryheave.models import AgentKind
@@ -66,6 +68,30 @@ def test_a_lost_clear_line_acknowledgement_is_delivery_uncertain(tmp_path, monke
     monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
     with terminal(tmp_path, monkeypatch) as transport, pytest.raises(DeliveryUncertain):
         transport.clear_line()
+
+
+def test_a_timed_out_state_read_is_retried_once(tmp_path, monkeypatch):
+    outcomes = iter(["timeout", "exited"])
+    calls = []
+
+    def run(command, root, **kwargs):
+        calls.append(command.argv[-1])
+        payload = b'{"ok":true,"data":{"text":"ready","exited":null}}'
+        return CommandResult(command.argv, 0, payload, b"", next(outcomes))
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    with terminal(tmp_path, monkeypatch) as transport:
+        assert transport.state().text == "ready"
+    assert calls == ["state", "state"]
+
+
+def test_two_timed_out_state_reads_are_delivery_uncertain(tmp_path, monkeypatch):
+    def run(command, root, **kwargs):
+        return CommandResult(command.argv, -9, b"", b"", "timeout")
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    with terminal(tmp_path, monkeypatch) as transport, pytest.raises(DeliveryUncertain):
+        transport.state()
 
 
 def test_wrong_state_shape_and_control_input_fail(tmp_path, monkeypatch):
@@ -199,3 +225,57 @@ def test_dialog_keys_are_pressed_by_name_and_other_keys_are_refused(tmp_path, mo
 @pytest.mark.parametrize(("seconds", "polls"), [(180, 4000), (2400, 25000), (86400, 100000)])
 def test_poll_budget_scales_with_the_subject_time_budget(seconds, polls):
     assert DriverLimits.for_duration(seconds).max_polls == polls
+
+
+def _started(transport, pid, created):
+    transport.started = True
+    transport.daemon_identity = ProcessIdentity(pid=pid, created=created, parent_pid=1)
+
+
+def test_a_close_that_loses_its_acknowledgement_counts_once_the_daemon_is_gone(
+    tmp_path, monkeypatch
+):
+    def run(command, root, **kwargs):
+        return CommandResult(command.argv, -9, b"", b"", "timeout")
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    gone = psutil.Popen([sys.executable, "-c", "pass"])
+    created = gone.create_time()
+    gone.wait()
+    with terminal(tmp_path, monkeypatch) as transport:
+        _started(transport, gone.pid, created)
+        report = transport.close()
+    assert (report.terminal_closed, report.errors) == (True, ())
+
+
+def test_a_close_with_a_live_daemon_and_no_acknowledgement_fails(tmp_path, monkeypatch):
+    def run(command, root, **kwargs):
+        return CommandResult(command.argv, -9, b"", b"", "timeout")
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    live = psutil.Process()
+    with terminal(tmp_path, monkeypatch) as transport:
+        _started(transport, live.pid, live.create_time())
+        report = transport.close()
+    assert (report.terminal_closed, report.errors) == (False, ("terminal_close_failed",))
+
+
+def test_a_close_is_retried_once_before_it_fails(tmp_path, monkeypatch):
+    live = psutil.Process()
+    responses = iter(
+        [
+            ("timeout", b""),
+            ("exited", b'{"pid":null,"running":false,"session":"s"}'),
+            ("exited", b'{"pid":null,"running":false,"session":"s"}'),
+        ]
+    )
+
+    def run(command, root, **kwargs):
+        outcome, output = next(responses)
+        return CommandResult(command.argv, 3, output, b"", outcome)
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    with terminal(tmp_path, monkeypatch) as transport:
+        _started(transport, live.pid, live.create_time())
+        report = transport.close()
+    assert (report.terminal_closed, report.errors) == (True, ())

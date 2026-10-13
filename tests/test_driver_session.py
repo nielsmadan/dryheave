@@ -531,6 +531,137 @@ def test_claude_local_command_completes_its_own_turn_without_a_new_human_turn(
         assert (terminal.pastes, terminal.enters, session.accepted_count) == (["/model"], 1, 1)
 
 
+class ClaudePromptTerminal(FakeTerminal):
+    def __init__(self):
+        super().__init__([])
+        self.current = Screen(text="\u276f", exited=None)
+
+    def paste(self, text):
+        self.pastes.append(text)
+        self.current = Screen(text=f"\u276f {text}", exited=None)
+
+    def enter(self):
+        self.enters += 1
+        self.current = Screen(text="Working\n\u276f", exited=None)
+
+
+def claude_record(uuid, parent, role, content, **changes):
+    return {
+        "type": role,
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": "root",
+        "message": {"role": role, "content": content},
+        **changes,
+    }
+
+
+def claude_turn_end(uuid, parent, text):
+    answer = claude_record(uuid, parent, "assistant", [{"type": "text", "text": text}])
+    answer["message"]["stop_reason"] = "end_turn"
+    duration = {
+        "type": "system",
+        "subtype": "turn_duration",
+        "uuid": f"{uuid}-duration",
+        "parentUuid": uuid,
+        "sessionId": "root",
+    }
+    return [answer, duration]
+
+
+def claude_background_turn(plan, prompt):
+    adapter = ClaudeAdapter()
+    launch = [
+        claude_record("human", None, "user", prompt, cwd=plan.cwd),
+        claude_record(
+            "launch",
+            "human",
+            "assistant",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "use",
+                    "name": "Agent",
+                    "input": {"run_in_background": True},
+                }
+            ],
+        ),
+        claude_record(
+            "launched",
+            "launch",
+            "user",
+            [{"type": "tool_result", "tool_use_id": "use", "content": "Launched."}],
+            toolUseResult={"isAsync": True, "status": "async_launched", "agentId": "agent-1"},
+        ),
+        *claude_turn_end("waiting", "launched", "Review agent running."),
+    ]
+    notice = (
+        "<task-notification>\n<task-id>agent-1</task-id>\n<status>completed</status>\n"
+        "</task-notification>"
+    )
+    continuation = [
+        claude_record(
+            "notified",
+            "waiting-duration",
+            "user",
+            notice,
+            origin={"kind": "task-notification"},
+            turnOrigin="task_notification",
+        ),
+        *claude_turn_end("reported", "notified", "Review found one bug."),
+    ]
+    return (
+        [event for record in launch for event in adapter.feed(record)],
+        [event for record in continuation for event in adapter.feed(record)],
+    )
+
+
+def claude_session(tmp_path, plan, source, terminal):
+    return DriverSession(
+        terminal,
+        source,
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        agent=AgentKind.CLAUDE,
+        limits=DriverLimits(duration_seconds=2, max_polls=10, poll_seconds=0.01),
+    )
+
+
+def test_claude_turn_with_background_work_completes_after_the_automatic_continuation(
+    tmp_path, driver_plan
+):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal, source = ClaudePromptTerminal(), FakeEventSource([])
+    with claude_session(tmp_path, plan, source, terminal) as session:
+        assert session.start(plan, {}).state == "ready"
+        intent = session.prepare("Review this.")
+        launch, continuation = claude_background_turn(plan, "Review this.")
+        source.batches.extend([[], launch, [], continuation])
+        result = session.deliver(intent)
+        assert (result.state, result.turn_id, result.text) == (
+            "completed",
+            "human",
+            "Review agent running.\nReview found one bug.",
+        )
+        assert (terminal.enters, session.accepted_count) == (1, 1)
+        assert [event.kind for event in session.events].count("completed") == 1
+
+
+def test_claude_background_work_still_running_at_the_deadline_times_out(tmp_path, driver_plan):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal, source = ClaudePromptTerminal(), FakeEventSource([])
+    with claude_session(tmp_path, plan, source, terminal) as session:
+        assert session.start(plan, {}).state == "ready"
+        intent = session.prepare("Review this.")
+        launch, _continuation = claude_background_turn(plan, "Review this.")
+        source.batches.extend([[], launch])
+        result = session.deliver(intent)
+        assert (result.state, result.reason) == (
+            "timeout",
+            "Driver lifetime or polling limit reached.",
+        )
+        assert session.reconcile().state == "accepted"
+
+
 def test_claude_slash_command_is_not_entered_while_the_menu_highlights_another(
     tmp_path, driver_plan
 ):

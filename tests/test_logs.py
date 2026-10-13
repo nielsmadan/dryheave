@@ -390,8 +390,10 @@ def test_droid_harness_user_events_keep_a_recognizable_wrapper() -> None:
         event.text for event in session.events if event.kind == "user" and event.source_line < 5
     ] == [
         "<harness-event>SessionStart</harness-event>",
-        "<harness-event><system-reminder>\nCurrent date: 2026-09-20.\n</system-reminder>"
-        "</harness-event>",
+        (
+            "<harness-event><system-reminder>\nCurrent date: 2026-09-20.\n</system-reminder>"
+            "</harness-event>"
+        ),
         "Add a greeting command.",
     ]
     hook = session.events[0]

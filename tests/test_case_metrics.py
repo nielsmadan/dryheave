@@ -211,15 +211,19 @@ def test_script_output_file_becomes_metrics_and_logs_stay_evidence(tmp_path):
             "metrics output is not valid JSON",
         ),
         (
-            "import json, os\n"
-            'open(os.environ["DRYHEAVE_METRICS_OUTPUT"], "w").write(json.dumps('
-            '{"metrics": [{"metric_id": "t", "label": "T", "value": {"n": 1}}]}))\n',
+            (
+                "import json, os\n"
+                'open(os.environ["DRYHEAVE_METRICS_OUTPUT"], "w").write(json.dumps('
+                '{"metrics": [{"metric_id": "t", "label": "T", "value": {"n": 1}}]}))\n'
+            ),
             "metrics output violates the contract: metrics.0.value: Value error, metric value must",
         ),
         (
-            "import json, os\n"
-            'open(os.environ["DRYHEAVE_METRICS_OUTPUT"], "w").write(json.dumps({"metrics": []}))\n'
-            "raise SystemExit(2)\n",
+            (
+                "import json, os\n"
+                'open(os.environ["DRYHEAVE_METRICS_OUTPUT"], "w").write(json.dumps({"metrics": []}))\n'
+                "raise SystemExit(2)\n"
+            ),
             "metrics command exited with status 2",
         ),
         ('print("{}")\n', "metrics command did not write DRYHEAVE_METRICS_OUTPUT"),

@@ -137,8 +137,9 @@ def test_modern_codex_protocol_and_cleanup_are_versioned(store, benchmark, tmp_p
     ],
 )
 def test_runtime_limits_cancel_controller_and_child_and_remove_auth_binding(
-    store, benchmark, tmp_path, mutation, expected
+    store, benchmark, tmp_path, monkeypatch, mutation, expected
 ):
+    monkeypatch.setattr("dryheave.controllers.MAX_RUNTIME_FILES", 256)
     child = (
         "import os,pathlib,time\n"
         "pathlib.Path('child.pid').write_text(str(os.getpid()))\n"
@@ -194,3 +195,32 @@ def test_runtime_limits_cancel_controller_and_child_and_remove_auth_binding(
     assert not (runtime / "config/auth.json").is_symlink()
     cleanup = json.loads(next(writer.root.glob("*-cleanup.json")).read_bytes())
     assert cleanup == result.cleanup.model_dump(mode="json")
+
+
+@pytest.mark.integration
+def test_a_burst_of_runtime_files_below_the_runtime_limit_completes(store, benchmark, tmp_path):
+    script = tmp_path / "synthetic-codex.py"
+    script.write_text(
+        "import json,os,pathlib,sys\n"
+        "if sys.argv[-1]=='--version':\n    print('codex-cli 0.154.0')\n    raise SystemExit(0)\n"
+        "[pathlib.Path(os.environ['TMPDIR'], str(i)).mkdir() for i in range(300)]\n"
+        "argv=sys.argv\n"
+        "json.load(sys.stdin)\n"
+        "pathlib.Path(argv[argv.index('--output-last-message')+1]).write_text(json.dumps({'action':'stop','text':'','fact_ids':[],'reason':'Synthetic fixture'}))\n"
+        "print(json.dumps({'type':'turn.completed','usage':{'input_tokens':20,'cached_input_tokens':2,'output_tokens':7}}))\n"
+    )
+    recipe = codex_recipe((sys.executable, str(script)))
+    writer = ArtifactWriter(tmp_path / "evidence", 1000000)
+    context = CallContext(
+        call_id="codex-call",
+        index=0,
+        deadline=time.monotonic() + 15,
+        cancelled=threading.Event(),
+        inherited={"SYNTHETIC_AUTH_PATH": str(tmp_path / "opaque")},
+        on_identities=lambda _identities: None,
+        runtime_root=tmp_path / "roles/call",
+    )
+    result = invoke_controller(recipe, request_for(store), writer, context)
+    assert result.status == "completed"
+    assert result.cleanup is not None
+    assert result.cleanup.errors == ()

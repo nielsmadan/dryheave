@@ -8,6 +8,16 @@ from dryheave.errors import DryheaveError
 from dryheave.filesystem import directory_fd
 
 MAX_CONTROLLER_DEPTH = 16
+MAX_CONTROLLER_FILES = 256
+MAX_RUNTIME_FILES = 4096
+LIMIT_ERRORS = frozenset(
+    {
+        "controller_file_limit",
+        "controller_file_depth",
+        "controller_response_file_limit",
+        "controller_special_file",
+    }
+)
 
 
 class ControllerWatch:
@@ -17,7 +27,7 @@ class ControllerWatch:
         parent_cancelled: threading.Event,
         *,
         max_bytes: int,
-        max_files: int = 256,
+        max_files: int = MAX_CONTROLLER_FILES,
         output_bytes: int = 65536,
         owned_symlinks: Mapping[Path, tuple[int, int, int]] | None = None,
     ) -> None:
