@@ -2,6 +2,7 @@ import json
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -18,14 +19,18 @@ from dryheave.controllers import (
     CallContext,
     _codex_usage,
     controller_command,
+    decision_schema,
     dialog_projection,
     dialog_selection,
     invoke_controller,
     native_decision,
+    screen_answer,
+    screen_projection,
     simulator_projection,
 )
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.models import DialogSelection
+from dryheave.errors import DryheaveError
 from dryheave.models import CommandSpec
 from dryheave.personas import load_frozen_persona
 from dryheave.serialization import canonical_json
@@ -493,3 +498,168 @@ def test_scripted_simulator_matches_the_dialog_question(store, benchmark, tmp_pa
     request = dialog_projection(request_for(store), AUTH_DIALOG, None, 128 * 1024)
     call, _ = invoke(recipe, request, tmp_path)
     assert (call.status, call.decision) == ("completed", decision)
+
+
+FIX_SCOPE = Path("tests/fixtures/claude-2.1.296-fix-scope.txt").read_text()
+
+
+def screen_reply(key=None, text=None, target="Fix all Should Fix"):
+    from dryheave.drivers.models import ScreenAction
+
+    return SimulatorDecision(
+        action="reply",
+        reason="Picking what this user wants.",
+        screen_kind="question",
+        screen_action=ScreenAction(key=key, text=text),
+        screen_target=target,
+    )
+
+
+def test_screen_projection_carries_the_screen_hint_and_screen_instruction(store, benchmark):
+    from dryheave.controller_models import SCREEN_INSTRUCTION
+
+    plain = request_for(store)
+    asked = screen_projection(plain, FIX_SCOPE + "   \n\n", "Fix everything.", 128 * 1024)
+    serialized = json.loads(canonical_json(asked))
+    assert serialized["screen"] == FIX_SCOPE.strip()
+    assert (asked.instruction, asked.answer_hint) == (SCREEN_INSTRUCTION, "Fix everything.")
+    assert "Never cancel or dismiss the screen" in asked.instruction
+    assert "dialog" not in serialized
+    assert asked.model_dump(exclude={"instruction", "screen", "answer_hint"}) == plain.model_dump(
+        exclude={"instruction"}
+    )
+    assert {"screen", "answer_hint"}.isdisjoint(json.loads(canonical_json(plain)))
+
+
+def test_screen_projection_keeps_the_bottom_of_the_screen_within_the_input_bound(store, benchmark):
+    request = request_for(store)
+    screen = "\n".join(f"scrollback line {index}" for index in range(2000)) + "\n" + FIX_SCOPE
+    limit = len(canonical_json(screen_projection(request, FIX_SCOPE, None, 1024 * 1024))) + 400
+    fitted = screen_projection(request, screen, None, limit)
+    assert len(canonical_json(fitted)) <= limit
+    assert fitted.screen.endswith(FIX_SCOPE.strip())
+    assert fitted.screen.startswith("scrollback line ")
+
+
+def test_the_decision_schema_has_screen_fields_only_for_screen_requests():
+    plain = decision_schema(screen=False)
+    assert plain["required"] == ["action", "text", "fact_ids", "reason", "stop_kind", "choices"]
+    assert "$defs" not in plain
+    screen = decision_schema(screen=True)
+    assert screen["required"][-3:] == ["screen_kind", "screen_action", "screen_target"]
+    action = screen["$defs"]["ScreenAction"]
+    assert (action["required"], action["additionalProperties"]) == (["key", "text"], False)
+    assert action["properties"]["key"]["anyOf"][0]["enum"] == [
+        "Up",
+        "Down",
+        "Space",
+        "Enter",
+        *"123456789",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("decision", "valid"),
+    [
+        (screen_reply(key="Enter"), True),
+        (screen_reply(text="Only the prefix bug"), True),
+        (screen_reply(text="2 files only"), False),
+        (screen_reply(text=" 3"), False),
+        (SimulatorDecision(action="stop", reason="Still working.", screen_kind="busy"), True),
+        (SimulatorDecision(action="stop", reason="A permission.", screen_kind="approval"), True),
+        (SimulatorDecision(action="stop", reason="No screen judgement."), False),
+        (
+            SimulatorDecision(
+                action="reply", text="Fix all", reason="Text.", screen_kind="question"
+            ),
+            False,
+        ),
+        (screen_reply(key="Enter").model_copy(update={"choices": ("Fix all",)}), False),
+        (screen_reply(key="Down").model_copy(update={"action": "stop"}), False),
+        (screen_reply(key="Down").model_copy(update={"screen_kind": "busy"}), False),
+    ],
+)
+def test_screen_answers_need_one_action_for_a_question_and_none_otherwise(decision, valid):
+    assert screen_answer(decision) is valid
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"key": "Escape"},
+        {"key": "Tab"},
+        {"key": "Down", "text": "Fix"},
+        {},
+        {"text": "Fix\nall"},
+        {"text": "\x1b[B"},
+        {"text": "/clear"},
+        {"text": "x" * 2001},
+    ],
+)
+def test_screen_actions_are_one_allowed_key_or_one_bounded_line(action):
+    with pytest.raises(DryheaveError):
+        native_decision(
+            json.dumps(
+                {
+                    "action": "reply",
+                    "reason": "Pressing a key.",
+                    "screen_kind": "question",
+                    "screen_action": action,
+                }
+            ).encode()
+        )
+
+
+def test_screen_fields_are_dropped_from_serialization_when_absent():
+    reply = screen_reply(key="3")
+    assert json.loads(reply.model_dump_json())["screen_action"] == {"key": "3"}
+    plain = SimulatorDecision(action="reply", text="Use a comma.", reason="Answering.")
+    assert set(json.loads(plain.model_dump_json())) == {"action", "text", "fact_ids", "reason"}
+
+
+def test_scripted_simulator_matches_the_screen_text(store, benchmark, tmp_path):
+    from dryheave.controller_models import ScriptStep
+
+    decision = screen_reply(key="Enter")
+    recipe = ControllerRecipe(
+        script=(ScriptStep(match="contains", assistant="Apply fixes", decision=decision),)
+    )
+    request = screen_projection(request_for(store), FIX_SCOPE, None, 128 * 1024)
+    call, _ = invoke(recipe, request, tmp_path)
+    assert (call.status, call.decision) == ("completed", decision)
+
+
+@pytest.mark.integration
+def test_codex_receives_the_screen_schema_only_with_a_screen(store, benchmark, tmp_path):
+    script = tmp_path / "codex-fixture.py"
+    script.write_text("""import json,sys,pathlib
+if sys.argv[-1] == "--version":
+    print("codex-cli 0.153.4")
+    raise SystemExit(0)
+q = json.load(sys.stdin)
+schema = json.loads(pathlib.Path(sys.argv[sys.argv.index("--output-schema") + 1]).read_text())
+assert ("screen_action" in schema["required"]) == ("screen" in q)
+screen = {"screen_kind":"question","screen_action":{"key":"Enter","text":None},"screen_target":"Fix all Should Fix"}
+answer = {"action":"reply","text":"","fact_ids":[],"reason":"fixture","stop_kind":"done","choices":[],**screen} if "screen" in q else {"action":"reply","text":"Use a comma.","fact_ids":[],"reason":"fixture","stop_kind":"done","choices":[]}
+pathlib.Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text(json.dumps(answer))
+""")
+    recipe = ControllerRecipe(
+        kind="codex",
+        isolation="trusted-native",
+        command=CommandSpec(argv=(sys.executable, str(script))),
+        version="0.153.4",
+        model="fixture",
+        effort="high",
+    )
+    request = screen_projection(request_for(store), FIX_SCOPE, None, 128 * 1024)
+    result, _ = invoke(recipe, request, tmp_path / "screen")
+    assert (result.status, result.decision) == (
+        "completed",
+        screen_reply(key="Enter").model_copy(update={"reason": "fixture"}),
+    )
+    plain, _ = invoke(recipe, request_for(store), tmp_path / "plain")
+    assert (plain.status, plain.decision.text, plain.decision.screen_kind) == (
+        "completed",
+        "Use a comma.",
+        None,
+    )

@@ -861,6 +861,38 @@ def test_help_needed_excludes_fix_it_and_dialog_answer_simulator_calls(store, gr
     assert result.simulator_replies == baseline.simulator_replies + 1
 
 
+@pytest.mark.integration
+def test_help_needed_excludes_screen_steps_of_an_unanswered_screen(store, graded_benchmark):
+    from dryheave.assessments import _help_needed
+    from dryheave.controller_models import RoleCall, SimulatorDecision
+    from dryheave.drivers.models import ScreenAction
+
+    summary = run_experiment(
+        store,
+        create_experiment(store, graded_benchmark),
+        options=RunOptions(mode="offline-fixture"),
+    )
+    capture = load_capture(store, summary.pending_assessment[0])
+    case = load_frozen_case(store, capture.case_id)
+    baseline = _help_needed(capture, case)
+    screen_step = RoleCall(
+        call_id="screen-step",
+        role="simulator",
+        status="completed",
+        decision=SimulatorDecision(
+            action="reply",
+            reason="Moving to the option.",
+            screen_kind="question",
+            screen_action=ScreenAction(key="Down"),
+        ),
+    )
+    modified = capture.model_copy(
+        update={"controller_calls": (*capture.controller_calls, screen_step)}
+    )
+    result = _help_needed(modified, case)
+    assert (result.simulator_replies, baseline.simulator_replies) == (1, 1)
+
+
 def test_capture_case_reuses_the_trial_case_and_loads_only_a_different_one(store, monkeypatch):
     from dryheave import assessments
     from dryheave.assessment_inputs import AssessmentInputs

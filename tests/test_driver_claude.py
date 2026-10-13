@@ -318,12 +318,19 @@ def test_text_that_only_mentions_command_tags_is_accepted_verbatim(content):
     assert (events[1].kind, events[1].text, events[1].data) == ("accepted", content, {})
 
 
+LAUNCH_RESULTS = {
+    "Agent": lambda task: {"isAsync": True, "status": "async_launched", "agentId": task},
+    "Bash": lambda task: {
+        "stdout": "",
+        "stderr": "",
+        "interrupted": False,
+        "backgroundTaskId": task,
+    },
+    "Monitor": lambda task: {"taskId": task, "timeoutMs": 300000, "persistent": False},
+}
+
+
 def background_launch(tool, task, *, parent="human", uuid="launch"):
-    result = (
-        {"isAsync": True, "status": "async_launched", "agentId": task}
-        if tool == "Agent"
-        else {"stdout": "", "stderr": "", "interrupted": False, "backgroundTaskId": task}
-    )
     return [
         {
             "type": "assistant",
@@ -354,7 +361,7 @@ def background_launch(tool, task, *, parent="human", uuid="launch"):
                     {"type": "tool_result", "tool_use_id": f"use-{task}", "content": "Started."}
                 ],
             },
-            "toolUseResult": result,
+            "toolUseResult": LAUNCH_RESULTS[tool](task),
         },
     ]
 
@@ -385,11 +392,13 @@ def turn_end(parent, text, *, uuid, pending=None):
     ]
 
 
-def notification_text(task, *, tool_use=True, status="completed"):
-    use = f"<tool-use-id>use-{task}</tool-use-id>\n" if tool_use else ""
+def notification_text(*tasks, tool_use=True, status="completed"):
+    ids = "".join(f"<task-id>{task}</task-id>\n" for task in tasks)
+    use = f"<tool-use-id>use-{tasks[0]}</tool-use-id>\n" if tool_use else ""
+    state = f"<status>{status}</status>\n" if status else ""
     return (
-        f"<task-notification>\n<task-id>{task}</task-id>\n{use}"
-        f"<status>{status}</status>\n<summary>Task finished</summary>\n</task-notification>"
+        f"<task-notification>\n{ids}{use}{state}<summary>Task finished</summary>\n"
+        "</task-notification>"
     )
 
 
@@ -406,7 +415,7 @@ def notification(task, parent, *, uuid="notified", content=None):
     }
 
 
-def queued_notification(task, parent, *, uuid="queued"):
+def queued_notification(task, parent, *, uuid="queued", prompt=None):
     return {
         "type": "attachment",
         "uuid": uuid,
@@ -414,7 +423,7 @@ def queued_notification(task, parent, *, uuid="queued"):
         "sessionId": "root",
         "attachment": {
             "type": "queued_command",
-            "prompt": notification_text(task),
+            "prompt": prompt or notification_text(task),
             "commandMode": "task-notification",
             "origin": {"kind": "task-notification", "producer": "session-task"},
         },
@@ -430,14 +439,19 @@ def lifecycle(adapter, records):
     ]
 
 
-@pytest.mark.parametrize(("tool", "pending"), [("Agent", 1), ("Bash", None)])
-def test_background_work_keeps_the_turn_open_until_claude_continues_and_ends(tool, pending):
-    adapter = ClaudeAdapter()
-    adapter.feed(human())
+def fed(adapter, records):
+    for record in records:
+        adapter.feed(record)
+    return adapter
+
+
+@pytest.mark.parametrize("pending", [1, None])
+def test_a_background_agent_keeps_the_turn_open_until_claude_continues_and_ends(pending):
+    adapter = fed(ClaudeAdapter(), [human()])
     waiting = lifecycle(
         adapter,
         [
-            *background_launch(tool, "task-1"),
+            *background_launch("Agent", "agent-1"),
             *turn_end("launch-result", "Review running.", uuid="first", pending=pending),
         ],
     )
@@ -445,7 +459,7 @@ def test_background_work_keeps_the_turn_open_until_claude_continues_and_ends(too
     continued = lifecycle(
         adapter,
         [
-            notification("task-1", "first-duration"),
+            notification("agent-1", "first-duration"),
             *turn_end("notified", "Review found nothing.", uuid="second"),
         ],
     )
@@ -455,42 +469,116 @@ def test_background_work_keeps_the_turn_open_until_claude_continues_and_ends(too
     ]
 
 
-def test_completion_waits_for_every_outstanding_background_task():
-    adapter = ClaudeAdapter()
-    adapter.feed(human())
+@pytest.mark.parametrize(("tool", "pending"), [("Bash", 0), ("Bash", None), ("Monitor", None)])
+def test_background_shells_and_monitors_never_hold_the_turn(tool, pending):
+    adapter = fed(ClaudeAdapter(), [human()])
+    records = [
+        *background_launch(tool, "server-1"),
+        *turn_end("launch-result", "Dev server running.", uuid="first", pending=pending),
+    ]
+    assert lifecycle(adapter, records)[-1] == ("completed", "human", "")
+    second = lifecycle(
+        adapter,
+        [
+            human(uuid="again", message={"role": "user", "content": "Next"}),
+            *turn_end("again", "Next done.", uuid="second"),
+        ],
+    )
+    assert second[-1] == ("completed", "again", "")
+
+
+def test_a_late_shell_notification_continues_its_own_turn_without_human_acceptance():
+    adapter = fed(
+        ClaudeAdapter(),
+        [
+            human(),
+            *background_launch("Bash", "shell-1"),
+            *turn_end("launch-result", "Running.", uuid="first"),
+        ],
+    )
+    events = adapter.feed(notification("shell-1", "first-duration"))
+    assert (events, adapter.turn_id, adapter.background) == ((), "human", {})
+    continued = lifecycle(adapter, turn_end("notified", "Shell finished.", uuid="second"))
+    assert continued == [("assistant", "human", "Shell finished."), ("completed", "human", "")]
+
+
+def test_one_notification_finishes_every_task_it_lists():
+    adapter = fed(
+        ClaudeAdapter(),
+        [
+            human(),
+            *background_launch("Agent", "agent-1"),
+            *background_launch("Agent", "agent-2", parent="launch-result", uuid="again"),
+            *turn_end("again-result", "Both running.", uuid="first"),
+        ],
+    )
+    content = notification_text("agent-1", "agent-2", tool_use=False, status="stopped")
+    finished = lifecycle(
+        adapter,
+        [
+            notification("agent-1", "first-duration", content=content),
+            *turn_end("notified", "Both stopped.", uuid="second"),
+        ],
+    )
+    assert finished == [("assistant", "human", "Both stopped."), ("completed", "human", "")]
+
+
+def test_completion_waits_for_every_outstanding_background_agent():
+    adapter = fed(ClaudeAdapter(), [human()])
     records = [
         *background_launch("Agent", "agent-1"),
-        *background_launch("Bash", "shell-1", parent="launch-result", uuid="shell"),
-        *turn_end("shell-result", "Both running.", uuid="first", pending=1),
+        *background_launch("Agent", "agent-2", parent="launch-result", uuid="again"),
+        *turn_end("again-result", "Both running.", uuid="first"),
         notification("agent-1", "first-duration"),
-        *turn_end("notified", "Agent done; shell still running.", uuid="second"),
+        *turn_end("notified", "One agent done.", uuid="second"),
     ]
     assert [kind for kind, _, _ in lifecycle(adapter, records)] == ["assistant", "assistant"]
     finished = lifecycle(
         adapter,
         [
-            notification("shell-1", "second-duration", uuid="notified-again"),
+            notification("agent-2", "second-duration", uuid="notified-again"),
             *turn_end("notified-again", "All done.", uuid="third"),
         ],
     )
     assert finished == [("assistant", "human", "All done."), ("completed", "human", "")]
 
 
-def test_a_task_notification_is_never_accepted_as_human_input():
-    adapter = ClaudeAdapter()
-    adapter.feed(human())
-    for record in [
-        *background_launch("Bash", "shell-1"),
-        *turn_end("launch-result", "Running.", uuid="first"),
-    ]:
-        adapter.feed(record)
-    events = adapter.feed(notification("shell-1", "first-duration"))
-    assert (events, adapter.turn_id, adapter.background) == ((), "human", {})
+def test_a_new_human_turn_clears_tasks_left_from_earlier_turns():
+    adapter = fed(
+        ClaudeAdapter(),
+        [
+            human(),
+            *background_launch("Agent", "agent-1"),
+            *turn_end("launch-result", "Agent left running.", uuid="first", pending=0),
+        ],
+    )
+    second = lifecycle(
+        adapter,
+        [
+            human(uuid="again", message={"role": "user", "content": "Next"}),
+            *turn_end("again", "Next done.", uuid="second"),
+        ],
+    )
+    assert second[-1] == ("completed", "again", "")
+
+
+def test_claude_reported_pending_count_overrides_tracked_agents():
+    adapter = fed(ClaudeAdapter(), [human()])
+    records = [
+        *background_launch("Agent", "agent-1"),
+        *turn_end("launch-result", "Agent finished silently.", uuid="first", pending=0),
+    ]
+    assert lifecycle(adapter, records)[-1] == ("completed", "human", "")
+
+
+def test_claude_reported_pending_agents_hold_completion_without_a_tracked_launch():
+    adapter = fed(ClaudeAdapter(), [human()])
+    waiting = lifecycle(adapter, turn_end("human", "Waiting on agents.", uuid="first", pending=2))
+    assert waiting == [("assistant", "human", "Waiting on agents.")]
 
 
 def test_a_notification_delivered_mid_turn_lets_that_turn_complete():
-    adapter = ClaudeAdapter()
-    adapter.feed(human())
+    adapter = fed(ClaudeAdapter(), [human()])
     records = [
         *background_launch("Agent", "agent-1"),
         queued_notification("agent-1", "launch-result"),
@@ -499,23 +587,50 @@ def test_a_notification_delivered_mid_turn_lets_that_turn_complete():
     assert lifecycle(adapter, records)[-1] == ("completed", "human", "")
 
 
+def test_a_notification_without_a_status_finishes_nothing():
+    adapter = fed(ClaudeAdapter(), [human()])
+    event = notification_text("agent-1", status=None)
+    records = [
+        *background_launch("Agent", "agent-1"),
+        queued_notification("agent-1", "launch-result", prompt=event),
+        *turn_end("queued", "Agent still running.", uuid="first"),
+    ]
+    assert lifecycle(adapter, records) == [("assistant", "human", "Agent still running.")]
+
+
+def test_a_notification_for_an_untracked_task_is_ignored():
+    adapter = fed(
+        ClaudeAdapter(),
+        [
+            human(),
+            *background_launch("Agent", "agent-1"),
+            *turn_end("launch-result", "Agent running.", uuid="first"),
+        ],
+    )
+    content = notification_text("stranger", tool_use=False)
+    assert adapter.feed(notification("stranger", "unknown-parent", content=content)) == ()
+    assert (adapter.turn_id, list(adapter.background)) == (None, ["agent-1"])
+    stray = lifecycle(adapter, turn_end("notified", "Stray continuation.", uuid="second"))
+    assert stray == [("assistant", None, "Stray continuation.")]
+
+
 def test_a_notification_without_a_task_id_is_matched_by_its_tool_use():
-    adapter = ClaudeAdapter()
-    adapter.feed(human())
-    for record in [
-        *background_launch("Bash", "shell-1"),
-        *turn_end("launch-result", "Running.", uuid="first"),
-    ]:
-        adapter.feed(record)
-    content = notification_text("shell-1").replace("<task-id>shell-1</task-id>\n", "")
-    adapter.feed(notification("shell-1", "first-duration", content=content))
+    adapter = fed(
+        ClaudeAdapter(),
+        [
+            human(),
+            *background_launch("Agent", "agent-1"),
+            *turn_end("launch-result", "Running.", uuid="first"),
+        ],
+    )
+    content = notification_text("agent-1").replace("<task-id>agent-1</task-id>\n", "")
+    adapter.feed(notification("agent-1", "first-duration", content=content))
     finished = lifecycle(adapter, turn_end("notified", "Done.", uuid="second"))
-    assert finished[-1] == ("completed", "human", "")
+    assert (finished[-1], adapter.launches) == (("completed", "human", ""), {})
 
 
-def test_a_stopped_background_task_is_no_longer_outstanding():
-    adapter = ClaudeAdapter()
-    adapter.feed(human())
+def test_a_stopped_background_agent_is_no_longer_outstanding():
+    adapter = fed(ClaudeAdapter(), [human()])
     stop = {
         "type": "user",
         "uuid": "stopped",
@@ -525,14 +640,92 @@ def test_a_stopped_background_task_is_no_longer_outstanding():
             "role": "user",
             "content": [{"type": "tool_result", "tool_use_id": "stop", "content": "Stopped."}],
         },
-        "toolUseResult": {"message": "Stopped", "task_id": "shell-1", "task_type": "local_bash"},
+        "toolUseResult": {"message": "Stopped", "task_id": "agent-1", "task_type": "local_agent"},
     }
-    records = [*background_launch("Bash", "shell-1"), stop, *turn_end("stopped", "Ok.", uuid="end")]
+    records = [
+        *background_launch("Agent", "agent-1"),
+        stop,
+        *turn_end("stopped", "Ok.", uuid="end"),
+    ]
     assert lifecycle(adapter, records)[-1] == ("completed", "human", "")
 
 
-def test_claude_reported_pending_agents_hold_completion_without_a_tracked_launch():
+def compaction(logical_parent, *, parent=None):
+    return [
+        {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "uuid": "boundary",
+            "parentUuid": parent,
+            "logicalParentUuid": logical_parent,
+            "sessionId": "root",
+            "isSidechain": False,
+            "compactMetadata": {"trigger": "auto", "preTokens": 1000, "postTokens": 100},
+        },
+        {
+            "type": "attachment",
+            "uuid": "compact-context",
+            "parentUuid": "boundary",
+            "sessionId": "root",
+            "attachment": {"type": "session_context"},
+        },
+        human(
+            "summary",
+            parentUuid="compact-context",
+            isCompactSummary=True,
+            isVisibleInTranscriptOnly=True,
+            message={
+                "role": "user",
+                "content": "This session is being continued from a previous conversation.",
+            },
+        ),
+        {
+            "type": "attachment",
+            "uuid": "compact-reminder",
+            "parentUuid": "summary",
+            "sessionId": "root",
+            "attachment": {"type": "total_tokens_reminder"},
+        },
+    ]
+
+
+def working(parent="human"):
+    return {
+        "type": "assistant",
+        "uuid": "working",
+        "parentUuid": parent,
+        "sessionId": "root",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "use-read", "name": "Read", "input": {}}],
+            "stop_reason": "tool_use",
+        },
+    }
+
+
+@pytest.mark.parametrize("logical_parent", ["working", "compact-reminder", None])
+def test_a_turn_compacted_midway_completes_once_in_the_same_turn(logical_parent):
+    adapter = fed(ClaudeAdapter(), [human(), working()])
+    events = lifecycle(
+        adapter,
+        [
+            *compaction(logical_parent),
+            *turn_end("compact-reminder", "Done after compacting.", uuid="end"),
+        ],
+    )
+    assert events == [
+        ("assistant", "human", "Done after compacting."),
+        ("completed", "human", ""),
+    ]
+
+
+def test_a_compact_summary_is_never_human_input():
     adapter = ClaudeAdapter()
-    adapter.feed(human())
-    waiting = lifecycle(adapter, turn_end("human", "Waiting on agents.", uuid="first", pending=2))
-    assert waiting == [("assistant", "human", "Waiting on agents.")]
+    records = [human(), working(), *compaction("working")]
+    accepted = [
+        (event.native_id, event.text)
+        for record in records
+        for event in adapter.feed(record)
+        if event.kind == "accepted"
+    ]
+    assert (accepted, adapter.chain["summary"]) == ([("human", "Hello")], "human")

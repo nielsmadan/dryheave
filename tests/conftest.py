@@ -1,3 +1,4 @@
+import re
 import shutil
 import sys
 import textwrap
@@ -6,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from dryheave.drivers.models import Screen
 from dryheave.experiment_models import ExperimentDraft
 from dryheave.models import AgentKind, StrictModel
 from dryheave.profile_models import AssetSelection, CaptureLimits, CaptureSpec, NativeRecipe
@@ -732,6 +734,70 @@ class ClaudeQuestionUI:
             "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 n to add notes \u00b7 Esc to cancel",
         ]
         return "\n".join(" " + line if line else "" for line in lines)
+
+
+FIX_SCOPE = Path(__file__).parent.joinpath("fixtures/claude-2.1.296-fix-scope.txt").read_text()
+CHANNEL = (
+    " Which release channel?\n\n"
+    "\u276f 1. Stable\n  2. Beta\n  3. Nightly\n  4. Type something.\n\n  5. Chat about this\n\n"
+    "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel\n"
+)
+EDIT_PERMISSION = (
+    ' Edit file\n greet.py\n\n  1 def greet(name):\n  2 -    return "Hello " + name\n'
+    '  2 +    return "Hello, " + name\n\n'
+    "Do you want to make this edit to greet.py?\n"
+    "\u276f 1. Yes\n"
+    "  2. Yes, allow all edits during this session (shift+tab)\n"
+    "  3. No, and tell Claude what to do differently (esc)\n"
+)
+SCREEN_OPTION = re.compile(r"(?P<marker>[\u276f ]) (?P<number>\d+)\. (?P<label>.+)")
+TEXT_ROW = "Type something."
+
+
+class ScreenUI:
+    def __init__(self, template: str) -> None:
+        self.lines = template.rstrip("\n").split("\n")
+        matches = [(index, SCREEN_OPTION.fullmatch(line)) for index, line in enumerate(self.lines)]
+        self.rows = [index for index, match in matches if match]
+        self.labels = [match["label"] for _, match in matches if match]
+        self.focus = 0
+        self.typed = ""
+        self.answer: str | None = None
+
+    @property
+    def open(self) -> bool:
+        return self.answer is None
+
+    def press(self, key: str) -> None:
+        if not self.open:
+            return
+        if key in {"Up", "Down"}:
+            self.focus = max(0, min(len(self.rows) - 1, self.focus + (1 if key == "Down" else -1)))
+        elif key.isdigit() and int(key) <= len(self.rows):
+            self.focus = int(key) - 1
+            self.press("Enter")
+        elif key == "Enter":
+            label = self.labels[self.focus]
+            if label == TEXT_ROW:
+                self.answer = self.typed or None
+            else:
+                self.answer = label
+
+    def type(self, text: str) -> None:
+        if self.open and self.labels[self.focus] == TEXT_ROW:
+            self.typed += text
+
+    def render(self) -> str:
+        lines = list(self.lines)
+        for position, index in enumerate(self.rows):
+            label = self.labels[position]
+            shown = self.typed if label == TEXT_ROW and self.typed else label
+            marker = "\u276f" if position == self.focus else " "
+            lines[index] = f"{marker} {position + 1}. {shown}"
+        return "\n".join(lines)
+
+    def screen(self) -> Screen:
+        return Screen(text=self.render(), exited=None, cursor={"x": 0, "y": 0})
 
 
 @dataclass(frozen=True)

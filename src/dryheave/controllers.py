@@ -8,12 +8,15 @@ from pathlib import Path
 from threading import Event
 
 import psutil
+from pydantic import JsonValue
 
 from dryheave.cases import FrozenCase, subject_context
 from dryheave.claude_controller import claude_observation, claude_payload
 from dryheave.controller_models import (
     DIALOG_INSTRUCTION,
     FIX_IT_INSTRUCTION,
+    SCREEN_FIELDS,
+    SCREEN_INSTRUCTION,
     SIMULATOR_INSTRUCTION,
     ControllerRecipe,
     ControllerResponse,
@@ -28,7 +31,12 @@ from dryheave.controller_models import (
 )
 from dryheave.controller_runtime import prepare_runtime
 from dryheave.controller_schema import controller_schema
-from dryheave.controller_watch import MAX_CONTROLLER_FILES, MAX_RUNTIME_FILES, ControllerWatch
+from dryheave.controller_watch import (
+    CONTROLLER_LIMIT_ERRORS,
+    MAX_CONTROLLER_FILES,
+    MAX_RUNTIME_FILES,
+    ControllerWatch,
+)
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.models import CleanupReport, DialogSelection, ProcessIdentity
 from dryheave.errors import DryheaveError, InputError
@@ -41,6 +49,10 @@ from dryheave.process_ownership import ProcessOwner
 from dryheave.processes import CommandControl, CommandResult, run_command
 from dryheave.serialization import canonical_json, parse_json, parse_model
 from dryheave.token_usage import codex_usage
+
+
+def is_controller_limit_error(code: str) -> bool:
+    return code in CONTROLLER_LIMIT_ERRORS
 
 
 def simulator_projection(
@@ -121,6 +133,72 @@ def dialog_projection(
         else:
             high = mid - 1
     return fitted
+
+
+def screen_projection(
+    request: SimulatorInput,
+    screen: str,
+    answer_hint: str | None,
+    max_input_bytes: int,
+) -> SimulatorInput:
+    if request.inspection or not request.instruction.startswith(SIMULATOR_INSTRUCTION):
+        raise InputError("A screen answer request starts from a plain simulator request.")
+    lines = [line.rstrip() for line in screen.splitlines()]
+    asked = request.model_copy(
+        update={
+            "answer_hint": answer_hint,
+            "instruction": SCREEN_INSTRUCTION
+            + request.instruction.removeprefix(SIMULATOR_INSTRUCTION),
+        }
+    )
+
+    def kept(count: int) -> SimulatorInput:
+        return asked.model_copy(update={"screen": "\n".join(lines[len(lines) - count :]).strip()})
+
+    fitted = kept(len(lines))
+    if len(canonical_json(fitted)) <= max_input_bytes:
+        return fitted
+    low, high = 1, len(lines) - 1
+    fitted = kept(1)
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = kept(mid)
+        if len(canonical_json(candidate)) <= max_input_bytes:
+            fitted = candidate
+            low = mid + 1
+        else:
+            high = mid - 1
+    return fitted
+
+
+def screen_answer(decision: SimulatorDecision) -> bool:
+    if decision.screen_kind == "question":
+        return (
+            decision.action == "reply"
+            and decision.screen_action is not None
+            and not (decision.screen_action.text or "").lstrip()[:1].isdigit()
+            and not decision.text
+            and not decision.choices
+        )
+    return (
+        decision.screen_kind is not None
+        and decision.action == "stop"
+        and decision.screen_action is None
+    )
+
+
+def decision_schema(*, screen: bool) -> dict[str, JsonValue]:
+    schema = controller_schema(SimulatorDecision)
+    if screen:
+        return schema
+    properties = schema["properties"]
+    if not isinstance(properties, dict):
+        raise InputError("Simulator decision schema has no properties.")
+    for name in SCREEN_FIELDS:
+        properties.pop(name, None)
+    schema["required"] = list(properties)
+    schema.pop("$defs", None)
+    return schema
 
 
 def dialog_selection(dialog: DialogPrompt, decision: SimulatorDecision) -> DialogSelection | None:
@@ -266,6 +344,8 @@ def _scripted(recipe: ControllerRecipe, request: SimulatorInput, index: int) -> 
     latest = (
         request.dialog.question
         if request.dialog is not None
+        else request.screen
+        if request.screen is not None
         else request.dialogue[-1].text
         if request.dialogue
         else ""
@@ -340,7 +420,9 @@ def invoke_controller(
         if recipe.kind == "scripted":
             response = _scripted(recipe, request, context.index)
         else:
-            response = _native(recipe, content, artifacts, context)
+            response = _native(
+                recipe, content, artifacts, context, screen=request.screen is not None
+            )
         if time.monotonic() > context.deadline or context.cancelled.is_set():
             raise InputError("Controller exhausted the overall subject deadline or was cancelled.")
         if not set(response.decision.fact_ids) <= {fact.fact_id for fact in request.allowed_facts}:
@@ -417,10 +499,12 @@ def _native(
     content: bytes,
     artifacts: ArtifactWriter,
     context: CallContext,
+    *,
+    screen: bool = False,
 ) -> ControllerResponse:
     root = artifacts.root
     if recipe.kind in {"codex", "claude"}:
-        schema = controller_schema(SimulatorDecision)
+        schema = decision_schema(screen=screen)
         atomic_write(
             root / "schema.json",
             canonical_json(schema),
@@ -468,10 +552,12 @@ def run_role_command(
         raise InputError("Controller cancelled or deadline exhausted before launch.")
     environment = controller_environment(recipe, context.inherited)
     bindings = None
+    runtime_root: Path | None = None
     cwd = artifacts.root
     if recipe.runtime is not None:
         if context.runtime_root is None:
             raise InputError("Controller requires a separate owned runtime directory.")
+        runtime_root = context.runtime_root.absolute()
         bindings = prepare_runtime(recipe, context.runtime_root, context.inherited, artifacts)
         variable = "CLAUDE_CONFIG_DIR" if recipe.kind == "claude" else "CODEX_HOME"
         environment.update(
@@ -485,14 +571,10 @@ def run_role_command(
         cwd = context.runtime_root.absolute() / "work"
     owner = ProcessOwner()
     watch = ControllerWatch(
-        (artifacts.root, context.runtime_root.absolute())
-        if recipe.runtime is not None and context.runtime_root is not None
-        else artifacts.root,
+        (artifacts.root,) if runtime_root is None else (artifacts.root, runtime_root),
         context.cancelled,
         max_bytes=recipe.budget.max_input_bytes + 8 * recipe.budget.max_output_bytes,
-        max_files=MAX_RUNTIME_FILES
-        if recipe.runtime is not None and context.runtime_root is not None
-        else MAX_CONTROLLER_FILES,
+        max_files=MAX_CONTROLLER_FILES if runtime_root is None else MAX_RUNTIME_FILES,
         output_bytes=recipe.budget.max_output_bytes,
         owned_symlinks={
             Path(bindings.plan.config_roots["config"]) / name: identity

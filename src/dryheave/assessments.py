@@ -126,6 +126,7 @@ def _help_needed(capture: CapturedAttempt | None, case: FrozenCase | None) -> He
         if call.role == "simulator"
         and call.decision is not None
         and call.decision.action == "reply"
+        and call.decision.screen_kind is None
         and call.call_id not in assisted
     )
     disclosed = tuple(dict.fromkeys(fact_id for reply in replies for fact_id in reply.fact_ids))

@@ -1,6 +1,13 @@
-from typing import Literal
+import re
+from typing import Literal, Self
 
-from pydantic import Field, JsonValue
+from pydantic import (
+    Field,
+    JsonValue,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from dryheave.models import ObjectId, StrictModel, TokenUsage
 
@@ -194,3 +201,31 @@ class QuestionDialog(StrictModel):
 class DialogSelection(StrictModel):
     choices: tuple[str, ...] = ()
     text: str | None = None
+
+
+ScreenKey = Literal["Up", "Down", "Space", "Enter", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+MAX_SCREEN_TEXT = 2000
+
+
+class ScreenAction(StrictModel):
+    key: ScreenKey | None = None
+    text: str | None = Field(default=None, min_length=1, max_length=MAX_SCREEN_TEXT)
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        return {name: item for name, item in value.items() if item is not None}
+
+    @model_validator(mode="after")
+    def single(self) -> Self:
+        if (self.key is None) == (self.text is None):
+            raise ValueError("a screen action presses one key or types one text")
+        if self.text is not None and (
+            not self.text.strip()
+            or re.search(r"[\x00-\x1f\x7f]", self.text)
+            or self.text.lstrip().startswith(("/", "!", "$"))
+        ):
+            raise ValueError(
+                "screen text is one line without control characters or native commands"
+            )
+        return self

@@ -3,15 +3,23 @@ from pathlib import Path
 
 import pytest
 
-from conftest import AskedQuestion, ClaudeQuestionUI
+from conftest import EDIT_PERMISSION, AskedQuestion, ClaudeQuestionUI, ScreenUI
+from conftest import FIX_SCOPE as FIX_SCOPE_SCREEN
 from dryheave.drivers.dialogs import (
     CODEX_APPROVALS,
+    UNRECOGNIZED,
+    answerable_screen,
     command_menu,
     command_ready,
     composer,
     composer_matches,
+    composer_ready,
     dialog,
+    escalation,
+    permission_like,
+    question_chrome,
     question_dialog,
+    screen_identity,
     submittable,
 )
 from dryheave.drivers.models import DialogRow, Screen
@@ -571,3 +579,455 @@ def test_preview_like_layouts_that_do_not_fit_stay_unrecognized(change):
     text = change(preview_screen("Down"))
     assert parse(text) is None
     assert dialog(AgentKind.CLAUDE, Screen(text=text, exited=None)).state == "unsupported"
+
+
+def test_the_claude_fix_scope_question_is_an_unparsed_answerable_screen():
+    screen = ScreenUI(FIX_SCOPE_SCREEN).screen()
+    assert question_dialog(screen) is None
+    assert (
+        dialog(AgentKind.CLAUDE, screen).reason,
+        answerable_screen(AgentKind.CLAUDE, screen),
+    ) == (
+        UNRECOGNIZED,
+        True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("agent", "text", "answerable"),
+    [
+        (AgentKind.CODEX, CODEX_DIALOGS["freeform"], True),
+        (AgentKind.CODEX, CODEX_DIALOGS["options"], True),
+        (AgentKind.CODEX, CODEX_DIALOGS["exec"], False),
+        (AgentKind.CODEX, CODEX_DIALOGS["trust"], False),
+        (AgentKind.CODEX, CODEX_DIALOGS["auth"], False),
+        (AgentKind.CODEX, CODEX_DIALOGS["confirm"], False),
+        (AgentKind.CLAUDE, EDIT_PERMISSION, False),
+        (
+            AgentKind.CLAUDE,
+            ClaudeQuestionUI(
+                (
+                    AskedQuestion(
+                        "A",
+                        "Which?",
+                        (("X", ""), ("Y", "")),
+                    ),
+                )
+            ).render(),
+            False,
+        ),
+        (AgentKind.CLAUDE, "Done.\n\n\u276f", False),
+    ],
+)
+def test_only_unclassified_input_screens_are_answerable(agent, text, answerable):
+    assert answerable_screen(agent, Screen(text=text, exited=None, cursor={"x": 0, "y": 0})) is (
+        answerable
+    )
+
+
+def test_an_unclassified_permission_prompt_is_recognised_by_its_wording():
+    screen = Screen(text=EDIT_PERMISSION, exited=None, cursor={"x": 0, "y": 0})
+    assert (dialog(AgentKind.CLAUDE, screen).reason, permission_like(EDIT_PERMISSION)) == (
+        UNRECOGNIZED,
+        True,
+    )
+    assert not permission_like(FIX_SCOPE_SCREEN)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Ready to code?",
+        "Claude has written up a plan and is ready to execute. Would you like to proceed?",
+        "\u276f 1. Yes, and use auto mode",
+        "  2. Yes, auto-accept edits",
+        "Yes, clear context and bypass permissions",
+        "Yes, and switch to auto mode",
+        "Exit plan mode?",
+        "Enter plan mode?",
+        'Use skill "code-review"?',
+        "Use this skill?",
+        "Run a dynamic workflow?",
+        "  2. Yes, and don\u2019t ask again for: npm run build:*",
+        "Yes, and don\u2019t ask again for any Bash command",
+        "Do not ask again.",
+        "  3. No, and tell Claude what to do differently (esc)",
+        "  2. Yes, allow all edits during this session (shift+tab)",
+        "Do you trust the files in this folder?",
+        "Trust this plugin directory?",
+        "Do you want to proceed?",
+        "Do you want to make this edit to greet.py?",
+        "Do you want to allow Claude to fetch this content?",
+        "Do you want to use this API key?",
+        "Allow external CLAUDE.md file imports?",
+        "Select login method",
+        "Sign in with Google",
+        "Approve app tool call?",
+        "\u203a 2. Allow for this session  Run the tool and remember this choice for this session.",
+        "  3. Allow and don't ask me again  Run the tool and remember this choice for future tool calls.",
+        "  3. Yes, grant these permissions for this session (a)",
+        'Do you want to approve network access to "example.com"?',
+        "Do you want to download and install dependencies for this project?",
+        "Sign in with ChatGPT",
+    ],
+)
+def test_shipped_permission_and_mode_wording_is_recognised(line):
+    assert permission_like(f"Earlier transcript\n\n{line}\n")
+
+
+CONFIRM = "\n\n Enter to confirm \u00b7 Esc to cancel\n"
+SHIPPED_PROMPTS = {
+    "plan-exit": (
+        AgentKind.CLAUDE,
+        " Ready to code?\n\n Here is Claude's plan:\n Add a greet helper with a test.\n\n"
+        " Claude has written up a plan and is ready to execute. Would you like to proceed?\n\n"
+        " \u276f 1. Yes, and use auto mode\n   2. Yes, manually approve edits\n"
+        "   3. No, keep planning" + CONFIRM,
+    ),
+    "skill": (
+        AgentKind.CLAUDE,
+        ' Use skill "code-review"?\n'
+        " Claude may use instructions, code, or files from this Skill.\n\n"
+        " \u276f 1. Yes\n   2. No" + CONFIRM,
+    ),
+    "workflow": (
+        AgentKind.CLAUDE,
+        " Run a dynamic workflow?\n\n \u276f 1. Yes, run it\n   2. Yes, and switch to auto mode\n"
+        "   3. No" + CONFIRM,
+    ),
+    "bash-rule": (
+        AgentKind.CLAUDE,
+        " Bash command\n\n   npm run build\n\n \u276f 1. Yes\n"
+        "   2. Yes, and don\u2019t ask again for: npm run build:*\n   3. No" + CONFIRM,
+    ),
+    "codex-app-tool": (
+        AgentKind.CODEX,
+        (
+            "  Approve app tool call?\n  github wants to run create_issue.\n\n"
+            "\u203a 1. Allow  Run the tool and continue.\n"
+            "  2. Allow for this session  Run the tool and remember this choice for this session.\n"
+            "  3. Allow and don't ask me again  Run the tool and remember this choice for future"
+            " tool calls.\n  4. Cancel  Cancel this tool call.\n\n"
+            "  Press enter to confirm or esc to cancel\n"
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SHIPPED_PROMPTS))
+def test_shipped_permission_and_mode_prompts_never_reach_the_simulated_user(name):
+    agent, text = SHIPPED_PROMPTS[name]
+    screen = Screen(text=text, exited=None, cursor={"x": 0, "y": 0})
+    assert (dialog(agent, screen).reason, answerable_screen(agent, screen)) == (
+        UNRECOGNIZED,
+        False,
+    )
+
+
+CODEX_CONFIRM = "\n\n  Press enter to confirm or esc to cancel\n"
+UNCHROMED_PROMPTS = {
+    "codex-mcp-tool-wrapped": (
+        AgentKind.CODEX,
+        "  Allow the acme-internal-deployment-orchestrator MCP server to run tool\n"
+        '  "create_release_candidate_with_changelog"?\n\n'
+        "\u203a 1. Allow  Run the tool and continue.\n  2. Cancel  Cancel this tool call."
+        + CODEX_CONFIRM,
+    ),
+    "codex-send-input": (
+        AgentKind.CODEX,
+        "  Would you like to send input to the existing terminal?\n\n  npm run dev\n\n"
+        "\u203a 1. Yes, proceed\n  2. No, continue without running it" + CODEX_CONFIRM,
+    ),
+    "codex-send-input-named": (
+        AgentKind.CODEX,
+        "  Would you like to send input to terminal 3?\n\n"
+        "\u203a 1. Yes, just this once\n  2. No, continue without running it" + CODEX_CONFIRM,
+    ),
+    "codex-session-grant": (
+        AgentKind.CODEX,
+        "  github wants to run create_issue.\n\n\u203a 1. Allow  Run the tool and continue.\n"
+        "  2. Allow for this session  Run the tool and remember this choice for this session.\n"
+        "  3. Cancel  Cancel this tool call." + CODEX_CONFIRM,
+    ),
+    "codex-plain-allow": (
+        AgentKind.CODEX,
+        "  github wants to run create_issue.\n\n\u203a 1. Allow  Run the tool and continue.\n"
+        "  2. Cancel  Cancel this tool call." + CODEX_CONFIRM,
+    ),
+    "claude-switch-to-auto": (
+        AgentKind.CLAUDE,
+        " Bash command\n\n   npm test\n   Run the test suite\n\n \u276f 1. Yes\n"
+        "   2. Yes, and switch to auto (no routine prompts; a reviewer model screens actions)"
+        " for this session\n   3. No" + CONFIRM,
+    ),
+    "claude-manual-edits": (
+        AgentKind.CLAUDE,
+        " Here is Claude's plan:\n Add a greet helper with a test.\n\n"
+        " \u276f 1. Yes, manually approve edits\n   2. No, keep planning" + CONFIRM,
+    ),
+    "claude-keep-allowing-reads": (
+        AgentKind.CLAUDE,
+        " Read file\n\n   /etc/hosts\n\n \u276f 1. Yes\n"
+        "   2. Yes, and keep allowing any reads outside the working directories\n   3. No"
+        + CONFIRM,
+    ),
+    "claude-session-read": (
+        AgentKind.CLAUDE,
+        " Read file\n\n   /tmp/notes/todo.txt\n\n \u276f 1. Yes\n"
+        "   2. Yes, allow reading from notes/ during this session\n   3. No" + CONFIRM,
+    ),
+    "claude-plain-yes": (
+        AgentKind.CLAUDE,
+        " Bash command\n\n   rm -rf build\n   Remove build output\n\n \u276f 1. Yes\n   2. No"
+        + CONFIRM,
+    ),
+    "claude-chrome-in-transcript": (
+        AgentKind.CLAUDE,
+        "\u23fa The question offers:\n  3. Type something.\n  4. Chat about this\n\n"
+        " Bash command\n\n   rm -rf build\n   Remove build output\n\n \u276f 1. Yes\n   2. No"
+        + CONFIRM,
+    ),
+    "codex-chrome-in-transcript": (
+        AgentKind.CODEX,
+        "\u2022 The tool shows:\n  Question 2/3 (1 unanswered)\n"
+        "  enter to submit answer | esc to interrupt\n\n"
+        "  Would you like to send input to terminal 3?\n\n"
+        "\u203a 1. Yes, just this once\n  2. No, continue without running it" + CODEX_CONFIRM,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(UNCHROMED_PROMPTS))
+def test_prompts_without_question_tool_chrome_never_reach_the_simulated_user(name):
+    agent, text = UNCHROMED_PROMPTS[name]
+    screen = Screen(text=text, exited=None, cursor={"x": 0, "y": 0})
+    assert (dialog(agent, screen).reason, answerable_screen(agent, screen)) == (
+        UNRECOGNIZED,
+        False,
+    )
+
+
+def shifted(text, columns):
+    return "\n".join(" " * columns + line if line else line for line in text.splitlines())
+
+
+CODEX_MULTI_FOOTER = (
+    "tab to add notes | enter to submit answer | \u2190/\u2192 to navigate questions"
+    " | esc to interrupt"
+)
+
+
+def review_screen():
+    ui = ClaudeQuestionUI(
+        (
+            AskedQuestion("Scope", "Which findings?", (("All", ""), ("None", ""))),
+            AskedQuestion("Tests", "Add tests?", (("Yes", ""), ("No", ""))),
+        )
+    )
+    ui.press("Enter")
+    ui.press("Enter")
+    return ui.render()
+
+
+REVIEW_SCREEN = review_screen()
+QUESTION_SCREENS = {
+    "fix-scope": (AgentKind.CLAUDE, FIX_SCOPE_SCREEN),
+    "fix-scope-shifted": (AgentKind.CLAUDE, shifted(FIX_SCOPE_SCREEN, 3)),
+    "fix-scope-chat-offset": (
+        AgentKind.CLAUDE,
+        FIX_SCOPE_SCREEN.replace("  4. Chat about this", "       4.  Chat about this"),
+    ),
+    "fix-scope-typed": (
+        AgentKind.CLAUDE,
+        FIX_SCOPE_SCREEN.replace("3. Type something.", "3. Only the prefix bug"),
+    ),
+    "multi-select": (
+        AgentKind.CLAUDE,
+        (
+            " Which checks?\n\n\u276f 1. [ ] Lint\n  2. [ ] Tests\n  3. [ ] Type something\n"
+            "     Submit\n\n"
+            "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel\n"
+        ),
+    ),
+    "review-with-footer": (
+        AgentKind.CLAUDE,
+        REVIEW_SCREEN
+        + "\n\n Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel",
+    ),
+    "codex-multi-question": (
+        AgentKind.CODEX,
+        shifted(
+            CODEX_DIALOGS["options"]
+            .replace("Question 1/1 (1 unanswered)", "Question 1/2 (2 unanswered)")
+            .replace("tab to add notes | enter to submit answer | esc to interrupt", ""),
+            2,
+        )
+        + "\n  "
+        + CODEX_MULTI_FOOTER,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(QUESTION_SCREENS))
+def test_unparsed_question_tool_screens_remain_answerable(name):
+    agent, text = QUESTION_SCREENS[name]
+    screen = Screen(text=text, exited=None, cursor={"x": 0, "y": 0})
+    assert (dialog(agent, screen).reason, answerable_screen(agent, screen)) == (
+        UNRECOGNIZED,
+        True,
+    )
+
+
+def test_a_parsed_review_screen_is_answerable():
+    screen = Screen(text=REVIEW_SCREEN, exited=None, cursor={"x": 0, "y": 0})
+    assert (question_dialog(screen).kind, answerable_screen(AgentKind.CLAUDE, screen)) == (
+        "review",
+        True,
+    )
+
+
+def test_codex_question_chrome_needs_both_the_question_header_and_the_submit_footer():
+    header, *rest, footer = CODEX_DIALOGS["options"].splitlines()
+    body = "\n".join(rest)
+    assert [
+        question_chrome(AgentKind.CODEX, text)
+        for text in (f"{header}\n{body}\n{footer}", f"{body}\n{footer}", f"{header}\n{body}")
+    ] == [True, False, False]
+
+
+def test_droid_screens_never_reach_the_simulated_user():
+    screen = Screen(text=FIX_SCOPE_SCREEN, exited=None, cursor={"x": 0, "y": 0})
+    assert (dialog(AgentKind.DROID, screen).reason, answerable_screen(AgentKind.DROID, screen)) == (
+        UNRECOGNIZED,
+        False,
+    )
+
+
+@pytest.mark.parametrize("invisible", ["\u00ad", "\u200b", "\u200d", "\u2060", "\ufeff"])
+def test_zero_width_characters_do_not_hide_permission_wording(invisible):
+    row = f"Yes, and don{invisible}\u2019t ask again for: npm test"
+    screen = Screen(
+        text=FIX_SCOPE_SCREEN.replace("Don't fix anything", row), exited=None, cursor={}
+    )
+    assert permission_like(f"  2. {row}\n")
+    assert permission_like(f'Use{invisible} skill "code-review"?')
+    assert answerable_screen(AgentKind.CLAUDE, screen) is False
+
+
+ESCALATING = (
+    "auto mode",
+    "auto-accept",
+    "accept edits",
+    "bypass",
+    "don't ask again",
+    "don\u2019t ask again",
+    "always allow",
+    "allow all",
+    "allow and",
+    "trust",
+    "dangerously",
+    "skip permissions",
+    "yolo",
+)
+
+
+def offered(label):
+    return Screen(
+        text=FIX_SCOPE_SCREEN.replace("Fix all Should Fix", label), exited=None, cursor={}
+    )
+
+
+@pytest.mark.parametrize("phrase", ESCALATING)
+@pytest.mark.parametrize("key", ["Enter", "Space", "1"])
+def test_a_key_choosing_a_mode_or_permission_option_is_refused(phrase, key):
+    label = f"Go ahead, {phrase.upper()} for the rest"
+    assert escalation(AgentKind.CLAUDE, offered(label), key, None).startswith("Go ahead, ")
+    assert escalation(AgentKind.CLAUDE, offered("Fix all Should Fix"), key, label) == label
+
+
+def test_ordinary_options_and_moves_pass_the_option_guard():
+    screen = offered("Fix all Should Fix")
+    assert [
+        escalation(AgentKind.CLAUDE, screen, key, target)
+        for key, target in (
+            ("Enter", "Fix all Should Fix"),
+            ("1", "Fix all Should Fix"),
+            ("2", "Don't fix anything"),
+            ("Space", None),
+        )
+    ] == [None] * 4
+    assert escalation(AgentKind.CLAUDE, offered("Always allow"), "Down", "Always allow") is None
+    assert escalation(AgentKind.CLAUDE, offered("Always allow"), "2", None) is None
+
+
+def test_a_digit_is_checked_against_the_option_it_picks():
+    screen = Screen(
+        text=FIX_SCOPE_SCREEN.replace("Don't fix anything", "Trust the agent from now on"),
+        exited=None,
+        cursor={},
+    )
+    assert escalation(AgentKind.CLAUDE, screen, "2", None).startswith("Trust the agent")
+    assert escalation(AgentKind.CLAUDE, screen, "Enter", None) is None
+
+
+def test_screen_identity_ignores_the_highlight_and_typed_answer_but_not_the_question():
+    from conftest import CHANNEL
+
+    ui = ScreenUI(FIX_SCOPE_SCREEN)
+    shown = screen_identity(ui.render())
+    ui.press("Down")
+    ui.press("Down")
+    ui.type("Only the prefix bug")
+    assert screen_identity(ui.render()) == shown
+    assert screen_identity(ScreenUI(CHANNEL).render()) != shown
+
+
+@pytest.mark.parametrize(
+    ("agent", "text", "ready"),
+    [
+        (
+            AgentKind.CLAUDE,
+            "Fixed it.\n\n\u2500\u2500\u2500\u2500\n\u276f \n\u2500\u2500\u2500\u2500\n  main",
+            True,
+        ),
+        (
+            AgentKind.CODEX,
+            "\u2022 Fixed it.\n\n\u203a Ask Codex to do anything\n\n? for shortcuts",
+            True,
+        ),
+        (AgentKind.CLAUDE, FIX_SCOPE_SCREEN, False),
+        (AgentKind.CODEX, CODEX_DIALOGS["freeform"], False),
+    ],
+)
+def test_the_composer_is_told_apart_from_an_input_screen(agent, text, ready):
+    assert composer_ready(agent, Screen(text=text, exited=None, cursor={})) is ready
+
+
+CHROME_PERMISSION = (
+    "⏺ I'll open a tab for the docs.\n"
+    "  {marker}\n"
+    "\n"
+    "⏺ Claude in Chrome[tabs_create_mcp]\n"
+    "\n" + "─" * 120 + "\n"
+    " Claude in Chrome wants to create a new tab\n"
+    "\n"
+    " \u276f 1. Allow\n"
+    "   2. Deny (esc)\n"
+)
+
+
+@pytest.mark.parametrize("marker", ["Type something.", "Chat about this"])
+def test_agent_printed_question_rows_above_a_short_permission_prompt_are_not_chrome(marker):
+    screen = Screen(
+        text=CHROME_PERMISSION.format(marker=marker), exited=None, cursor={"x": 1, "y": 8}
+    )
+    assert question_chrome(AgentKind.CLAUDE, screen.text) is False
+    assert answerable_screen(AgentKind.CLAUDE, screen) is False
+
+
+@pytest.mark.parametrize("key", ["Enter", "1", "Space"])
+def test_a_bare_allow_option_is_never_pressed(key):
+    screen = Screen(
+        text=CHROME_PERMISSION.format(marker="⏺ done"), exited=None, cursor={"x": 1, "y": 8}
+    )
+    assert escalation(AgentKind.CLAUDE, screen, key, None) == "Allow"

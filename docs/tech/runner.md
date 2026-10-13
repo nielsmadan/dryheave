@@ -107,9 +107,10 @@ Codex profiles may explicitly select `workspace_trust: "trusted"` or
 setting creates a `projects."ABSOLUTE_OWNED_WORKSPACE".trust_level` command-line
 override and appears in `LaunchPlan.workspace_trust`. It does not copy a trust
 store or change permission/sandbox settings. Only Codex supports these explicit
-choices; other harnesses reject them. Permission, trust, unsupported and Codex
-structured-input dialogs stop as `needs_input`; the runner never asks the simulator
-to approve them. Claude selection dialogs are answered as described below.
+choices; other harnesses reject them. Permission, trust and other recognized
+blockers stop as `needs_input`; the runner never asks the simulator to approve them.
+Claude selection dialogs and question-tool screens the parsers cannot read are
+answered as described below.
 
 ## Controller protocol and budgets
 
@@ -204,8 +205,10 @@ files, role-directory size/count/depth and known process cleanup are bounded.
 A native role runtime may hold up to 4096 entries (its own Claude or Codex state);
 other controller directories up to 256. A call stopped by one of these limits records
 the limit on that call; the attempt's merged cleanup keeps only errors that leave
-cleanup unresolved. A terminal close is retried once, and a close whose
-acknowledgement is lost still counts once the daemon process is confirmed gone.
+cleanup unresolved. A terminal close is retried once. A close whose
+acknowledgement is lost still counts if the daemon exits by itself within the cleanup
+bound; a daemon that has to be killed, or whose identity no longer matches the owned
+launch, records `terminal_close_failed`.
 The subject's overall deadline covers all simulator time, with independent role
 call/count/total budgets. A parent deadline can end a call before its own budget.
 SIGINT and SIGTERM request cancellation and cleanup. No new subject input follows
@@ -309,6 +312,63 @@ hint's prompt step, or `dialog` when there is none. Recording does not move
 `workflow_position`. Without a workflow the capture keeps `workflow` None unless a
 dialog was answered; then it holds a `WorkflowProgress` with no steps, position 0 and
 the dialog events.
+
+### Screen answers
+
+When a turn stops on a Claude AskUserQuestion or Codex `request_user_input`
+screen that the driver cannot parse (`DriverSession.screen()` is not `None`; the
+allow-list is in drivers.md), the runner enters a screen loop instead of stopping.
+Any other unrecognised screen, and every Droid screen, stops with `needs_input`.
+Each step sends one simulator
+request with `SimulatorInput.screen` (the raw screen, trailing whitespace trimmed;
+when the request exceeds `max_input_bytes` only the bottom lines that fit are
+kept), the persona, the dialogue so far and the same `answer_hint` as a selection
+dialog, under `SCREEN_INSTRUCTION`. Only these requests carry the screen fields in
+the Codex/Claude output schema; other requests keep their schema and bytes. The
+decision returns `screen_kind` (`question`, `approval` or `busy`), for a question
+exactly one `screen_action` (`{"key": ...}` or `{"text": ...}`, no control
+characters, no leading `/`, `!` or `$`, at most 2000 characters) and `screen_target`
+(the option or answer it is working toward). A question is a `reply` with empty
+text and choices; `approval` and `busy` are a `stop` without an action. Text whose
+first non-space character is a digit is rejected, because Claude types text as
+keystrokes and a digit there selects an option. Anything else is a failed
+`invalid_screen_answer` call, retried once, then `needs_input`. The three fields
+are dropped from serialization when absent.
+
+Mode and permission prompts are kept from the simulator by the allow-list: such a
+prompt does not carry the question-tool chrome, so it never enters the loop. Two
+backstops sit behind it. The normalised `permission_like` wording check rejects a
+qualifying screen that also shows permission or mode wording. The option guard
+refuses any `Enter`, `Space` or digit whose chosen option or target names a mode
+or permission choice from its fixed vocabulary, whatever the simulator judged; it
+does not recognise every such option (one-shot "Yes"/"Allow" rows or session
+grants, for example). A refusal stops with `needs_input` and an `approval`
+observation (`SCREEN_ACTION_REFUSED`).
+
+The driver applies one action per call (`act`) to the screen the simulator saw;
+if the screen changed while the simulator was deciding, nothing is sent and the
+loop asks again with the new screen. `busy` waits for the screen to change or the
+turn to end (`await_change`), bounded by `SCREEN_WAIT_SECONDS` (60 s) in total per
+screen; on expiry the loop stops with `needs_input` (`SCREEN_WAIT_EXPIRED`).
+`approval` stops with `needs_input` and an `approval` observation; no key is sent.
+A subject that has exited stops as `exited` before any request or key. The loop
+ends when the screen no longer qualifies (the composer never does): the turn then
+continues as usual, or a parsed question takes the selection-dialog path.
+
+Screens are told apart by `screen_identity`, the normalised lines other than
+option, marker and typed-answer rows, so moving the highlight or typing keeps a
+screen while a new question starts another. Each screen gets `SCREEN_ACTIONS` (8)
+actions and `SCREEN_WAITS` (4) busy waits, and the whole loop at most
+`SCREEN_STEPS` (32) steps; exceeding either stops with `needs_input`. Each step
+journals a `screen-step` event (call ID, kind, action, target, resulting state and
+reason). A screen left after at least one sent key records its own `dialog`
+`answered` workflow event with that screen's simulator call IDs, like a selection
+dialog, as soon as the next screen appears, even if that one is then judged an
+approval; leaving through cancellation, timeout, subject exit or a lost key
+acknowledgement records none, and a lost acknowledgement stops with `needs_input`.
+Help-needed never counts screen decisions as conversational replies, answered or
+not. Calls count against the simulator budget as usual. Screens that appear before
+Enter was sent, or at startup, still stop as before.
 
 ## Durable recovery and assessment integration
 

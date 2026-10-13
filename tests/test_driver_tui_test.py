@@ -13,9 +13,9 @@ from dryheave.models import AgentKind
 from dryheave.processes import CommandResult
 
 
-def terminal(tmp_path, monkeypatch):
+def terminal(tmp_path, monkeypatch, limits=None):
     monkeypatch.setattr("dryheave.drivers.tui_test.MAX_RUNTIME_PATH_BYTES", 1000)
-    return TuiTestTerminal(Path(".tools/tui-test/tui-test"), tmp_path / "terminal")
+    return TuiTestTerminal(Path(".tools/tui-test/tui-test"), tmp_path / "terminal", limits=limits)
 
 
 def test_cli_envelopes_literal_argument_and_exit_zero(tmp_path, monkeypatch):
@@ -201,6 +201,41 @@ def test_claude_input_is_typed_with_shift_enter_newlines(tmp_path, monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(("agent", "long"), [(AgentKind.CLAUDE, 25), (AgentKind.CODEX, 26)])
+def test_typing_time_grows_with_the_text_while_keys_keep_the_command_bound(
+    tmp_path, monkeypatch, agent, long
+):
+    timeouts = []
+
+    def run(command, root, **kwargs):
+        timeouts.append(
+            (command.argv[command.argv.index("--session") + 2], command.timeout_seconds)
+        )
+        return CommandResult(command.argv, 0, b'{"ok":true,"data":{}}', b"", "exited")
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    with terminal(tmp_path, monkeypatch) as transport:
+        transport.agent = agent
+        transport.paste("short")
+        transport.paste("x" * 400)
+        transport.enter()
+    assert timeouts == [("type", 6), ("type", long), ("key", 5)]
+
+
+def test_typing_time_stops_at_the_terminal_lifetime(tmp_path, monkeypatch):
+    timeouts = []
+
+    def run(command, root, **kwargs):
+        timeouts.append(command.timeout_seconds)
+        return CommandResult(command.argv, 0, b'{"ok":true,"data":{}}', b"", "exited")
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    with terminal(tmp_path, monkeypatch, DriverLimits(duration_seconds=8)) as transport:
+        transport.agent = AgentKind.CLAUDE
+        transport.paste("x" * 4000)
+    assert timeouts == [8]
+
+
 def test_dialog_keys_are_pressed_by_name_and_other_keys_are_refused(tmp_path, monkeypatch):
     calls = []
 
@@ -210,15 +245,18 @@ def test_dialog_keys_are_pressed_by_name_and_other_keys_are_refused(tmp_path, mo
 
     monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
     with terminal(tmp_path, monkeypatch) as transport:
-        for key in ("Down", "Up", "Space", "Enter"):
+        for key in ("Down", "Up", "Space", "Enter", "1", "9"):
             transport.press(key)
-        with pytest.raises(InputError, match="not an allowed dialog key"):
-            transport.press("Escape")
+        for refused in ("Escape", "0", "Tab"):
+            with pytest.raises(InputError, match="not an allowed dialog key"):
+                transport.press(refused)
     assert [argv[argv.index("--session") + 2 :] for argv in calls] == [
         ("key", "press", "Down"),
         ("key", "press", "Up"),
         ("key", "press", "Space"),
         ("key", "press", "Enter"),
+        ("key", "press", "1"),
+        ("key", "press", "9"),
     ]
 
 
@@ -232,32 +270,76 @@ def _started(transport, pid, created):
     transport.daemon_identity = ProcessIdentity(pid=pid, created=created, parent_pid=1)
 
 
-def test_a_close_that_loses_its_acknowledgement_counts_once_the_daemon_is_gone(
+def _unacknowledged(command, root, **kwargs):
+    return CommandResult(command.argv, -9, b"", b"", "timeout")
+
+
+def _owned_daemon(transport, seconds):
+    daemon = psutil.Popen([sys.executable, "-c", f"import time; time.sleep({seconds})"])
+    transport.started = True
+    transport.daemon_identity = transport.owner.add(daemon)
+    return daemon
+
+
+CLOSE_LIMITS = DriverLimits(cleanup_seconds=2, poll_seconds=0.02)
+
+
+@pytest.mark.integration
+def test_a_close_that_loses_its_acknowledgement_counts_once_the_daemon_exits_by_itself(
     tmp_path, monkeypatch
 ):
-    def run(command, root, **kwargs):
-        return CommandResult(command.argv, -9, b"", b"", "timeout")
-
-    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
-    gone = psutil.Popen([sys.executable, "-c", "pass"])
-    created = gone.create_time()
-    gone.wait()
-    with terminal(tmp_path, monkeypatch) as transport:
-        _started(transport, gone.pid, created)
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", _unacknowledged)
+    with terminal(tmp_path, monkeypatch, CLOSE_LIMITS) as transport:
+        daemon = _owned_daemon(transport, 0.3)
         report = transport.close()
-    assert (report.terminal_closed, report.errors) == (True, ())
+    assert (report.terminal_closed, report.errors, daemon.wait(1)) == (True, (), 0)
 
 
-def test_a_close_with_a_live_daemon_and_no_acknowledgement_fails(tmp_path, monkeypatch):
+@pytest.mark.integration
+def test_an_owned_daemon_that_outlives_the_close_is_killed_and_the_close_fails(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", _unacknowledged)
+    limits = DriverLimits(cleanup_seconds=0.3, poll_seconds=0.02)
+    with terminal(tmp_path, monkeypatch, limits) as transport:
+        daemon = _owned_daemon(transport, 60)
+        report = transport.close()
+    assert (report.terminal_closed, report.errors) == (False, ("terminal_close_failed",))
+    assert daemon.wait(1) != 0
+
+
+@pytest.mark.integration
+def test_a_reused_daemon_pid_counts_as_the_daemon_having_exited(tmp_path, monkeypatch):
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", _unacknowledged)
+    stranger = psutil.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        with terminal(tmp_path, monkeypatch, CLOSE_LIMITS) as transport:
+            _started(transport, stranger.pid, stranger.create_time() - 100)
+            report = transport.close()
+        assert (report.terminal_closed, report.errors, stranger.is_running()) == (True, (), True)
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+def test_a_daemon_owned_by_someone_else_fails_the_close_without_a_retry(tmp_path, monkeypatch):
+    calls = []
+
     def run(command, root, **kwargs):
-        return CommandResult(command.argv, -9, b"", b"", "timeout")
+        calls.append(command.argv[-1])
+        payload = b'{"ok":true,"data":{"pid":1}}'
+        return CommandResult(command.argv, 0, payload, b"", "exited")
 
     monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
     live = psutil.Process()
     with terminal(tmp_path, monkeypatch) as transport:
         _started(transport, live.pid, live.create_time())
         report = transport.close()
-    assert (report.terminal_closed, report.errors) == (False, ("terminal_close_failed",))
+    assert (report.terminal_closed, report.errors, calls) == (
+        False,
+        ("terminal_close_failed",),
+        ["status"],
+    )
 
 
 def test_a_close_is_retried_once_before_it_fails(tmp_path, monkeypatch):

@@ -1,5 +1,6 @@
 import re
 import textwrap
+import unicodedata
 from dataclasses import dataclass
 from itertools import takewhile
 
@@ -65,6 +66,48 @@ MIN_ROWS = 2
 PREVIEW_COLUMN = 30
 PREVIEW_GAP = 4
 PREVIEW_FOOTER = " \u00b7 n to add notes \u00b7 "
+UNRECOGNIZED = "Unrecognized native dialog requires input."
+PERMISSION_PHRASES = re.compile(
+    r"don'?t ask (?:me )?again|do not ask (?:me )?again|what to do differently|allow all edits"
+    r"|grant (?:these )?permissions?|trust (?:this|the) (?:folder|files|contents|directory)"
+    r"|^trust this .*\?|^do you want to (?:proceed|make|create|allow|run|execute|approve"
+    r"|overwrite|delete|remove|fetch|edit|write|use|download|install)\b|^allow .*\?$"
+    r"|^allow (?:and|for this session)\b|^approve .*\?$|would you like to proceed\?"
+    r"|^ready to code\?|^(?:enter|exit) plan mode\?|^use (?:skill \".*\"|this skill)\?"
+    r"|^run a dynamic workflow\?|^yes, .*(?:auto mode|auto-accept edits|bypass permissions)"
+    r"|^select login method|^sign in with",
+    re.IGNORECASE,
+)
+ESCALATION = re.compile(
+    r"auto[ -]?mode|auto-accept|accept edits|bypass|don'?t ask (?:me )?again|always allow"
+    r"|allow all|allow and|and allow|trust|dangerously|skip[ -]permissions|yolo"
+    r"|\ballow\b|\bdeny\b|\bapprove\b",
+    re.IGNORECASE,
+)
+QUOTES = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\u2032": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u201f": '"',
+        "\u2033": '"',
+    }
+)
+INVISIBLE = re.compile("[\u00ad\u200b-\u200f\u2060\ufeff]")
+ROW_PREFIX = re.compile(r"^[\u276f\u203a\u00bb>]?\s*(?:\d+\.\s+)?")
+OPTION_LINE = re.compile(r"[\u276f\u203a\u00bb>]|\d+\.\s|\[.\]\s")
+CHROME_PREFIX = re.compile(r"^[\u276f\u203a\u00bb>]?\s*(?:\d+\.\s+)?(?:\[.\]\s+)?")
+CLAUDE_QUESTION_ROWS = {"Type something", "Type something.", "Type something...", "Chat about this"}
+CODEX_QUESTION = re.compile(r"Question \d+/\d+(?:\s|$)")
+CODEX_SUBMIT = re.compile(r"(?:^|\| )\S+ to submit (?:answer|all)(?: \||$)", re.IGNORECASE)
+CLAUDE_CHROME_TAIL = 6
+NUMBERED_OPTION = re.compile(r"^[\u276f\u203a\u00bb>]?\s*\d+\.\s")
+CODEX_FOOTER_TAIL = 2
 
 
 @dataclass(frozen=True)
@@ -149,9 +192,123 @@ def dialog(agent: AgentKind, screen: Screen) -> Observation | None:
 
 
 def unrecognized(text: str) -> Observation:
-    return Observation(
-        state="unsupported", reason="Unrecognized native dialog requires input.", text=text
+    return Observation(state="unsupported", reason=UNRECOGNIZED, text=text)
+
+
+def normalized(text: str) -> str:
+    return INVISIBLE.sub("", unicodedata.normalize("NFKC", text)).translate(QUOTES)
+
+
+def screen_lines(text: str) -> tuple[str, ...]:
+    lines = [normalized(line).rstrip() for line in text.splitlines()]
+    kept = [index for index, line in enumerate(lines) if line]
+    return tuple(lines[kept[0] : kept[-1] + 1]) if kept else ()
+
+
+def screen_identity(text: str) -> tuple[str, ...]:
+    return tuple(
+        line
+        for line in (line.strip() for line in screen_lines(text))
+        if line and not OPTION_LINE.match(line)
     )
+
+
+def permission_like(text: str) -> bool:
+    return any(
+        PERMISSION_PHRASES.search(ROW_PREFIX.sub("", line.strip()))
+        for line in normalized(text).splitlines()
+    )
+
+
+def option_rows(agent: AgentKind, screen: Screen, key: str) -> tuple[str, ...]:
+    lines = [normalized(line).rstrip() for line in screen.text.splitlines()]
+    markers = "\u203a\u00bb>" if agent == AgentKind.CODEX else "\u276f"
+    if key.isdigit():
+        number = re.compile(rf"[{markers}]?\s*{key}\.\s")
+        starts = [index for index, line in enumerate(lines) if number.match(line.strip())][-1:]
+    else:
+        starts = [
+            index for index, line in enumerate(lines) if line.lstrip().startswith(tuple(markers))
+        ][-1:]
+    if key == "Enter":
+        starts += [
+            index
+            for index, line in enumerate(lines)
+            if (box := CHECKBOX_ROW.search(line)) is not None and box["mark"] in CHECKED_MARKS
+        ]
+    return tuple(_option_text(lines, index) for index in starts)
+
+
+def _option_text(lines: list[str], start: int) -> str:
+    following = takewhile(
+        lambda line: bool(line.strip()) and not OPTION_LINE.match(line.strip()), lines[start + 1 :]
+    )
+    return " ".join(
+        [ROW_PREFIX.sub("", lines[start].strip()), *(line.strip() for line in following)]
+    )
+
+
+def escalation(agent: AgentKind, screen: Screen, key: str | None, target: str | None) -> str | None:
+    if key is None or key not in {"Enter", "Space", *"123456789"}:
+        return None
+    chosen = (*option_rows(agent, screen, key), *(() if target is None else (target,)))
+    return next((text for text in chosen if ESCALATION.search(normalized(text))), None)
+
+
+def footer(screen: Screen) -> str | None:
+    return next((line.strip() for line in reversed(screen.text.splitlines()) if line.strip()), None)
+
+
+def awaits_screen(observation: Observation) -> bool:
+    return observation.state == "structured_input" or (
+        observation.state == "unsupported" and observation.reason == UNRECOGNIZED
+    )
+
+
+def composer_ready(agent: AgentKind, screen: Screen) -> bool:
+    lines = screen.text.splitlines()
+    position = composer_row(agent, lines)
+    if position is None:
+        return False
+    above = next((line.strip() for line in reversed(lines[:position]) if line.strip()), "")
+    below = [line.strip() for line in lines[position + 1 :] if line.strip()]
+    return RULE.fullmatch(above) is not None or any(
+        line == "? for shortcuts" or "context left" in line for line in below
+    )
+
+
+def question_chrome(agent: AgentKind, text: str) -> bool:
+    lines = [line.strip() for line in normalized(text).splitlines() if line.strip()]
+    if agent == AgentKind.CLAUDE:
+        tail = lines[-CLAUDE_CHROME_TAIL:]
+        rows = [CHROME_PREFIX.sub("", line) for line in tail]
+        markers = [index for index, row in enumerate(rows) if row in CLAUDE_QUESTION_ROWS]
+        options_after_marker = markers and any(
+            NUMBERED_OPTION.match(line) and rows[index] not in CLAUDE_QUESTION_ROWS
+            for index, line in enumerate(tail)
+            if index > markers[-1]
+        )
+        return (bool(markers) and not options_after_marker) or (
+            "Submit answers" in rows and REVIEW_TITLE in lines
+        )
+    if agent == AgentKind.CODEX:
+        return any(map(CODEX_SUBMIT.search, lines[-CODEX_FOOTER_TAIL:])) and any(
+            CODEX_QUESTION.match(line) for line in lines[:-1]
+        )
+    return False
+
+
+def answerable_screen(agent: AgentKind, screen: Screen) -> bool:
+    found = dialog(agent, screen)
+    if (
+        found is None
+        or not awaits_screen(found)
+        or not question_chrome(agent, screen.text)
+        or permission_like(screen.text)
+    ):
+        return False
+    parsed = question_dialog(screen) if agent == AgentKind.CLAUDE else None
+    return parsed is None or parsed.kind != "question"
 
 
 def claude_dialog(screen: Screen) -> Observation | None:

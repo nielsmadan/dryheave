@@ -6,13 +6,22 @@ from types import TracebackType
 from typing import Self
 from uuid import uuid4
 
+from pydantic import JsonValue
+
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.base import DeliveryUncertain, EventSource, Terminal, TransportError
 from dryheave.drivers.dialogs import (
+    UNRECOGNIZED,
+    answerable_screen,
     composer,
     composer_matches,
+    composer_ready,
     dialog,
+    escalation,
+    footer,
+    permission_like,
     question_dialog,
+    screen_lines,
     submittable,
 )
 from dryheave.drivers.models import (
@@ -24,6 +33,7 @@ from dryheave.drivers.models import (
     Observation,
     QuestionDialog,
     Screen,
+    ScreenAction,
     Submission,
     UsageObservation,
 )
@@ -35,6 +45,14 @@ from dryheave.profile_models import LaunchPlan
 from dryheave.serialization import digest
 
 CLOSED_POLLS = 2
+SCREEN_KEY_UNCERTAIN = "Screen key delivery was not acknowledged; the screen state is unknown."
+SCREEN_ACTION_REFUSED = (
+    "The screen action would choose a mode or permission option; no key was sent."
+)
+SCREEN_WAIT_EXPIRED = "The screen stayed unchanged past its busy wait bound."
+SUBJECT_EXITED = "Subject exited without matching completion evidence."
+COMPOSER_UNREADABLE = "Native composer could not be read while clearing; delivery stopped."
+SCREEN_EVIDENCE_CHARS = 8000
 
 
 def normalize_input(text: str) -> str:
@@ -96,6 +114,8 @@ class DriverSession:
         self.enter_attempted = False
         self.accepted_count = 0
         self.answered = 0
+        self.screen_actions = 0
+        self.screen_footer: str | None = None
         self.counted: set[str] = set()
         self.cleanup: CleanupReport | None = None
 
@@ -201,6 +221,7 @@ class DriverSession:
             }
         )
         self.prompt = normalized
+        self.screen_footer = None
         self.delivery_attempted = self.enter_attempted = False
         self.artifacts.record("submission-intent", self.submission)
         return self.submission
@@ -229,8 +250,9 @@ class DriverSession:
                     "Composer already contains text; delivery stopped.",
                     screen.text,
                 )
-            self.terminal.paste(self.prompt)
-            verification = self._verify_composer(self.prompt)
+            verification = self._type_prompt(
+                submission, self.prompt, had_existing_text=bool(current)
+            )
             if verification is not None:
                 return verification
             self.enter_attempted = True
@@ -240,12 +262,93 @@ class DriverSession:
             return self.reconcile(wait=True)
         return self.reconcile(wait=True)
 
+    def _type_prompt(
+        self, submission: Submission, prompt: str, *, had_existing_text: bool
+    ) -> Observation | None:
+        evidence: dict[str, JsonValue] = {"submission_id": submission.submission_id}
+        try:
+            self.terminal.paste(prompt)
+        except DeliveryUncertain:
+            self.artifacts.record("typing-uncertain", evidence | {"retyped": False})
+            verification = self._verify_composer(prompt)
+            if had_existing_text or verification is None or verification.state != "partial_input":
+                return verification
+            cleared = self._clear_composer()
+            if isinstance(cleared, Observation):
+                return cleared
+            if not cleared:
+                return verification
+            self.artifacts.record("typing-retry", evidence)
+            try:
+                self.terminal.paste(prompt)
+            except DeliveryUncertain:
+                self.artifacts.record("typing-uncertain", evidence | {"retyped": True})
+        return self._verify_composer(prompt)
+
+    def _clear_composer(self) -> Observation | bool:
+        screen = self._read_until_present()
+        if screen is None:
+            return self._observation("delivery_uncertain", COMPOSER_UNREADABLE)
+        current = composer(self.agent, screen)
+        presses = 0 if current is None else 2 * (current.count("\n") + 1) + 2
+        for _ in range(presses):
+            blocked = self._blocked(screen)
+            if blocked is not None:
+                return blocked
+            current = composer(self.agent, screen)
+            if not current:
+                return current == ""
+            try:
+                self.terminal.clear_line()
+            except DeliveryUncertain:
+                return False
+            changed = self._screen_change(screen)
+            if changed is None:
+                return False
+            screen = changed
+        blocked = self._blocked(screen)
+        return blocked if blocked is not None else composer(self.agent, screen) == ""
+
+    def _read_until_present(self) -> Screen | None:
+        deadline = min(self.deadline, time.monotonic() + self.limits.command_seconds)
+        while time.monotonic() < deadline and self.polls < self.limits.max_polls:
+            self.polls += 1
+            screen = self._read()
+            if screen is not None:
+                return screen
+            self.cancelled.wait(min(self.limits.poll_seconds, max(0, deadline - time.monotonic())))
+        return None
+
+    def _screen_change(self, before: Screen | None) -> Screen | None:
+        deadline = min(self.deadline, time.monotonic() + self.limits.command_seconds)
+        while time.monotonic() < deadline and self.polls < self.limits.max_polls:
+            self.polls += 1
+            screen = self._read()
+            if screen is not None and (
+                before is None or (screen.text, screen.cursor) != (before.text, before.cursor)
+            ):
+                return screen
+            self.cancelled.wait(min(self.limits.poll_seconds, max(0, deadline - time.monotonic())))
+        return None
+
+    def _read(self) -> Screen | None:
+        try:
+            return self.terminal.state()
+        except DeliveryUncertain:
+            return None
+
     def _verify_composer(self, prompt: str) -> Observation | None:
         deadline = min(self.deadline, time.monotonic() + self.limits.command_seconds)
         screen = None
         while time.monotonic() < deadline and self.polls < self.limits.max_polls:
             self.polls += 1
-            screen = self.terminal.state()
+            read = self._read()
+            if read is None:
+                self.cancelled.wait(
+                    min(self.limits.poll_seconds, max(0, deadline - time.monotonic()))
+                )
+                continue
+            screen = read
             blocked = self._blocked(screen)
             if blocked is not None:
                 return blocked
@@ -285,6 +388,120 @@ class DriverSession:
         except DeliveryUncertain:
             failure = "Dialog key delivery was not acknowledged; the dialog state is unknown."
         return self._dialog_stop(failure)
+
+    def screen(self) -> Screen | None:
+        if self.submission is None or self.cleanup is not None:
+            return None
+        current = self.terminal.state()
+        self.screen_footer = self._open_footer(current)
+        return current if self.screen_footer is not None else None
+
+    def _open_footer(self, screen: Screen) -> str | None:
+        if composer_ready(self.agent, screen):
+            return None
+        if answerable_screen(self.agent, screen):
+            return footer(screen)
+        same = (
+            self.screen_footer is not None
+            and screen.exited is None
+            and footer(screen) == self.screen_footer
+            and dialog(self.agent, screen) is None
+            and not permission_like(screen.text)
+        )
+        return self.screen_footer if same else None
+
+    def act(self, action: ScreenAction, shown: str, target: str | None = None) -> Observation:
+        if self.submission is None or self.cleanup is not None:
+            raise InputError("Screen answers need an active native submission.")
+        before = self.terminal.state()
+        self.screen_footer = self._open_footer(before)
+        if self.cancelled.is_set() or before.exited is not None or self.screen_footer is None:
+            return self._screen_outcome(before)
+        evidence: dict[str, JsonValue] = {
+            "screen": before.text[-SCREEN_EVIDENCE_CHARS:],
+            "action": action.model_dump(mode="json"),
+        }
+        if screen_lines(before.text) != screen_lines(shown):
+            self.artifacts.record("screen-stale", evidence)
+            return self._screen_outcome(before)
+        chosen = escalation(self.agent, before, action.key, target)
+        if chosen is not None:
+            self.artifacts.record(
+                "screen-refused", {**evidence, "target": target, "option": chosen}
+            )
+            return self._observation("approval", SCREEN_ACTION_REFUSED, before.text)
+        self.artifacts.record("screen-intent", evidence)
+        self.screen_actions += 1
+        try:
+            if action.key is not None:
+                self._press(action.key)
+            elif action.text is not None:
+                self.terminal.paste(action.text)
+        except DeliveryUncertain:
+            return self._dialog_stop(SCREEN_KEY_UNCERTAIN)
+        after = self._settle(before.text)
+        current = after or self.terminal.state()
+        self.artifacts.record(
+            "screen-result",
+            {"changed": after is not None, "screen": current.text[-SCREEN_EVIDENCE_CHARS:]},
+        )
+        return self._screen_outcome(current)
+
+    def await_change(self, shown: str, until: float) -> Observation:
+        if self.submission is None or self.cleanup is not None:
+            raise InputError("Screen waits need an active native submission.")
+        while True:
+            self.polls += 1
+            if time.monotonic() >= self.deadline or self.polls > self.limits.max_polls:
+                return self._observation("timeout", "Driver lifetime or polling limit reached.")
+            self._ingest()
+            screen = self.terminal.state()
+            if self.cancelled.is_set() or screen.text != shown or screen.exited is not None:
+                return self._screen_outcome(screen)
+            turn = self.observe_turn()
+            if turn.state in {"completed", "question", "cancelled"}:
+                return turn
+            if time.monotonic() >= until:
+                return self._observation("unsupported", SCREEN_WAIT_EXPIRED, screen.text)
+            self.cancelled.wait(
+                min(self.limits.poll_seconds, max(0, min(self.deadline, until) - time.monotonic()))
+            )
+
+    def exit_observation(self, screen: Screen) -> Observation:
+        self._ingest()
+        completed = self.observe_turn()
+        return (
+            completed
+            if completed.state in {"completed", "question", "cancelled"}
+            else self._observation("exited", SUBJECT_EXITED, screen.text)
+        )
+
+    def _screen_outcome(self, screen: Screen) -> Observation:
+        if self.cancelled.is_set():
+            return self._observation("cancelled", "Controller cancellation requested.", screen.text)
+        if screen.exited is not None:
+            return self.exit_observation(screen)
+        found = dialog(self.agent, screen)
+        if found is not None:
+            return found
+        self.screen_footer = self._open_footer(screen)
+        if self.screen_footer is not None:
+            return self._observation("unsupported", UNRECOGNIZED, screen.text)
+        return self.reconcile()
+
+    def _settle(self, before: str) -> Screen | None:
+        deadline = min(self.deadline, time.monotonic() + self.limits.command_seconds)
+        changed: Screen | None = None
+        while not self.cancelled.is_set() and self.polls < self.limits.max_polls:
+            self.polls += 1
+            screen = self.terminal.state()
+            if changed is not None and screen.text == changed.text:
+                return screen
+            changed = screen if screen.text != before else None
+            if time.monotonic() >= deadline:
+                return changed
+            self.cancelled.wait(min(self.limits.poll_seconds, max(0, deadline - time.monotonic())))
+        return changed
 
     def _dialog_stop(self, reason: str) -> Observation:
         text = self.terminal.state().text
@@ -537,14 +754,7 @@ class DriverSession:
         if found is not None:
             return found
         if screen.exited is not None:
-            completed = self.observe_turn()
-            return (
-                completed
-                if completed.state in {"completed", "question", "cancelled"}
-                else self._observation(
-                    "exited", "Subject exited without matching completion evidence.", screen.text
-                )
-            )
+            return self.exit_observation(screen)
         return None
 
     def _wait(self, classify: Callable[[Screen], Observation]) -> Observation:

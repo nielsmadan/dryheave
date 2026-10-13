@@ -10,14 +10,13 @@ from dryheave.filesystem import directory_fd
 MAX_CONTROLLER_DEPTH = 16
 MAX_CONTROLLER_FILES = 256
 MAX_RUNTIME_FILES = 4096
-LIMIT_ERRORS = frozenset(
-    {
-        "controller_file_limit",
-        "controller_file_depth",
-        "controller_response_file_limit",
-        "controller_special_file",
-    }
-)
+FILE_LIMIT = "controller_file_limit"
+DEPTH_LIMIT = "controller_file_depth"
+RESPONSE_FILE_LIMIT = "controller_response_file_limit"
+SPECIAL_FILE = "controller_special_file"
+OBSERVATION_FAILED = "controller_file_observation_failed"
+CONTROLLER_LIMIT_ERRORS = frozenset({FILE_LIMIT, DEPTH_LIMIT, RESPONSE_FILE_LIMIT})
+CHILD_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
 class ControllerWatch:
@@ -42,22 +41,28 @@ class ControllerWatch:
         self.thread = threading.Thread(target=self._watch, daemon=True)
         self.thread.start()
 
-    def _measure(self, root: Path, depth: int = 0) -> tuple[int, int]:
+    def _measure(self, root: Path) -> tuple[int, int]:
+        with directory_fd(root) as descriptor:
+            return self._measure_directory(descriptor, root, 0)
+
+    def _measure_directory(self, descriptor: int, path: Path, depth: int) -> tuple[int, int]:
         if depth > MAX_CONTROLLER_DEPTH:
-            raise ValueError("controller_file_depth")
+            raise ValueError(DEPTH_LIMIT)
         size = count = 0
-        with directory_fd(root) as descriptor, os.scandir(descriptor) as entries:
+        with os.scandir(descriptor) as entries:
             for entry in entries:
                 count += 1
                 if count > self.max_files:
-                    raise ValueError("controller_file_limit")
+                    raise ValueError(FILE_LIMIT)
                 try:
                     info = entry.stat(follow_symlinks=False)
                 except FileNotFoundError:
                     continue
                 if stat.S_ISDIR(info.st_mode):
                     try:
-                        child_size, child_count = self._measure(root / entry.name, depth + 1)
+                        child_size, child_count = self._measure_child(
+                            descriptor, path, entry.name, depth + 1
+                        )
                     except FileNotFoundError:
                         continue
                     size += child_size
@@ -65,22 +70,29 @@ class ControllerWatch:
                 elif stat.S_ISREG(info.st_mode):
                     size += info.st_size
                     if (
-                        root == self.root
+                        path == self.root
                         and entry.name == "response.json"
                         and info.st_size > self.output_bytes
                     ):
-                        raise ValueError("controller_response_file_limit")
-                elif stat.S_ISLNK(info.st_mode) and self.owned_symlinks.get(root / entry.name) == (
+                        raise ValueError(RESPONSE_FILE_LIMIT)
+                elif stat.S_ISLNK(info.st_mode) and self.owned_symlinks.get(path / entry.name) == (
                     info.st_dev,
                     info.st_ino,
                     info.st_ctime_ns,
                 ):
                     pass
                 else:
-                    raise ValueError("controller_special_file")
+                    raise ValueError(SPECIAL_FILE)
                 if size > self.max_bytes or count > self.max_files:
-                    raise ValueError("controller_file_limit")
+                    raise ValueError(FILE_LIMIT)
         return size, count
+
+    def _measure_child(self, parent: int, path: Path, name: str, depth: int) -> tuple[int, int]:
+        child = os.open(name, CHILD_DIRECTORY_FLAGS, dir_fd=parent)
+        try:
+            return self._measure_directory(child, path / name, depth)
+        finally:
+            os.close(child)
 
     def _check(self) -> None:
         if self.parent_cancelled.is_set():
@@ -92,12 +104,12 @@ class ControllerWatch:
                 size += root_size
                 count += root_count
                 if size > self.max_bytes or count > self.max_files:
-                    raise ValueError("controller_file_limit")
+                    raise ValueError(FILE_LIMIT)
         except ValueError as error:
             self.error = str(error)
             self.cancelled.set()
         except (OSError, DryheaveError):
-            self.error = "controller_file_observation_failed"
+            self.error = OBSERVATION_FAILED
             self.cancelled.set()
 
     def _watch(self) -> None:

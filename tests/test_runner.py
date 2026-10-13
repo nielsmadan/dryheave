@@ -1,17 +1,27 @@
 import json
 import threading
+import time
 
 import pytest
 
-from conftest import AskedQuestion, ClaudeQuestionUI, workflow_benchmark
+from conftest import (
+    CHANNEL,
+    EDIT_PERMISSION,
+    FIX_SCOPE,
+    AskedQuestion,
+    ClaudeQuestionUI,
+    ScreenUI,
+    workflow_benchmark,
+)
 from dryheave.cli import main
-from dryheave.drivers.models import Screen
+from dryheave.drivers.models import CleanupReport, ProcessIdentity, Screen
 from dryheave.errors import ConflictError, InputError, NotFoundError
 from dryheave.experiments import create_experiment, load_experiment
 from dryheave.fixture_subject import FixtureTerminal
 from dryheave.journals import RunStore
 from dryheave.models import ObjectKind, TrialStage
 from dryheave.runner import load_capture, run_experiment, run_status
+from dryheave.runner_attempt import _combine_cleanup
 from dryheave.runner_models import RunOptions
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json
@@ -286,25 +296,6 @@ def test_permission_dialog_stops_without_a_simulator_call(store, benchmark):
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "needs_input"
     assert capture.controller_calls == ()
-
-
-@pytest.mark.integration
-def test_a_codex_structured_input_dialog_stops_without_a_simulator_call(
-    store, benchmark, monkeypatch
-):
-    from pathlib import Path
-
-    structured_input = json.loads(Path("tests/fixtures/codex-dialogs.json").read_text())["freeform"]
-    terminals = dialog_fixture(monkeypatch, {benchmark.fixture[0].prompt.strip(): structured_input})
-    result = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
-    )
-    capture = load_capture(store, result.pending_assessment[0])
-    assert (capture.stop_reason, capture.last_observation.state) == (
-        "needs_input",
-        "structured_input",
-    )
-    assert (capture.controller_calls, terminals[0].keys) == ((), [])
 
 
 @pytest.mark.integration
@@ -1109,7 +1100,12 @@ class DialogFixtureTerminal(FixtureTerminal):
         if isinstance(self.showing, str):
             return Screen(text=self.showing, exited=None)
         if self.showing is not None and self.showing.open:
+            if hasattr(self.showing, "screen"):
+                return self.showing.screen()
             return Screen(text=self.showing.render(), exited=None)
+        if self.held:
+            self.source.batches.append(self.held)
+            self.held = []
         return super().state()
 
     def enter(self):
@@ -1122,13 +1118,14 @@ class DialogFixtureTerminal(FixtureTerminal):
 
     def press(self, key):
         super().press(key)
-        if isinstance(self.showing, ClaudeQuestionUI) and self.showing.open:
+        if not isinstance(self.showing, str | None) and self.showing.open:
             self.showing.press(key)
             if not self.showing.open:
                 self.source.batches.append(self.held)
+                self.held = []
 
     def paste(self, text):
-        if isinstance(self.showing, ClaudeQuestionUI) and self.showing.open:
+        if not isinstance(self.showing, str | None) and self.showing.open:
             self.typed.append(text)
             self.showing.type(text)
             return
@@ -1391,25 +1388,516 @@ def test_a_startup_trust_prompt_never_reaches_the_simulator(store, benchmark, mo
     assert (capture.controller_calls, terminals[0].keys, terminals[0].pastes) == ((), [], [])
 
 
-def test_attempt_cleanup_drops_a_recovered_call_limit_but_keeps_real_cleanup_errors():
-    from dryheave.drivers.models import CleanupReport
-    from dryheave.runner_attempt import _combine_cleanup
+def cleanup_report(*errors, stopped=True, survivors=()):
+    return CleanupReport(
+        terminal_closed=True,
+        known_writers_stopped=stopped,
+        logs_drained=True,
+        owned=survivors,
+        survivors=survivors,
+        errors=errors,
+        coverage="partial-native",
+    )
 
-    def report(*errors: str, stopped: bool = True) -> CleanupReport:
-        return CleanupReport(
-            terminal_closed=True,
-            known_writers_stopped=stopped,
-            logs_drained=True,
-            owned=(),
-            survivors=(),
-            errors=errors,
-            coverage="partial-native",
+
+def test_attempt_cleanup_drops_a_recovered_call_limit_but_keeps_real_cleanup_errors():
+    combined = _combine_cleanup(
+        cleanup_report(),
+        cleanup_report("controller_file_limit"),
+        cleanup_report("controller_special_file"),
+        cleanup_report("runtime_binding_cleanup_failed"),
+    )
+    assert combined.errors == ("controller_special_file", "runtime_binding_cleanup_failed")
+    assert combined.known_writers_stopped
+    unstopped = _combine_cleanup(
+        cleanup_report(), cleanup_report("controller_file_limit", stopped=False)
+    )
+    assert (unstopped.errors, unstopped.known_writers_stopped) == ((), False)
+
+
+def test_a_call_limit_never_excuses_surviving_writers():
+    survivor = ProcessIdentity(pid=4242, created=1.0, parent_pid=1)
+    combined = _combine_cleanup(
+        cleanup_report(),
+        cleanup_report("controller_file_limit", stopped=False, survivors=(survivor,)),
+    )
+    assert (combined.known_writers_stopped, combined.survivors) == (False, (survivor,))
+
+
+def screen_reply(key=None, text=None, target="Fix all Should Fix"):
+    from dryheave.controller_models import SimulatorDecision
+    from dryheave.drivers.models import ScreenAction
+
+    return SimulatorDecision(
+        action="reply",
+        reason="Acting as this user on the screen.",
+        screen_kind="question",
+        screen_action=ScreenAction(key=key, text=text),
+        screen_target=target,
+    )
+
+
+def screen_step(decision, seen="Apply fixes for the Should Fix findings?"):
+    from dryheave.controller_models import ScriptStep
+
+    return ScriptStep(match="contains", assistant=seen, decision=decision)
+
+
+def screen_judgement(kind):
+    from dryheave.controller_models import SimulatorDecision
+
+    return SimulatorDecision(action="stop", reason="Judging the screen.", screen_kind=kind)
+
+
+def scripted(draft, *script):
+    from dryheave.controller_models import RoleBudget
+
+    return draft.model_copy(
+        update={
+            "simulator": draft.simulator.model_copy(
+                update={"script": script, "budget": RoleBudget(max_calls=len(script))}
+            )
+        }
+    )
+
+
+def run_screen(store, draft, monkeypatch, ui):
+    terminals = dialog_fixture(monkeypatch, {draft.fixture[0].prompt.strip(): ui})
+    result = run_experiment(
+        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    return capture, terminals[0], store.read_blobs(result.pending_assessment[0])
+
+
+def screen_evidence(blobs, name):
+    return [
+        json.loads(content)
+        for path, content in sorted(blobs.items())
+        if path.startswith("evidence/driver/") and path.endswith(f"-{name}.json")
+    ]
+
+
+def answered_dialogs(capture):
+    from dryheave.runner_models import WorkflowEvent, WorkflowProgress
+
+    return WorkflowProgress(
+        steps=(),
+        position=0,
+        events=(
+            WorkflowEvent(
+                step_id="dialog",
+                kind="dialog",
+                outcome="answered",
+                turn=1,
+                call_ids=tuple(
+                    call.call_id
+                    for call in capture.controller_calls
+                    if call.decision is not None and call.decision.screen_kind is not None
+                ),
+            ),
+        ),
+    )
+
+
+@pytest.mark.integration
+def test_the_claude_fix_scope_screen_is_answered_through_the_screen_loop(
+    store, benchmark, monkeypatch
+):
+    from dryheave.controller_models import SCREEN_INSTRUCTION
+
+    prompt = benchmark.fixture[0].prompt.strip()
+    draft = claude_draft(
+        store, benchmark, screen_step(screen_reply(key="Enter")), *benchmark.simulator.script
+    )
+    ui = ScreenUI(FIX_SCOPE)
+    capture, terminal, blobs = run_screen(store, draft, monkeypatch, ui)
+    assert (capture.stop_reason, capture.accepted_turns) == ("simulator_stop", 2)
+    assert (terminal.keys, ui.answer) == (["Enter"], "Fix all Should Fix")
+    assert capture.workflow == answered_dialogs(capture)
+    asked = capture.controller_calls[0]
+    request = json.loads(blobs[f"evidence/controller/{asked.call_id}/000001-request.json"])
+    assert request["instruction"] == SCREEN_INSTRUCTION
+    assert request["screen"] == FIX_SCOPE.strip()
+    assert request["dialogue"] == [{"role": "user", "text": prompt}]
+    assert {"dialog", "answer_hint"}.isdisjoint(request)
+    intents = screen_evidence(blobs, "screen-intent")
+    assert [(item["action"], item["screen"]) for item in intents] == [
+        ({"key": "Enter"}, FIX_SCOPE.rstrip("\n"))
+    ]
+
+
+@pytest.mark.integration
+def test_a_screen_is_answered_one_key_at_a_time_guided_by_the_prompt_step_hint(
+    store, graded_benchmark, tmp_path, monkeypatch
+):
+    from dryheave.cases import InspectStep, PromptStep
+    from dryheave.controller_models import SimulatorDecision
+    from dryheave.experiment_models import FixtureTurn
+
+    hint = "Use the nightly channel."
+    draft, _ = workflow_benchmark(
+        store,
+        graded_benchmark,
+        tmp_path,
+        workflow=(
+            PromptStep(step_id="release", prompt="Pick a release channel.", answer_hint=hint),
+            InspectStep(step_id="check", criteria=("greeting",)),
+        ),
+    )
+    seen = "Which release channel?"
+    draft = claude_draft(
+        store,
+        draft.model_copy(
+            update={
+                "fixture": (
+                    *draft.fixture,
+                    FixtureTurn(prompt="Pick a release channel.", assistant="Switched to nightly."),
+                )
+            }
+        ),
+        *draft.simulator.script,
+        *(
+            screen_step(screen_reply(key=key, target="Nightly"), seen)
+            for key in ("Down", "Down", "Enter")
+        ),
+        screen_step(SimulatorDecision(action="stop", reason="Done."), "Switched to nightly."),
+    )
+    ui = ScreenUI(CHANNEL)
+    terminals = dialog_fixture(monkeypatch, {"Pick a release channel.": ui})
+    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "workflow_complete"
+    assert (terminals[0].keys, ui.answer) == (["Down", "Down", "Enter"], "Nightly")
+    assert workflow_events(capture) == [
+        ("prompt", "sent"),
+        ("dialog", "answered"),
+        ("inspect", "passed"),
+    ]
+    answered = capture.workflow.events[1]
+    screen_calls = capture.controller_calls[2:5]
+    assert (answered.step_id, answered.call_ids) == (
+        "release",
+        tuple(call.call_id for call in screen_calls),
+    )
+    blobs = store.read_blobs(result.pending_assessment[0])
+    requests = [
+        json.loads(blobs[f"evidence/controller/{call.call_id}/000001-request.json"])
+        for call in screen_calls
+    ]
+    assert [request["answer_hint"] for request in requests] == [hint] * 3
+    assert "\u276f 3. Nightly" in requests[2]["screen"]
+
+
+@pytest.mark.integration
+def test_free_text_is_typed_into_a_screen_then_submitted(store, benchmark, monkeypatch):
+    text = "Only fix the prefix bug"
+    draft = claude_draft(
+        store,
+        benchmark,
+        screen_step(screen_reply(key="3", target=text)),
+        screen_step(screen_reply(text=text, target=text)),
+        screen_step(screen_reply(key="Enter", target=text)),
+        *benchmark.simulator.script,
+    )
+    ui = ScreenUI(FIX_SCOPE)
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, ui)
+    assert capture.stop_reason == "simulator_stop"
+    assert (terminal.keys, terminal.typed, ui.answer) == (["3", "Enter"], [text], text)
+    assert capture.workflow == answered_dialogs(capture)
+
+
+class BusyUI(ScreenUI):
+    def __init__(self, template, reads):
+        super().__init__(template)
+        self.reads = reads
+
+    def screen(self):
+        self.reads -= 1
+        if self.reads < 0:
+            self.answer = "finished without input"
+        return super().screen()
+
+
+@pytest.mark.integration
+def test_a_busy_screen_is_waited_out_without_a_key(store, benchmark, monkeypatch):
+    draft = claude_draft(
+        store, benchmark, screen_step(screen_judgement("busy")), *benchmark.simulator.script
+    )
+    capture, terminal, blobs = run_screen(store, draft, monkeypatch, BusyUI(FIX_SCOPE, 8))
+    assert (capture.stop_reason, capture.accepted_turns) == ("simulator_stop", 2)
+    assert (terminal.keys, terminal.typed, capture.workflow) == ([], [], None)
+    assert capture.controller_calls[0].decision.screen_kind == "busy"
+    assert screen_evidence(blobs, "screen-intent") == []
+
+
+@pytest.mark.integration
+def test_a_screen_judged_an_approval_stops_without_a_key(store, benchmark, monkeypatch):
+    draft = claude_draft(store, benchmark, screen_step(screen_judgement("approval")))
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, ScreenUI(FIX_SCOPE))
+    assert (capture.stop_reason, capture.last_observation.state) == ("needs_input", "approval")
+    assert capture.last_observation.reason == (
+        "The simulator judged the screen a permission prompt; it was not answered."
+    )
+    assert (terminal.keys, len(capture.controller_calls), capture.workflow) == ([], 1, None)
+
+
+@pytest.mark.integration
+def test_an_unanchored_permission_prompt_never_reaches_the_simulator(store, benchmark, monkeypatch):
+    draft = claude_draft(store, benchmark, *benchmark.simulator.script)
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, ScreenUI(EDIT_PERMISSION))
+    assert (capture.stop_reason, capture.last_observation.text) == (
+        "needs_input",
+        EDIT_PERMISSION.rstrip("\n"),
+    )
+    assert (capture.controller_calls, terminal.keys, terminal.pastes) == (
+        (),
+        [],
+        [benchmark.fixture[0].prompt.strip()],
+    )
+
+
+@pytest.mark.integration
+def test_a_screen_still_open_after_the_step_cap_needs_input(store, benchmark, monkeypatch):
+    from dryheave.runner_attempt import SCREEN_ACTIONS
+
+    keys = ["Down", "Up"] * SCREEN_ACTIONS
+    draft = claude_draft(store, benchmark, *(screen_step(screen_reply(key=key)) for key in keys))
+    ui = ScreenUI(FIX_SCOPE)
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, ui)
+    assert (capture.stop_reason, capture.last_observation.reason) == (
+        "needs_input",
+        "The screen stayed open after its bounded answer steps.",
+    )
+    assert (terminal.keys, ui.open, capture.workflow) == (keys[:SCREEN_ACTIONS], True, None)
+    assert len(capture.controller_calls) == SCREEN_ACTIONS
+
+
+@pytest.mark.integration
+def test_an_invalid_screen_answer_is_retried_once_then_needs_input(store, benchmark, monkeypatch):
+    from dryheave.controller_models import SimulatorDecision
+
+    draft = claude_draft(
+        store,
+        benchmark,
+        screen_step(SimulatorDecision(action="stop", reason="No judgement.")),
+        screen_step(screen_reply(key="Enter").model_copy(update={"screen_kind": "busy"})),
+    )
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, ScreenUI(FIX_SCOPE))
+    assert capture.stop_reason == "needs_input"
+    assert [(call.status, call.error) for call in capture.controller_calls] == [
+        ("failed", "invalid_screen_answer"),
+        ("failed", "invalid_screen_answer"),
+    ]
+    assert terminal.keys == []
+
+
+class CodexFreeformUI:
+    def __init__(self, template):
+        self.template, self.typed, self.answer = template, "", None
+
+    @property
+    def open(self):
+        return self.answer is None
+
+    def press(self, key):
+        if key == "Enter" and self.typed:
+            self.answer = self.typed
+
+    def type(self, text):
+        self.typed += text
+
+    def screen(self):
+        placeholder = "Type your answer (optional)"
+        return Screen(
+            text=self.template.replace(placeholder, self.typed or placeholder), exited=None
         )
 
-    combined = _combine_cleanup(
-        report(), report("controller_file_limit"), report("runtime_binding_cleanup_failed")
+
+@pytest.mark.integration
+def test_a_codex_question_the_parser_cannot_answer_goes_through_the_screen_loop(
+    store, benchmark, monkeypatch
+):
+    from pathlib import Path
+
+    template = json.loads(Path("tests/fixtures/codex-dialogs.json").read_text())["freeform"]
+    text = "Use a comma after Hello."
+    draft = scripted(
+        benchmark,
+        screen_step(screen_reply(text=text, target=text), "Share details."),
+        screen_step(screen_reply(key="Enter", target=text), "Share details."),
+        *benchmark.simulator.script,
     )
-    assert combined.errors == ("runtime_binding_cleanup_failed",)
-    assert combined.known_writers_stopped
-    unstopped = _combine_cleanup(report(), report("controller_file_limit", stopped=False))
-    assert (unstopped.errors, unstopped.known_writers_stopped) == ((), False)
+    ui = CodexFreeformUI(template)
+    capture, terminal, blobs = run_screen(store, draft, monkeypatch, ui)
+    assert (capture.stop_reason, capture.accepted_turns) == ("simulator_stop", 2)
+    assert (terminal.typed, terminal.keys, ui.answer) == ([text], ["Enter"], text)
+    assert capture.workflow == answered_dialogs(capture)
+    results = screen_evidence(blobs, "screen-result")
+    assert [item["changed"] for item in results] == [True, True]
+    assert "\u203a Use a comma after Hello." in results[0]["screen"]
+
+
+class LostKeyUI(ScreenUI):
+    def press(self, key):
+        from dryheave.drivers.base import DeliveryUncertain
+
+        raise DeliveryUncertain("Fixture screen key acknowledgement lost.")
+
+
+@pytest.mark.integration
+def test_a_lost_screen_key_acknowledgement_needs_input_without_an_answer(
+    store, benchmark, monkeypatch
+):
+    from dryheave.drivers.session import SCREEN_KEY_UNCERTAIN
+
+    draft = claude_draft(store, benchmark, screen_step(screen_reply(key="Enter")))
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, LostKeyUI(FIX_SCOPE))
+    assert (capture.stop_reason, capture.last_observation.reason) == (
+        "needs_input",
+        SCREEN_KEY_UNCERTAIN,
+    )
+    assert (terminal.keys, capture.workflow) == (["Enter"], None)
+
+
+@pytest.mark.integration
+def test_a_screen_action_aimed_at_a_mode_option_needs_input_without_a_key(
+    store, benchmark, monkeypatch
+):
+    from dryheave.drivers.session import SCREEN_ACTION_REFUSED
+
+    draft = claude_draft(
+        store, benchmark, screen_step(screen_reply(key="Enter", target="Yes, and use auto mode"))
+    )
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, ScreenUI(FIX_SCOPE))
+    assert (capture.stop_reason, capture.last_observation.state) == ("needs_input", "approval")
+    assert capture.last_observation.reason == SCREEN_ACTION_REFUSED
+    assert (terminal.keys, capture.workflow) == ([], None)
+
+
+@pytest.mark.integration
+def test_a_screen_judged_busy_that_never_changes_needs_input_at_the_wait_bound(
+    store, benchmark, monkeypatch
+):
+    from dryheave.drivers.session import SCREEN_WAIT_EXPIRED
+
+    monkeypatch.setattr("dryheave.runner_attempt.SCREEN_WAIT_SECONDS", 0.5)
+    draft = claude_draft(store, benchmark, screen_step(screen_judgement("busy")))
+    started = time.monotonic()
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, ScreenUI(FIX_SCOPE))
+    assert (capture.stop_reason, capture.last_observation.reason) == (
+        "needs_input",
+        SCREEN_WAIT_EXPIRED,
+    )
+    assert (terminal.keys, len(capture.controller_calls)) == ([], 1)
+    assert time.monotonic() - started < 30
+
+
+class ExitedUI(ScreenUI):
+    def screen(self):
+        return super().screen().model_copy(update={"exited": 1})
+
+
+@pytest.mark.integration
+def test_an_exited_subject_stops_as_exited_before_any_screen_answer(store, benchmark, monkeypatch):
+    draft = claude_draft(store, benchmark, screen_step(screen_reply(key="Enter")))
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, ExitedUI(FIX_SCOPE))
+    assert (capture.stop_reason, capture.last_observation.state) == ("exited", "exited")
+    assert (capture.controller_calls, terminal.keys) == ((), [])
+
+
+class QuestionsUI:
+    def __init__(self, *templates):
+        self.questions = [ScreenUI(template) for template in templates]
+        self.answers = []
+
+    @property
+    def open(self):
+        return bool(self.questions)
+
+    def press(self, key):
+        self.questions[0].press(key)
+        if not self.questions[0].open:
+            self.answers.append(self.questions.pop(0).answer)
+
+    def type(self, text):
+        self.questions[0].type(text)
+
+    def screen(self):
+        return self.questions[0].screen()
+
+
+def screen_events(capture):
+    return [
+        (event.kind, event.outcome, len(event.call_ids))
+        for event in (capture.workflow.events if capture.workflow is not None else ())
+    ]
+
+
+@pytest.mark.integration
+def test_each_screen_in_a_run_of_questions_has_its_own_cap_and_answered_event(
+    store, benchmark, monkeypatch
+):
+    from dryheave.runner_attempt import SCREEN_ACTIONS
+
+    fix = ["Down", "Up", "Down", "Up", "Down", "Up", "Enter"]
+    channel = ["Down", "Up", "Down", "Up", "Down", "Down", "Enter"]
+    assert len(fix) < SCREEN_ACTIONS < len(fix) + len(channel)
+    draft = claude_draft(
+        store,
+        benchmark,
+        *(screen_step(screen_reply(key=key)) for key in fix),
+        *(
+            screen_step(screen_reply(key=key, target="Nightly"), "Which release channel?")
+            for key in channel
+        ),
+        *benchmark.simulator.script,
+    )
+    ui = QuestionsUI(FIX_SCOPE, CHANNEL)
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, ui)
+    assert (capture.stop_reason, ui.answers) == (
+        "simulator_stop",
+        ["Fix all Should Fix", "Nightly"],
+    )
+    assert terminal.keys == fix + channel
+    assert screen_events(capture) == [
+        ("dialog", "answered", len(fix)),
+        ("dialog", "answered", len(channel)),
+    ]
+
+
+@pytest.mark.integration
+def test_an_answered_screen_is_recorded_when_the_next_one_is_judged_an_approval(
+    store, benchmark, monkeypatch
+):
+    draft = claude_draft(
+        store,
+        benchmark,
+        screen_step(screen_reply(key="Enter")),
+        screen_step(screen_judgement("approval"), "Which release channel?"),
+    )
+    ui = QuestionsUI(FIX_SCOPE, CHANNEL)
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, ui)
+    assert (capture.stop_reason, capture.last_observation.state) == ("needs_input", "approval")
+    assert (terminal.keys, ui.answers) == (["Enter"], ["Fix all Should Fix"])
+    assert screen_events(capture) == [("dialog", "answered", 1)]
+    assert capture.workflow.events[0].call_ids == (capture.controller_calls[0].call_id,)
+
+
+@pytest.mark.integration
+def test_typed_text_starting_with_a_digit_is_retried_once_then_needs_input(
+    store, benchmark, monkeypatch
+):
+    draft = claude_draft(
+        store,
+        benchmark,
+        screen_step(screen_reply(text="2 files only")),
+        screen_step(screen_reply(text="2")),
+    )
+    capture, terminal, _ = run_screen(store, draft, monkeypatch, ScreenUI(FIX_SCOPE))
+    assert capture.stop_reason == "needs_input"
+    assert [(call.status, call.error) for call in capture.controller_calls] == [
+        ("failed", "invalid_screen_answer"),
+        ("failed", "invalid_screen_answer"),
+    ]
+    assert (terminal.keys, terminal.typed) == ([], [])

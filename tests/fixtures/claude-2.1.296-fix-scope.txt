@@ -1,0 +1,14 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Fix scope
+
+Apply fixes for the Should Fix findings?
+
+❯ 1. Fix all Should Fix
+     Findings 1, 2, and 3 — prefix bug, home path cache, and settings caption
+  2. Don't fix anything
+     Keep the report, no changes
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

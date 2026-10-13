@@ -1,4 +1,5 @@
 import re
+from typing import NamedTuple, NewType
 
 from pydantic import JsonValue
 
@@ -11,6 +12,22 @@ LOCAL_OUTPUT_TAG = re.compile(r"<local-command-(stdout|stderr)>(.*)</local-comma
 NOTIFICATION_TAG = re.compile(r"<task-notification>(.*?)</task-notification>", re.DOTALL)
 TASK_ID_TAG = re.compile(r"<task-id>(.*?)</task-id>", re.DOTALL)
 TOOL_USE_ID_TAG = re.compile(r"<tool-use-id>(.*?)</tool-use-id>", re.DOTALL)
+STATUS_TAG = re.compile(r"<status>(.*?)</status>", re.DOTALL)
+TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "stopped"})
+
+TaskId = NewType("TaskId", str)
+TurnId = NewType("TurnId", str)
+ToolUseId = NewType("ToolUseId", str)
+
+
+class BackgroundTask(NamedTuple):
+    task: TaskId
+    agent: bool
+
+
+class BackgroundOwner(NamedTuple):
+    turn: TurnId | None
+    agent: bool
 
 
 def command_line(content: JsonValue) -> tuple[str, str] | None:
@@ -32,36 +49,41 @@ def local_command_output(content: JsonValue) -> str | None:
     return match.group(2) if match else None
 
 
-def tag_text(pattern: re.Pattern[str], text: str) -> str:
-    match = pattern.search(text)
-    return match.group(1).strip() if match else ""
+def _tag_texts(pattern: re.Pattern[str], text: str) -> list[str]:
+    return [found.strip() for found in pattern.findall(text) if found.strip()]
 
 
-def notified_tasks(text: str, launches: dict[str, str]) -> set[str]:
-    return {
-        task
-        for block in NOTIFICATION_TAG.findall(text)
-        if (task := tag_text(TASK_ID_TAG, block) or launches.get(tag_text(TOOL_USE_ID_TAG, block)))
-    }
+def _notified_tasks(text: str, launches: dict[ToolUseId, TaskId]) -> set[TaskId]:
+    finished: set[TaskId] = set()
+    for block in NOTIFICATION_TAG.findall(text):
+        if not TERMINAL_STATUSES.intersection(_tag_texts(STATUS_TAG, block)):
+            continue
+        tasks = [TaskId(task) for task in _tag_texts(TASK_ID_TAG, block)]
+        uses = [launches.get(ToolUseId(use)) for use in _tag_texts(TOOL_USE_ID_TAG, block)]
+        finished.update(tasks or [task for task in uses if task is not None])
+    return finished
 
 
-def launched_task(result: dict[str, JsonValue]) -> str | None:
-    return (
-        string(result.get("backgroundTaskId"))
-        or string(result.get("resumedAgentId"))
-        or (string(result.get("agentId")) if result.get("isAsync") is True else None)
+def _launched_task(result: dict[str, JsonValue]) -> BackgroundTask | None:
+    agent = string(result.get("resumedAgentId")) or (
+        string(result.get("agentId")) if result.get("isAsync") is True else None
     )
+    monitor = string(result.get("taskId")) if "timeoutMs" in result else None
+    other = string(result.get("backgroundTaskId")) or monitor
+    if agent is not None:
+        return BackgroundTask(TaskId(agent), agent=True)
+    return None if other is None else BackgroundTask(TaskId(other), agent=False)
 
 
 class ClaudeAdapter:
     def __init__(self) -> None:
         self.session_id: str | None = None
-        self.turn_id: str | None = None
-        self.chain: dict[str, str] = {}
-        self.pending_completion: str | None = None
+        self.turn_id: TurnId | None = None
+        self.chain: dict[str, TurnId] = {}
+        self.pending_completion: TurnId | None = None
         self.described = False
-        self.background: dict[str, str | None] = {}
-        self.launches: dict[str, str] = {}
+        self.background: dict[TaskId, BackgroundOwner] = {}
+        self.launches: dict[ToolUseId, TaskId] = {}
 
     def feed(self, record: dict[str, JsonValue]) -> tuple[NativeEvent, ...]:
         session = string(record.get("sessionId")) or string(record.get("session_id"))
@@ -83,76 +105,98 @@ class ClaudeAdapter:
         )
         events = [metadata] if describes else []
         message = mapping(record.get("message"))
-        role = message.get("role")
         native_id, parent_id = string(record.get("uuid")), string(record.get("parentUuid"))
-        parent_turn = self.chain.get(parent_id or "")
+        parent_turn = self._parent_turn(record, parent_id)
         local_output = self._local_output(record, message)
         notification = self._notification(record, message)
         if local_output is not None:
-            if native_id is None:
-                events.append(
-                    self._event(
-                        "unsupported", record, text="Local command output lacks UUID identity."
-                    )
-                )
-            elif parent_turn is None:
-                events.append(
-                    self._event(
-                        "unsupported",
-                        record,
-                        text="Local command output has no tracked parent turn.",
-                    )
-                )
-            else:
-                self.turn_id = parent_turn
-                events.extend(
-                    (
-                        self._event("assistant", record, text=local_output),
-                        self._event("completed", record, turn_id=parent_turn),
-                    )
-                )
+            events.extend(self._handle_local_output(record, local_output, native_id, parent_turn))
         elif notification is not None:
-            owners = self._finish(notification)
-            self.turn_id = parent_turn or next(iter(owners), None)
-            self.pending_completion = None
-            if native_id is not None and self.turn_id is not None:
-                self.chain[native_id] = self.turn_id
+            events.extend(self._handle_notification(notification, native_id, parent_turn))
         elif self._human(record, message):
-            if native_id is None:
-                events.append(
-                    self._event("unsupported", record, text="Human input lacks UUID identity.")
-                )
-            else:
-                self.turn_id = native_id
-                self.chain[native_id] = native_id
-                self.pending_completion = None
-                command = command_line(message.get("content"))
-                events.extend(
-                    (
-                        self._event(
-                            "accepted",
-                            record,
-                            text=text_content(message.get("content"))
-                            if command is None
-                            else command[0],
-                            data={} if command is None else {"command": command[1]},
-                        ),
-                        self._event("started", record),
-                    )
-                )
-        elif role in {"assistant", "user"}:
-            self.turn_id = parent_turn
-            if native_id is not None and parent_turn is not None:
-                self.chain[native_id] = parent_turn
-            self._track(record, message)
-            events.extend(self._response(record, message))
-        elif record.get("type") in {"system", "attachment"}:
-            events.extend(
-                self._system(record) if record.get("type") == "system" else self._attachment(record)
-            )
+            events.extend(self._handle_human(record, message, native_id))
+        elif message.get("role") in {"assistant", "user"}:
+            events.extend(self._handle_response(record, message, native_id, parent_turn))
+        elif record.get("type") == "system":
+            events.extend(self._system(record))
+        elif record.get("type") == "attachment":
+            events.extend(self._attachment(record))
         if native_id is not None and parent_turn is not None:
             self.chain.setdefault(native_id, parent_turn)
         return tuple(events)
+
+    def _parent_turn(self, record: dict[str, JsonValue], parent_id: str | None) -> TurnId | None:
+        if parent_id is None and record.get("subtype") == "compact_boundary":
+            logical = string(record.get("logicalParentUuid"))
+            return self.chain.get(logical or "") or self.turn_id
+        return self.chain.get(parent_id or "")
+
+    def _handle_local_output(
+        self,
+        record: dict[str, JsonValue],
+        output: str,
+        native_id: str | None,
+        parent_turn: TurnId | None,
+    ) -> list[NativeEvent]:
+        if native_id is None:
+            return [
+                self._event("unsupported", record, text="Local command output lacks UUID identity.")
+            ]
+        if parent_turn is None:
+            return [
+                self._event(
+                    "unsupported", record, text="Local command output has no tracked parent turn."
+                )
+            ]
+        self.turn_id = parent_turn
+        return [
+            self._event("assistant", record, text=output),
+            self._event("completed", record, turn_id=parent_turn),
+        ]
+
+    def _handle_notification(
+        self, text: str, native_id: str | None, parent_turn: TurnId | None
+    ) -> list[NativeEvent]:
+        owners = self._finish_background_tasks(text)
+        self.turn_id = parent_turn or next(iter(owners), None)
+        self.pending_completion = None
+        if native_id is not None and self.turn_id is not None:
+            self.chain[native_id] = self.turn_id
+        return []
+
+    def _handle_human(
+        self, record: dict[str, JsonValue], message: dict[str, JsonValue], native_id: str | None
+    ) -> list[NativeEvent]:
+        if native_id is None:
+            return [self._event("unsupported", record, text="Human input lacks UUID identity.")]
+        self.turn_id = TurnId(native_id)
+        self.chain[native_id] = self.turn_id
+        self.pending_completion = None
+        self.background.clear()
+        self.launches.clear()
+        command = command_line(message.get("content"))
+        return [
+            self._event(
+                "accepted",
+                record,
+                text=text_content(message.get("content")) if command is None else command[0],
+                data={} if command is None else {"command": command[1]},
+            ),
+            self._event("started", record),
+        ]
+
+    def _handle_response(
+        self,
+        record: dict[str, JsonValue],
+        message: dict[str, JsonValue],
+        native_id: str | None,
+        parent_turn: TurnId | None,
+    ) -> list[NativeEvent]:
+        self.turn_id = parent_turn
+        if native_id is not None and parent_turn is not None:
+            self.chain[native_id] = parent_turn
+        self._track(record, message)
+        return self._response(record, message)
 
     @staticmethod
     def _local_output(record: dict[str, JsonValue], message: dict[str, JsonValue]) -> str | None:
@@ -176,32 +220,39 @@ class ClaudeAdapter:
         attachment = mapping(record.get("attachment"))
         if attachment.get("commandMode") == "task-notification":
             prompt = attachment.get("prompt")
-            self._finish(prompt if isinstance(prompt, str) else text_content(prompt))
+            self._finish_background_tasks(
+                prompt if isinstance(prompt, str) else text_content(prompt)
+            )
         return []
 
-    def _finish(self, text: str) -> list[str]:
-        return [
-            owner
-            for task in sorted(notified_tasks(text, self.launches))
-            if (owner := self.background.pop(task, None)) is not None
-        ]
+    def _finish_background_tasks(self, text: str) -> list[TurnId]:
+        owners = []
+        for task in sorted(_notified_tasks(text, self.launches)):
+            owner = self._forget(task)
+            if owner is not None and owner.turn is not None:
+                owners.append(owner.turn)
+        return owners
+
+    def _forget(self, task: TaskId) -> BackgroundOwner | None:
+        self.launches = {use: known for use, known in self.launches.items() if known != task}
+        return self.background.pop(task, None)
 
     def _track(self, record: dict[str, JsonValue], message: dict[str, JsonValue]) -> None:
         result = mapping(record.get("toolUseResult"))
         content = message.get("content")
         uses = [
-            use
+            ToolUseId(use)
             for block in (content if isinstance(content, list) else [])
             if mapping(block).get("type") == "tool_result"
             and (use := string(mapping(block).get("tool_use_id"))) is not None
         ]
-        task = launched_task(result)
-        if task is not None:
-            self.background[task] = self.turn_id
-            self.launches.update(dict.fromkeys(uses, task))
+        launched = _launched_task(result)
+        if launched is not None:
+            self.background[launched.task] = BackgroundOwner(self.turn_id, agent=launched.agent)
+            self.launches.update(dict.fromkeys(uses, launched.task))
         stopped = string(result.get("task_id"))
         if stopped is not None and "task_type" in result:
-            self.background.pop(stopped, None)
+            self._forget(TaskId(stopped))
 
     @staticmethod
     def _human(record: dict[str, JsonValue], message: dict[str, JsonValue]) -> bool:
@@ -210,6 +261,8 @@ class ClaudeAdapter:
             message.get("role") == "user"
             and record.get("isMeta") is not True
             and record.get("isSidechain") is not True
+            and record.get("isCompactSummary") is not True
+            and record.get("isVisibleInTranscriptOnly") is not True
             and (
                 isinstance(content, str)
                 or (
@@ -281,8 +334,7 @@ class ClaudeAdapter:
     def _system(self, record: dict[str, JsonValue]) -> list[NativeEvent]:
         subtype = record.get("subtype")
         if subtype == "turn_duration" and self.pending_completion is not None:
-            pending = record.get("pendingBackgroundAgentCount")
-            if self.background or (isinstance(pending, int) and pending > 0):
+            if self._agents_pending(record.get("pendingBackgroundAgentCount")):
                 self.pending_completion = None
                 return []
             return [
@@ -314,6 +366,11 @@ class ClaudeAdapter:
             self.pending_completion = None
             return [self._event("aborted", record)]
         return []
+
+    def _agents_pending(self, reported: JsonValue) -> bool:
+        if isinstance(reported, int) and not isinstance(reported, bool):
+            return reported > 0
+        return any(owner.agent for owner in self.background.values())
 
     def _event(self, kind: str, record: dict[str, JsonValue], **fields: object) -> NativeEvent:
         return NativeEvent.model_validate(

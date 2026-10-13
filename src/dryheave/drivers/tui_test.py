@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Literal, Self
 
 import psutil
 from pydantic import JsonValue
@@ -34,7 +34,11 @@ from dryheave.profile_models import LaunchPlan
 from dryheave.serialization import parse_json
 
 DAEMON_ABSENT_EXIT = 3
-DIALOG_KEYS = frozenset({"Up", "Down", "Space", "Enter"})
+DIALOG_KEYS = frozenset({"Up", "Down", "Space", "Enter", *"123456789"})
+CLOSE_ATTEMPTS = 2
+TYPING_SECONDS_PER_CHARACTER = 0.05
+
+type CloseOutcome = Literal["closed", "unconfirmed", "foreign"]
 
 
 class TuiTestTerminal:
@@ -94,7 +98,9 @@ class TuiTestTerminal:
         if time.monotonic() >= self.deadline:
             raise LimitError("Terminal lifetime exceeded.")
 
-    def _call(self, *arguments: str, cleanup: bool = False) -> dict[str, JsonValue]:
+    def _call(
+        self, *arguments: str, cleanup: bool = False, allowance: float = 0
+    ) -> dict[str, JsonValue]:
         if not cleanup:
             self._check()
             self.calls += 1
@@ -103,7 +109,7 @@ class TuiTestTerminal:
         remaining = (
             self.limits.command_seconds
             if cleanup
-            else min(self.limits.command_seconds, self.deadline - time.monotonic())
+            else min(self.limits.command_seconds + allowance, self.deadline - time.monotonic())
         )
         result = run_command(
             CommandSpec(
@@ -266,14 +272,17 @@ class TuiTestTerminal:
         if len(text.encode()) > self.limits.max_input_bytes:
             raise LimitError("Terminal text exceeds its input byte limit.")
         if self.agent != AgentKind.CLAUDE:
-            self._call("type", "--", "\x1b[200~" + text + "\x1b[201~")
+            self._type("\x1b[200~" + text + "\x1b[201~")
             return
         # Claude wraps bracketed pastes in pasted_content tags, so type it as a user would.
         for index, line in enumerate(text.split("\n")):
             if index:
                 self._call("key", "press", "Shift+Enter")
             if line:
-                self._call("type", "--", line)
+                self._type(line)
+
+    def _type(self, text: str) -> None:
+        self._call("type", "--", text, allowance=len(text) * TYPING_SECONDS_PER_CHARACTER)
 
     def clear_line(self) -> None:
         try:
@@ -331,50 +340,65 @@ class TuiTestTerminal:
         with suppress(LimitError):
             self.owner.scan()
         if self.started:
-            terminal_closed = self._close_daemon() or self._close_daemon()
+            terminal_closed = self._close_terminal()
+            if not terminal_closed:
+                errors.append("terminal_close_failed")
         report = self.owner.stop(
             timeout=self.limits.cleanup_seconds, terminal_closed=terminal_closed
         )
-        if not terminal_closed and self._daemon_gone():
-            report = report.model_copy(update={"terminal_closed": True})
-        elif not terminal_closed and self.started:
-            errors.append("terminal_close_failed")
         report = report.model_copy(update={"errors": report.errors + tuple(errors)})
         self.closed = report
         with suppress(LimitError, OSError):
             self.artifacts.record("cleanup", report)
         return report
 
-    def _close_daemon(self) -> bool:
+    def _close_terminal(self) -> bool:
+        for _attempt in range(CLOSE_ATTEMPTS):
+            outcome = self._close_daemon()
+            if outcome != "unconfirmed":
+                return outcome == "closed"
+        return self._await_daemon_exit()
+
+    def _close_daemon(self) -> CloseOutcome:
         try:
             status = self._call("daemon", "status", cleanup=True)
             if status.get("running"):
-                self._verify_daemon(status)
+                if not self._owns_daemon(status):
+                    return "foreign"
                 self._call("close", cleanup=True)
-            return self._call("daemon", "status", cleanup=True).get("running") is False
-        except (TransportError, InputError, OSError):
+            closed = self._call("daemon", "status", cleanup=True).get("running") is False
+        except (TransportError, InputError, OSError, psutil.Error):
+            return "unconfirmed"
+        return "closed" if closed else "unconfirmed"
+
+    def _owns_daemon(self, status: dict[str, JsonValue]) -> bool:
+        identity = self.daemon_identity
+        pid = status.get("pid")
+        if type(pid) is not int or identity is None or pid != identity.pid:
             return False
+        return psutil.Process(pid).create_time() == identity.created
+
+    def _await_daemon_exit(self) -> bool:
+        if self.daemon_identity is None:
+            return False
+        deadline = time.monotonic() + self.limits.cleanup_seconds
+        while not self._daemon_gone():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(self.limits.poll_seconds, remaining))
+        return True
 
     def _daemon_gone(self) -> bool:
         if self.daemon_identity is None:
             return False
         try:
+            process = psutil.Process(self.daemon_identity.pid)
             return (
-                psutil.Process(self.daemon_identity.pid).create_time()
-                != self.daemon_identity.created
+                process.create_time() != self.daemon_identity.created
+                or process.status() == psutil.STATUS_ZOMBIE
             )
         except psutil.NoSuchProcess:
             return True
         except psutil.Error:
             return False
-
-    def _verify_daemon(self, status: dict[str, JsonValue]) -> None:
-        pid = status.get("pid")
-        if type(pid) is not int or self.daemon_identity is None or pid != self.daemon_identity.pid:
-            raise TransportError("Terminal daemon ownership could not be reconciled.")
-        try:
-            process = psutil.Process(pid)
-            if process.create_time() != self.daemon_identity.created:
-                raise TransportError("Terminal daemon PID identity changed.")
-        except psutil.Error as error:
-            raise TransportError("Terminal daemon identity is unavailable.") from error

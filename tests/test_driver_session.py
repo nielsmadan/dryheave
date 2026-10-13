@@ -5,13 +5,32 @@ from pathlib import Path
 
 import pytest
 
-from conftest import AskedQuestion, ClaudeQuestionUI
+from conftest import (
+    CHANNEL,
+    EDIT_PERMISSION,
+    FIX_SCOPE,
+    AskedQuestion,
+    ClaudeQuestionUI,
+    ScreenUI,
+)
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.base import DeliveryUncertain
 from dryheave.drivers.claude import ClaudeAdapter
+from dryheave.drivers.dialogs import UNRECOGNIZED
 from dryheave.drivers.fake import FakeEventSource, FakeTerminal
-from dryheave.drivers.models import DialogSelection, DriverLimits, NativeEvent, Screen
-from dryheave.drivers.session import DriverSession
+from dryheave.drivers.models import (
+    DialogSelection,
+    DriverLimits,
+    NativeEvent,
+    Screen,
+    ScreenAction,
+)
+from dryheave.drivers.session import (
+    COMPOSER_UNREADABLE,
+    SCREEN_ACTION_REFUSED,
+    SCREEN_WAIT_EXPIRED,
+    DriverSession,
+)
 from dryheave.errors import InputError
 from dryheave.models import AgentKind
 
@@ -662,6 +681,297 @@ def test_claude_background_work_still_running_at_the_deadline_times_out(tmp_path
         assert session.reconcile().state == "accepted"
 
 
+def claude_compacted_turn(plan, prompt):
+    adapter = ClaudeAdapter()
+    records = [
+        claude_record("human", None, "user", prompt, cwd=plan.cwd),
+        claude_record(
+            "working",
+            "human",
+            "assistant",
+            [{"type": "tool_use", "id": "use", "name": "Read", "input": {}}],
+        ),
+        {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "uuid": "boundary",
+            "parentUuid": None,
+            "logicalParentUuid": "summary-reminder",
+            "sessionId": "root",
+        },
+        claude_record(
+            "summary",
+            "boundary",
+            "user",
+            "This session is being continued from a previous conversation.",
+            isCompactSummary=True,
+            isVisibleInTranscriptOnly=True,
+        ),
+        *claude_turn_end("answer", "summary", "Finished after compacting."),
+    ]
+    return [event for record in records for event in adapter.feed(record)]
+
+
+def test_claude_turn_compacted_midway_completes_before_the_deadline(tmp_path, driver_plan):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal, source = ClaudePromptTerminal(), FakeEventSource([])
+    with claude_session(tmp_path, plan, source, terminal) as session:
+        assert session.start(plan, {}).state == "ready"
+        intent = session.prepare("Fix the layout.")
+        source.batches.extend([[], claude_compacted_turn(plan, "Fix the layout.")])
+        result = session.deliver(intent)
+        assert (result.state, result.turn_id, result.text) == (
+            "completed",
+            "human",
+            "Finished after compacting.",
+        )
+        assert [event.kind for event in session.events].count("completed") == 1
+        assert session.accepted_count == 1
+
+
+class LostTypingTerminal(FakeTerminal):
+    def __init__(self, typed):
+        super().__init__([])
+        self.typed = list(typed)
+        self.value = ""
+        self.render()
+
+    def render(self):
+        rule = "\u2500" * 40
+        rows = self.value.split("\n")
+        body = "\n".join(["\u276f " + rows[0], *("  " + row for row in rows[1:])])
+        cursor = {"x": 2 + len(rows[-1]), "y": len(rows)}
+        self.current = Screen(text=f"{rule}\n{body}\n{rule}", exited=None, cursor=cursor)
+
+    def paste(self, text):
+        self.pastes.append(text)
+        kept = self.typed.pop(0)
+        self.value += text if kept is None else text[:kept]
+        self.render()
+        if kept is not None or self.typed:
+            raise DeliveryUncertain("Terminal command ended without a delivery acknowledgement.")
+
+    def clear_line(self):
+        self.clears += 1
+        cut = len(self.value) - 1 if self.value.endswith("\n") else self.value.rfind("\n") + 1
+        self.value = self.value[: max(cut, 0)]
+        self.render()
+
+    def enter(self):
+        self.enters += 1
+        self.current = Screen(text="Working\n\u276f", exited=None)
+
+
+PARAGRAPHS = "Fix the rows.\nKeep the padding."
+
+
+def typing_session(tmp_path, plan, source, terminal):
+    return DriverSession(
+        terminal,
+        source,
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        agent=AgentKind.CLAUDE,
+        limits=DriverLimits(
+            duration_seconds=5, command_seconds=0.2, max_polls=1000, poll_seconds=0.01
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("typed", "pastes", "clears"),
+    [
+        ([None, None], [PARAGRAPHS], 0),
+        ([len("Fix the rows.\nKeep"), None], [PARAGRAPHS, PARAGRAPHS], 3),
+    ],
+)
+def test_a_lost_typing_acknowledgement_is_reconciled_on_screen_before_enter(
+    tmp_path, driver_plan, typed, pastes, clears
+):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal, source = LostTypingTerminal(typed), FakeEventSource([])
+    with typing_session(tmp_path, plan, source, terminal) as session:
+        assert session.start(plan, {}).state == "ready"
+        intent = session.prepare(PARAGRAPHS)
+        adapter = ClaudeAdapter()
+        records = [
+            claude_record("human", None, "user", PARAGRAPHS, cwd=plan.cwd),
+            *claude_turn_end("answer", "human", "Fixed."),
+        ]
+        source.batches.extend([[], [event for record in records for event in adapter.feed(record)]])
+        result = session.deliver(intent)
+        assert (result.state, result.text) == ("completed", "Fixed.")
+        assert (terminal.pastes, terminal.clears, terminal.enters) == (pastes, clears, 1)
+        assert session.accepted_count == 1
+
+
+class BusyTypingTerminal(LostTypingTerminal):
+    def __init__(self, typed):
+        super().__init__(typed)
+        self.busy = 0
+
+    def paste(self, text):
+        self.busy = 2
+        super().paste(text)
+
+    def state(self):
+        if self.busy:
+            self.busy -= 1
+            raise DeliveryUncertain("Terminal command ended without a delivery acknowledgement.")
+        return super().state()
+
+
+def test_screen_reads_lost_while_typing_settles_do_not_end_the_delivery(tmp_path, driver_plan):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal, source = BusyTypingTerminal([None, None]), FakeEventSource([])
+    with typing_session(tmp_path, plan, source, terminal) as session:
+        assert session.start(plan, {}).state == "ready"
+        intent = session.prepare(PARAGRAPHS)
+        adapter = ClaudeAdapter()
+        records = [
+            claude_record("human", None, "user", PARAGRAPHS, cwd=plan.cwd),
+            *claude_turn_end("answer", "human", "Fixed."),
+        ]
+        source.batches.extend([[], [event for record in records for event in adapter.feed(record)]])
+        assert session.deliver(intent).state == "completed"
+        assert (terminal.pastes, terminal.enters) == ([PARAGRAPHS], 1)
+
+
+def test_a_retyped_prompt_that_still_cannot_be_confirmed_stops_without_enter(tmp_path, driver_plan):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal = LostTypingTerminal([len("Fix"), len("Fix the")])
+    with typing_session(tmp_path, plan, FakeEventSource([]), terminal) as session:
+        assert session.start(plan, {}).state == "ready"
+        result = session.deliver(session.prepare(PARAGRAPHS))
+        assert (result.state, result.reason) == (
+            "partial_input",
+            "Exact composer content was not observed within bounds; Enter was not sent.",
+        )
+        assert (terminal.pastes, terminal.clears, terminal.enters) == (
+            [PARAGRAPHS, PARAGRAPHS],
+            1,
+            0,
+        )
+
+
+class PrefilledComposerTerminal(LostTypingTerminal):
+    def __init__(self, typed, existing):
+        super().__init__(typed)
+        self.value = existing
+        self.render()
+
+
+def test_a_lost_typing_acknowledgement_never_clears_preexisting_composer_text(
+    tmp_path, driver_plan
+):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal = PrefilledComposerTerminal([len("Fix"), None], "leftover ")
+    with typing_session(tmp_path, plan, FakeEventSource([]), terminal) as session:
+        assert session.start(plan, {}).state == "ready"
+        result = session.deliver(session.prepare(PARAGRAPHS))
+        assert (result.state, result.reason) == (
+            "partial_input",
+            "Exact composer content was not observed within bounds; Enter was not sent.",
+        )
+        assert (terminal.pastes, terminal.clears, terminal.enters) == ([PARAGRAPHS], 0, 0)
+
+
+class CancelMidClearTerminal(LostTypingTerminal):
+    def __init__(self, typed, cancelled):
+        super().__init__(typed)
+        self.cancel_event = cancelled
+
+    def clear_line(self):
+        super().clear_line()
+        self.cancel_event.set()
+
+
+def test_cancellation_mid_clear_stops_before_the_retype(tmp_path, driver_plan):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    cancelled = threading.Event()
+    terminal = CancelMidClearTerminal([len("Fix"), None], cancelled)
+    session = DriverSession(
+        terminal,
+        FakeEventSource([]),
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        agent=AgentKind.CLAUDE,
+        limits=DriverLimits(
+            duration_seconds=5, command_seconds=0.2, max_polls=1000, poll_seconds=0.01
+        ),
+        cancelled=cancelled,
+    )
+    with session:
+        assert session.start(plan, {}).state == "ready"
+        result = session.deliver(session.prepare(PARAGRAPHS))
+        assert result.state == "cancelled"
+        assert (terminal.pastes, terminal.clears, terminal.enters) == ([PARAGRAPHS], 1, 0)
+
+
+class LostClearAckTerminal(LostTypingTerminal):
+    def clear_line(self):
+        self.clears += 1
+        raise DeliveryUncertain("Terminal command ended without a clear acknowledgement.")
+
+
+def test_a_lost_clear_acknowledgement_abandons_the_retype_without_enter(tmp_path, driver_plan):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal = LostClearAckTerminal([len("Fix"), None])
+    with typing_session(tmp_path, plan, FakeEventSource([]), terminal) as session:
+        assert session.start(plan, {}).state == "ready"
+        result = session.deliver(session.prepare(PARAGRAPHS))
+        assert (result.state, result.reason) == (
+            "partial_input",
+            "Exact composer content was not observed within bounds; Enter was not sent.",
+        )
+        assert (terminal.pastes, terminal.clears, terminal.enters) == ([PARAGRAPHS], 1, 0)
+
+
+class StuckClearTerminal(LostTypingTerminal):
+    def clear_line(self):
+        self.clears += 1
+        self.value = self.value[:-1]
+        self.render()
+
+
+def test_a_composer_that_never_empties_within_the_press_cap_stops_without_enter(
+    tmp_path, driver_plan
+):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal = StuckClearTerminal([len("Fix the rows.\nKeep"), None])
+    with typing_session(tmp_path, plan, FakeEventSource([]), terminal) as session:
+        assert session.start(plan, {}).state == "ready"
+        result = session.deliver(session.prepare(PARAGRAPHS))
+        assert (result.state, result.reason) == (
+            "partial_input",
+            "Exact composer content was not observed within bounds; Enter was not sent.",
+        )
+        assert (terminal.pastes, terminal.clears, terminal.enters) == ([PARAGRAPHS], 6, 0)
+
+
+class UnreadableComposerTerminal(LostTypingTerminal):
+    def __init__(self, typed):
+        super().__init__(typed)
+        self.unreadable = False
+
+    def paste(self, text):
+        self.unreadable = True
+        super().paste(text)
+
+    def state(self):
+        if self.unreadable:
+            raise DeliveryUncertain("Terminal command ended without a delivery acknowledgement.")
+        return super().state()
+
+
+def test_an_unreadable_composer_stops_distinctly_from_a_content_mismatch(tmp_path, driver_plan):
+    plan = driver_plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    terminal = UnreadableComposerTerminal([len("Fix")])
+    with typing_session(tmp_path, plan, FakeEventSource([]), terminal) as session:
+        assert session.start(plan, {}).state == "ready"
+        result = session.deliver(session.prepare(PARAGRAPHS))
+        assert (result.state, result.reason) == ("delivery_uncertain", COMPOSER_UNREADABLE)
+        assert (terminal.pastes, terminal.clears, terminal.enters) == ([PARAGRAPHS], 0, 0)
+
+
 def test_claude_slash_command_is_not_entered_while_the_menu_highlights_another(
     tmp_path, driver_plan
 ):
@@ -968,3 +1278,294 @@ def test_question_dialogs_are_only_read_for_claude(tmp_path, driver_plan):
     with session:
         terminal.current = Screen(text=ClaudeQuestionUI((AUTH,)).render(), exited=None)
         assert session.question() is None
+
+
+class ScreenTerminal(QuestionTerminal):
+    def __init__(self, ui, *, ignored=(), closes_after=None):
+        super().__init__(ui, ignored=ignored)
+        self.closes_after = closes_after
+
+    def state(self):
+        if self.shown and self.ui.open and self.closes_after is not None:
+            self.closes_after -= 1
+            if self.closes_after < 0:
+                self.ui.answer = "closed by itself"
+                self.on_close()
+        if self.shown and self.ui.open:
+            return self.ui.screen()
+        return self.current
+
+
+def screen_session(tmp_path, plan, terminal):
+    plan = plan.model_copy(update={"agent": AgentKind.CLAUDE})
+    source = FakeEventSource([])
+    session = DriverSession(
+        terminal,
+        source,
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        agent=AgentKind.CLAUDE,
+        limits=DriverLimits(
+            duration_seconds=5, max_polls=400, poll_seconds=0.01, command_seconds=0.3
+        ),
+    )
+    session.__enter__()
+    assert session.start(plan, {}).state == "ready"
+    intent = session.prepare("Review the change")
+    source.batches.append(
+        [
+            metadata(plan),
+            native("started"),
+            native("accepted", text="Review the change", native_id="user"),
+        ]
+    )
+    terminal.on_close = lambda: source.batches.append(
+        [native("assistant", text="Fixed."), native("completed", text="Fixed.")]
+    )
+    blocked = session.deliver(intent)
+    assert (blocked.state, blocked.reason) == ("unsupported", UNRECOGNIZED)
+    return session
+
+
+def act(session, target=None, **action):
+    return session.act(ScreenAction(**action), session.terminal.state().text, target)
+
+
+def artifacts(tmp_path, name):
+    return [
+        json.loads(path.read_text())
+        for path in sorted((tmp_path / "evidence").glob(f"*-{name}.json"))
+    ]
+
+
+def test_screen_keys_move_the_highlight_then_enter_continues_the_turn(tmp_path, driver_plan):
+    ui = ScreenUI(FIX_SCOPE)
+    terminal = ScreenTerminal(ui)
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        assert session.screen().text == FIX_SCOPE.rstrip("\n")
+        moved = act(session, key="Down")
+        assert (moved.state, moved.reason) == ("unsupported", UNRECOGNIZED)
+        assert "\u276f 2. Don't fix anything" in moved.text
+        assert "\u276f 1." in act(session, key="Up").text
+        result = act(session, key="Enter")
+        assert (result.state, result.text) == ("completed", "Fixed.")
+        assert (terminal.keys, ui.answer, session.accepted_count) == (
+            ["Down", "Up", "Enter"],
+            "Fix all Should Fix",
+            1,
+        )
+        assert session.screen() is None
+    intents = artifacts(tmp_path, "screen-intent")
+    assert [item["action"] for item in intents] == [
+        {"key": "Down"},
+        {"key": "Up"},
+        {"key": "Enter"},
+    ]
+    assert intents[0]["screen"] == FIX_SCOPE.rstrip("\n")
+    assert [item["changed"] for item in artifacts(tmp_path, "screen-result")] == [True] * 3
+
+
+def test_screen_text_is_typed_into_the_focused_text_row(tmp_path, driver_plan):
+    ui = ScreenUI(FIX_SCOPE)
+    terminal = ScreenTerminal(ui)
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        act(session, key="3")
+        typed = act(session, text="Only the prefix bug")
+        assert "\u276f 3. Only the prefix bug" in typed.text
+        assert act(session, key="Enter").state == "completed"
+        assert (terminal.keys, terminal.typed, ui.answer) == (
+            ["3", "Enter"],
+            ["Only the prefix bug"],
+            "Only the prefix bug",
+        )
+
+
+def test_a_digit_key_picks_its_numbered_option(tmp_path, driver_plan):
+    ui = ScreenUI(FIX_SCOPE)
+    session = screen_session(tmp_path, driver_plan, ScreenTerminal(ui))
+    with session:
+        assert act(session, key="2").state == "completed"
+        assert ui.answer == "Don't fix anything"
+
+
+def test_a_key_without_a_visible_effect_is_recorded_as_unchanged(tmp_path, driver_plan):
+    ui = ScreenUI(FIX_SCOPE)
+    terminal = ScreenTerminal(ui, ignored=("Down",))
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        result = act(session, key="Down")
+        assert (result.state, result.text) == ("unsupported", FIX_SCOPE.rstrip("\n"))
+        assert artifacts(tmp_path, "screen-result")[0]["changed"] is False
+
+
+def test_no_key_reaches_a_screen_that_became_a_permission_prompt(tmp_path, driver_plan):
+    ui = ScreenUI(FIX_SCOPE)
+    terminal = ScreenTerminal(ui)
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        ui.lines = EDIT_PERMISSION.split("\n")
+        assert session.screen() is None
+        result = act(session, key="1")
+        assert (result.state, terminal.keys, artifacts(tmp_path, "screen-intent")) == (
+            "unsupported",
+            [],
+            [],
+        )
+
+
+def test_permission_prompts_and_parsed_questions_are_never_answerable_screens(
+    tmp_path, driver_plan
+):
+    terminal = ScreenTerminal(ScreenUI(FIX_SCOPE))
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        for text in (EDIT_PERMISSION, ClaudeQuestionUI((AUTH,)).render()):
+            terminal.ui = ScreenUI(text)
+            assert session.screen() is None
+
+
+class LostScreenKeyTerminal(ScreenTerminal):
+    def press(self, key):
+        raise DeliveryUncertain("Fixture screen key acknowledgement lost.")
+
+
+def test_a_lost_screen_key_acknowledgement_stops_with_an_unknown_screen(tmp_path, driver_plan):
+    session = screen_session(tmp_path, driver_plan, LostScreenKeyTerminal(ScreenUI(FIX_SCOPE)))
+    with session:
+        result = act(session, key="Enter")
+        assert (result.state, result.reason) == (
+            "unsupported",
+            "Screen key delivery was not acknowledged; the screen state is unknown.",
+        )
+
+
+def test_waiting_on_a_busy_screen_returns_once_the_turn_moves_on(tmp_path, driver_plan):
+    ui = ScreenUI(FIX_SCOPE)
+    terminal = ScreenTerminal(ui, closes_after=5)
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        result = session.await_change(session.screen().text, time.monotonic() + 5)
+        assert (result.state, result.text, terminal.keys) == ("completed", "Fixed.", [])
+
+
+def test_closing_a_screen_returns_without_waiting_out_the_turn(tmp_path, driver_plan):
+    terminal = ScreenTerminal(ScreenUI(FIX_SCOPE))
+    session = screen_session(tmp_path, driver_plan, terminal)
+    finish = terminal.on_close
+    terminal.on_close = lambda: None
+    with session:
+        assert act(session, key="1").state == "accepted"
+        finish()
+        assert session.reconcile(wait=True).text == "Fixed."
+
+
+ESCALATING_CHOICE = (
+    " Next step?\n\n\u276f 1. Keep reviewing\n  2. Always allow edits here\n"
+    "  3. Type something.\n  4. Chat about this\n\n"
+    "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel\n"
+)
+
+
+def test_keys_that_would_choose_a_mode_or_permission_option_are_never_sent(tmp_path, driver_plan):
+    ui = ScreenUI(ESCALATING_CHOICE)
+    terminal = ScreenTerminal(ui)
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        refused = act(session, key="2")
+        assert (refused.state, refused.reason) == ("approval", SCREEN_ACTION_REFUSED)
+        act(session, key="Down")
+        assert act(session, key="Enter").reason == SCREEN_ACTION_REFUSED
+        act(session, key="Up")
+        assert act(session, key="Enter", target="Keep reviewing").state == "completed"
+        assert (terminal.keys, ui.answer) == (["Down", "Up", "Enter"], "Keep reviewing")
+    assert [item["option"] for item in artifacts(tmp_path, "screen-refused")] == [
+        "Always allow edits here",
+        "Always allow edits here",
+    ]
+
+
+def test_a_target_naming_a_mode_option_refuses_the_key(tmp_path, driver_plan):
+    terminal = ScreenTerminal(ScreenUI(FIX_SCOPE))
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        shown = session.screen().text
+        result = session.act(ScreenAction(key="Enter"), shown, "Yes, and use auto mode")
+        assert (result.state, result.reason, terminal.keys) == (
+            "approval",
+            SCREEN_ACTION_REFUSED,
+            [],
+        )
+
+
+def test_an_action_judged_on_one_screen_is_not_applied_to_its_replacement(tmp_path, driver_plan):
+    terminal = ScreenTerminal(ScreenUI(FIX_SCOPE))
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        judged = session.screen().text
+        terminal.ui = ScreenUI(CHANNEL)
+        result = session.act(ScreenAction(key="2"), judged, "Don't fix anything")
+        assert (result.state, result.reason, result.text) == (
+            "unsupported",
+            UNRECOGNIZED,
+            CHANNEL.rstrip("\n"),
+        )
+        assert (terminal.keys, terminal.ui.answer) == ([], None)
+        assert session.screen().text == CHANNEL.rstrip("\n")
+    assert artifacts(tmp_path, "screen-intent") == []
+    assert [item["action"] for item in artifacts(tmp_path, "screen-stale")] == [{"key": "2"}]
+
+
+def test_a_busy_wait_on_an_unchanging_screen_ends_at_its_bound(tmp_path, driver_plan):
+    terminal = ScreenTerminal(ScreenUI(FIX_SCOPE))
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        started = time.monotonic()
+        result = session.await_change(session.screen().text, started + 0.2)
+        assert (result.state, result.reason) == ("unsupported", SCREEN_WAIT_EXPIRED)
+        assert time.monotonic() - started < 2
+
+
+class ExitedScreenUI(ScreenUI):
+    def screen(self):
+        return super().screen().model_copy(update={"exited": 1})
+
+
+def test_no_key_reaches_the_screen_of_an_exited_subject(tmp_path, driver_plan):
+    terminal = ScreenTerminal(ScreenUI(FIX_SCOPE))
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        terminal.ui = ExitedScreenUI(FIX_SCOPE)
+        result = act(session, key="Down")
+        assert (result.state, terminal.keys, terminal.ui.focus) == ("exited", [], 0)
+        assert session.exit_observation(terminal.state()).state == "exited"
+
+
+STATUS = "  main \u00b7 Opus"
+COMPOSER = (
+    "\u25cf Fixed the prefix bug.\n\n\u2500\u2500\u2500\u2500\n\u276f \n"
+    "\u2500\u2500\u2500\u2500\n" + STATUS
+)
+
+
+def test_the_composer_is_never_an_open_screen_even_with_the_dialog_footer(tmp_path, driver_plan):
+    terminal = ScreenTerminal(ScreenUI(FIX_SCOPE + STATUS))
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        assert session.screen() is not None
+        terminal.ui.answer = "closed"
+        terminal.current = Screen(text=COMPOSER, exited=None)
+        assert session.screen() is None
+
+
+def test_a_new_turn_forgets_the_previous_screen_footer(tmp_path, driver_plan):
+    terminal = ScreenTerminal(ScreenUI(FIX_SCOPE + STATUS))
+    session = screen_session(tmp_path, driver_plan, terminal)
+    with session:
+        assert session.screen() is not None
+        terminal.ui.answer = "closed"
+        terminal.on_close()
+        assert session.reconcile(wait=True).state == "completed"
+        session.prepare("Now add a test")
+        terminal.current = Screen(text="\u273b Thinking\u2026\n\n" + STATUS, exited=None)
+        assert session.screen() is None
