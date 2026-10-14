@@ -3,8 +3,8 @@ from datetime import UTC, datetime
 
 from dryheave.cases import CaseBudgets
 from dryheave.models import CommandSpec, TokenUsage
-from dryheave.report_html import render_report_html
-from dryheave.report_models import AttemptReport, RunReport
+from dryheave.report_html import DASH, render_report_html
+from dryheave.report_models import AttemptReport, ModelSetup, RunReport, RunSetup
 from dryheave.reports import group_metrics, with_derived
 from dryheave.result_models import (
     Assessment,
@@ -179,14 +179,14 @@ def _build_report(check_outcome: str = "pass") -> RunReport:
 
 
 def test_render_report_html_has_no_script_and_no_external_resource_references() -> None:
-    html = render_report_html(_build_report(), {CASE_ID: _case_view()})
+    html = render_report_html([(_build_report(), None)], {CASE_ID: _case_view()})
     assert "<script" not in html
     for match in re.finditer(r'(?:src|href)="([^"]*)"', html):
         assert match.group(1).startswith("#") or match.group(1) == ""
 
 
 def test_render_report_html_shows_backend_derived_help_needed_and_eligibility() -> None:
-    html = render_report_html(_build_report(), {CASE_ID: _case_view()})
+    html = render_report_html([(_build_report(), None)], {CASE_ID: _case_view()})
     assert "<td>fact-1 (proactive x1)</td>" in html
     assert "<td>finished</td><td>unknown</td><td>pass</td><td>eligible</td>" in html
     assert "cost kinds none · model basis none · currencies unrecorded" in html
@@ -248,7 +248,9 @@ def test_render_report_html_escapes_hostile_values_across_interpolation_paths() 
         criteria=(CriterionReasoning.model_construct(criterion_id=hostile, rationale=hostile),),
         checks=(CheckReasoning.model_construct(check_id=hostile, rationale=hostile),),
     )
-    html = render_report_html(report, {CASE_ID: case}, {hostile: reasoning_view})
+    html = render_report_html(
+        [(report, None)], {CASE_ID: case}, reasoning={report.run_id: {hostile: reasoning_view}}
+    )
     escaped = "&lt;img src=x onerror=alert(1)&gt;&quot;hostile&quot;"
     assert "<img src=x onerror=alert(1)>" not in html
     assert html.count(escaped) >= 7
@@ -294,7 +296,7 @@ def test_render_report_html_contains_each_variant_column_and_check_row() -> None
             groups=group_metrics(attempts),
         )
     )
-    html = render_report_html(report, {CASE_ID: _case_view()})
+    html = render_report_html([(report, None)], {CASE_ID: _case_view()})
     results = html[html.index("<h2>Results</h2>") :]
     results_thead = re.search(r"<thead>.*?</thead>", results, flags=re.DOTALL)
     assert results_thead is not None
@@ -306,7 +308,7 @@ def test_render_report_html_contains_each_variant_column_and_check_row() -> None
 
 def test_render_report_html_includes_reasoning_only_when_provided() -> None:
     report = _build_report()
-    html_without = render_report_html(report, {CASE_ID: _case_view()})
+    html_without = render_report_html([(report, None)], {CASE_ID: _case_view()})
     assert "reasoning not included" in html_without
     assert "the judge decided this because" not in html_without
 
@@ -323,7 +325,9 @@ def test_render_report_html_includes_reasoning_only_when_provided() -> None:
             checks=(CheckReasoning(check_id="right-view", rationale="checked the transcript"),),
         )
     }
-    html_with = render_report_html(report, {CASE_ID: _case_view()}, reasoning)
+    html_with = render_report_html(
+        [(report, None)], {CASE_ID: _case_view()}, reasoning={report.run_id: reasoning}
+    )
     assert "the judge decided this because of X" in html_with
     assert "checked the transcript" in html_with
 
@@ -367,8 +371,9 @@ def test_render_report_html_opens_with_an_agent_summary_of_measures_and_checks()
             groups=group_metrics(attempts),
         )
     )
-    html = render_report_html(report, {CASE_ID: _case_view()})
+    html = render_report_html([(report, None)], {CASE_ID: _case_view()})
     assert html.index("<h2>Summary</h2>") < html.index("<h2>Report</h2>")
+    assert '<div class="scroller"><table class="topline">' in html
     assert (
         "<th>Variant / attempt</th><th>Turns</th><th>First check</th><th>Fix requests</th>"
         "<th>Workflow</th><th>Time</th><th>Tokens</th><th>Cost</th>"
@@ -380,7 +385,7 @@ def test_render_report_html_opens_with_an_agent_summary_of_measures_and_checks()
         '<td class="number">4m 30s</td><td class="number">1.55M</td><td class="number">$0.91</td>'
     )
     assert (
-        '<tr class="variant"><td>base · mean of 1</td>'
+        '<tr class="variant"><td class="label">base · mean of 1</td>'
         + turns
         + no_workflow
         + resources
@@ -439,7 +444,7 @@ def test_render_report_html_renders_workflow_topline_cells_and_the_per_attempt_c
             groups=group_metrics(attempts),
         )
     )
-    html = render_report_html(report, {CASE_ID: _case_view()})
+    html = render_report_html([(report, None)], {CASE_ID: _case_view()})
     assert '<td class="check pass">✓</td><td class="number">1</td><td>2/2</td>' in html
     assert '<td class="number">15s</td>' in html
     assert (
@@ -448,3 +453,183 @@ def test_render_report_html_renders_workflow_topline_cells_and_the_per_attempt_c
     assert "Workflow events in order." in html
     assert "<td>greeting</td>" in html
     assert "<td>fix_requested</td>" in html
+
+
+def _variant_report(run_id: str, attempt_id: str, variant: str = "sonnet-low") -> RunReport:
+    attempts = (_variant_attempt(attempt_id, variant),)
+    return with_derived(
+        RunReport(
+            run_id=run_id,
+            experiment_id="a" * 64,
+            durable_sequence=1,
+            scheduled_trials=1,
+            unstarted_trials=(),
+            input_error=None,
+            attempts=attempts,
+            groups=group_metrics(attempts),
+        )
+    )
+
+
+def _configured(model: str | None, effort: str | None = None, identity: str = "x") -> ModelSetup:
+    return ModelSetup(
+        status="configured", kind="claude", model=model, effort=effort, identity=identity
+    )
+
+
+def _setup(run_id: str, variant_model: str, simulator: ModelSetup, **fields: object) -> RunSetup:
+    return RunSetup.model_validate(
+        {
+            "run_id": run_id,
+            "case_ids": (CASE_ID,),
+            "variants": {"sonnet-low": _configured(variant_model, "low", "p" + run_id)},
+            "simulator": simulator,
+            "judge": _configured("claude-opus-5-5", "high", "judge"),
+            "inspector": ModelSetup(status="none"),
+            **fields,
+        }
+    )
+
+
+OLD_RUN, NEW_RUN = "1" * 32, "2" * 32
+
+
+def test_render_report_html_puts_several_runs_in_one_summary_labelled_by_model() -> None:
+    entries = [
+        (
+            _variant_report(OLD_RUN, "a-old"),
+            _setup(
+                OLD_RUN,
+                "claude-sonnet-4-6",
+                _configured("claude-sonnet-4-6", "low", "sim-old"),
+                price_versions=("anthropic-2026-10-07",),
+            ),
+        ),
+        (
+            _variant_report(NEW_RUN, "a-new"),
+            _setup(
+                NEW_RUN,
+                "claude-sonnet-5-5",
+                _configured("claude-sonnet-5-5", "low", "sim-new"),
+                price_versions=("anthropic-2026-10-14",),
+            ),
+        ),
+    ]
+    html = render_report_html(entries, {CASE_ID: _case_view()})
+    summary = html[html.index("<h2>Summary</h2>") : html.index("<h2>Runs</h2>")]
+    assert summary.count('<table class="topline">') == 1
+    assert "<th>Run</th><th>Variant / attempt</th>" in summary
+    assert summary.index('<td class="label">sonnet-low · sonnet-4-6@low · mean of 1</td>') < (
+        summary.index('<td class="label">sonnet-low · sonnet-5-5@low · mean of 1</td>')
+    )
+    assert f'<td class="run" title="{OLD_RUN}">11111111</td>' in summary
+    runs = html[html.index("<h2>Runs</h2>") :]
+    assert '<td class="differs">sonnet-4-6@low</td>' in runs
+    assert '<td class="differs">sonnet-5-5@low</td>' in runs
+    assert "<td>opus-5-5@high</td>" in runs
+    assert "<td>sonnet-low (sonnet-5-5@low)</td>" in runs
+    assert "<td>anthropic-2026-10-14</td>" in runs
+    assert "Highlighted settings differ between runs (simulated user)" in runs
+    assert f'<h2 class="run">Run {OLD_RUN}</h2>' in html
+    assert "<title>dryheave report 11111111, 22222222</title>" in html
+
+
+def test_render_report_html_says_runs_match_only_when_every_compared_setting_is_known() -> None:
+    simulator = _configured("claude-sonnet-4-6", "low", "sim")
+    same = render_report_html(
+        [
+            (_variant_report(OLD_RUN, "a-old"), _setup(OLD_RUN, "claude-sonnet-4-6", simulator)),
+            (_variant_report(NEW_RUN, "a-new"), _setup(NEW_RUN, "claude-sonnet-5-5", simulator)),
+        ],
+        {},
+    )
+    assert "Every run used the same case, simulated user, judge and inspector." in same
+    assert f"<td>{DASH}</td>" in same
+
+    unavailable = render_report_html(
+        [
+            (
+                _variant_report(OLD_RUN, "a-old"),
+                RunSetup(run_id=OLD_RUN, issues=("Experiment a: missing",)),
+            ),
+            (
+                _variant_report(NEW_RUN, "a-new"),
+                RunSetup(run_id=NEW_RUN, issues=("Experiment b: missing",)),
+            ),
+        ],
+        {},
+    )
+    assert (
+        "Could not compare the case, simulated user, judge and inspector: some runs&#x27; "
+        "frozen settings are unavailable."
+    ) in unavailable
+    assert "Every run used the same" not in unavailable
+    assert f"<li>Run {OLD_RUN}: Experiment a: missing</li>" in unavailable
+
+
+def test_render_report_html_names_roles_without_a_model() -> None:
+    scripted = ModelSetup(status="configured", kind="scripted", identity="s")
+    setups = [
+        _setup(OLD_RUN, "claude-sonnet-4-6", scripted),
+        _setup(NEW_RUN, "claude-sonnet-5-5", scripted).model_copy(
+            update={"variants": {"sonnet-low": _configured(None, identity="profile")}}
+        ),
+    ]
+    html = render_report_html(
+        [
+            (_variant_report(OLD_RUN, "a-old"), setups[0]),
+            (_variant_report(NEW_RUN, "a-new"), setups[1]),
+        ],
+        {},
+    )
+    assert "<td>scripted</td>" in html
+    assert "<td>sonnet-low (default model)</td>" in html
+
+
+def test_render_report_html_escapes_hostile_run_settings() -> None:
+    hostile = "<img src=x onerror=alert(1)>"
+    setup = _setup(
+        NEW_RUN,
+        hostile,
+        _configured(hostile, hostile),
+        price_versions=(hostile,),
+        issues=(hostile,),
+    )
+    html = render_report_html(
+        [
+            (_variant_report(OLD_RUN, "a-old"), _setup(OLD_RUN, "m", _configured("m"))),
+            (_variant_report(NEW_RUN, "a-new"), setup),
+        ],
+        {},
+    )
+    assert "<img" not in html
+    assert "&lt;img src=x onerror=alert(1)&gt;" in html
+
+
+def _judged(attempt_id: str, rationale: str) -> JudgeReasoningView:
+    return JudgeReasoningView(
+        attempt_id=attempt_id,
+        assessment_id="d" * 64,
+        status="ok",
+        criteria=(CriterionReasoning(criterion_id="code-quality", rationale=rationale),),
+        checks=(),
+    )
+
+
+def test_render_report_html_shows_each_runs_own_reasoning_for_a_shared_attempt_id() -> None:
+    simulator = _configured("m", identity="sim")
+    html = render_report_html(
+        [
+            (_variant_report(OLD_RUN, "a-shared"), _setup(OLD_RUN, "m", simulator)),
+            (_variant_report(NEW_RUN, "a-shared"), _setup(NEW_RUN, "m", simulator)),
+        ],
+        {},
+        reasoning={
+            OLD_RUN: {"a-shared": _judged("a-shared", "before the regrade")},
+            NEW_RUN: {"a-shared": _judged("a-shared", "after the regrade")},
+        },
+    )
+    old_section = html[html.index(f"Run {OLD_RUN}</h2>") : html.index(f"Run {NEW_RUN}</h2>")]
+    new_section = html[html.index(f"Run {NEW_RUN}</h2>") :]
+    assert "before the regrade" in old_section
+    assert "after the regrade" in new_section

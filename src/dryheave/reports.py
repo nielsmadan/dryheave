@@ -2,18 +2,21 @@ import math
 import re
 import statistics
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Literal
 
 from pydantic import JsonValue
 
 from dryheave.assessment_inputs import load_assessment_inputs, role_metrics, saved_judge_calls
+from dryheave.controller_models import ControllerRecipe
 from dryheave.errors import DryheaveError, InputError
-from dryheave.experiment_models import TrialSpec
-from dryheave.experiments import inspect_experiment
+from dryheave.experiment_models import ScoringConfig, TrialSpec, inspection_recipe
+from dryheave.experiments import inspect_experiment, load_role
 from dryheave.integrity import load_assessment
 from dryheave.journals import RunStore
+from dryheave.metrics import total_input
 from dryheave.models import ObjectId, ObjectKind, TokenUsage, TrialStage
+from dryheave.profiles import load_profile
 from dryheave.report_models import (
     AttemptReport,
     AttemptTopline,
@@ -27,9 +30,11 @@ from dryheave.report_models import (
     GroupTopline,
     HelpNeededSummary,
     MetricSummary,
+    ModelSetup,
     PairChange,
     PriceBasis,
     RunReport,
+    RunSetup,
     ToplineCheck,
 )
 from dryheave.result_models import (
@@ -73,12 +78,6 @@ def distribution(values: Iterable[float | int | None]) -> Distribution:
         median=statistics.median(observed) if observed else None,
         stdev=stdev,
     )
-
-
-def _total_input(tokens: TokenUsage) -> float | None:
-    if tokens.uncached_input is None or tokens.cache_read is None or tokens.cache_write is None:
-        return None
-    return tokens.uncached_input + tokens.cache_read + tokens.cache_write
 
 
 def _reported_case_id(result: Assessment) -> ObjectId | None:
@@ -235,10 +234,10 @@ def _subject_role(item: AttemptReport) -> RoleMetrics | None:
 
 
 def _total_tokens(tokens: TokenUsage) -> int | None:
-    total_input = _total_input(tokens)
-    if total_input is None or tokens.output is None:
+    total = total_input(tokens)
+    if total is None or tokens.output is None:
         return None
-    return int(total_input) + tokens.output
+    return total + tokens.output
 
 
 def attempt_topline(item: AttemptReport, *, latest: bool) -> AttemptTopline:
@@ -434,7 +433,7 @@ def _group(
             tokens.cache_write if tokens else None for tokens in subject_tokens
         ),
         total_input_tokens=distribution(
-            _total_input(tokens) if tokens else None for tokens in subject_tokens
+            total_input(tokens) if tokens else None for tokens in subject_tokens
         ),
         criteria=_criteria_summary(latest_eligible),
         checks=_checks_summary(latest_eligible),
@@ -465,12 +464,17 @@ def group_metrics(
 
 
 def report_run(
-    store: ObjectStore, reference: str, *, journal_limit: int | None = None
+    store: ObjectStore,
+    reference: str,
+    *,
+    journal_limit: int | None = None,
+    execution: ExecutionJournal | None = None,
 ) -> RunReport:
     if not re.fullmatch(r"[0-9a-f]{32}", reference):
         return with_derived(store.load(reference, RunReport, kind=ObjectKind.PORTABLE_REPORT))
-    journal = RunStore(store.root).inspect(reference, limit=journal_limit)
-    execution = ExecutionJournal(journal)
+    if execution is None:
+        execution = ExecutionJournal(RunStore(store.root).inspect(reference, limit=journal_limit))
+    journal = execution.journal
     experiment, input_error = inspect_experiment(store, journal.metadata.experiment_id)
     trials = {item.trial_id: item for item in experiment.trials} if experiment else {}
     rows = []
@@ -551,6 +555,100 @@ def report_run(
                 tuple(rows), scheduled, execution.options.mode if execution.options else "pending"
             ),
         )
+    )
+
+
+def _recipe_setup(recipe: ControllerRecipe | None) -> ModelSetup:
+    if recipe is None:
+        return ModelSetup(status="none")
+    return ModelSetup(
+        status="configured",
+        kind=recipe.kind,
+        model=recipe.model,
+        effort=recipe.effort,
+        identity=digest(canonical_json(recipe)),
+    )
+
+
+def _variant_setup(store: ObjectStore, profile_id: str) -> tuple[ModelSetup, str | None]:
+    try:
+        recipe = load_profile(store, profile_id).recipe
+    except DryheaveError as error:
+        return ModelSetup(
+            status="unavailable", identity=profile_id
+        ), f"Profile {profile_id}: {error}"
+    return (
+        ModelSetup(
+            status="configured",
+            kind=recipe.agent,
+            model=recipe.model,
+            effort=recipe.effort,
+            identity=profile_id,
+        ),
+        None,
+    )
+
+
+def _experiment_setup(store: ObjectStore, run_id: str, experiment_id: str) -> RunSetup:
+    experiment, error = inspect_experiment(store, experiment_id)
+    if experiment is None:
+        return RunSetup(run_id=run_id, issues=(f"Experiment {experiment_id}: {error}",))
+    issues: list[str] = []
+    try:
+        simulator = _recipe_setup(
+            load_role(store, experiment.simulator_id, ControllerRecipe, ObjectKind.SIMULATOR)
+        ).model_copy(update={"identity": experiment.simulator_id})
+    except DryheaveError as failure:
+        simulator = ModelSetup(status="unavailable")
+        issues.append(f"Simulated user {experiment.simulator_id}: {failure}")
+    try:
+        scoring = load_role(store, experiment.scoring_id, ScoringConfig, ObjectKind.SCORING)
+    except DryheaveError as failure:
+        scoring = None
+        issues.append(f"Scoring {experiment.scoring_id}: {failure}")
+    variants = {}
+    for variant in experiment.variants:
+        variants[variant.name], issue = _variant_setup(store, variant.profile_id)
+        if issue:
+            issues.append(issue)
+    return RunSetup(
+        run_id=run_id,
+        case_ids=experiment.case_ids,
+        variants=variants,
+        simulator=simulator,
+        judge=_recipe_setup(scoring.judge) if scoring else ModelSetup(status="unavailable"),
+        inspector=_recipe_setup(inspection_recipe(scoring))
+        if scoring
+        else ModelSetup(status="unavailable"),
+        issues=tuple(issues),
+    )
+
+
+def _price_versions(report: RunReport) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                version
+                for group in report.groups
+                if group.price_basis
+                for version in group.price_basis.versions
+            }
+        )
+    )
+
+
+def run_setups(store: ObjectStore, reports: Sequence[RunReport]) -> tuple[RunSetup, ...]:
+    shared: dict[str, RunSetup] = {}
+    for report in reports:
+        if report.experiment_id not in shared:
+            shared[report.experiment_id] = _experiment_setup(
+                store, report.run_id, report.experiment_id
+            )
+    return tuple(
+        shared[report.experiment_id].model_copy(
+            update={"run_id": report.run_id, "price_versions": _price_versions(report)}
+        )
+        for report in reports
     )
 
 

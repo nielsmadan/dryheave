@@ -11,14 +11,19 @@ from dryheave.report_models import (
     GroupTopline,
     HelpNeededSummary,
     MetricSummary,
+    ModelSetup,
     PriceBasis,
     RunReport,
+    RunSetup,
 )
 from dryheave.result_models import Assessment, CheckResult
 from dryheave.viewer_models import CaseView, CheckReasoning, CriterionReasoning, JudgeReasoningView
 
 UNKNOWN = "unknown"
 NO_VARIANT = "(no variant)"
+RUN_ID_CHARS = 8
+ATTEMPT_ID_CHARS = 10
+CASE_ID_CHARS = 12
 RETAINED = "all retained attempts, retries included"
 ELIGIBLE = "eligible attempts only"
 
@@ -88,15 +93,20 @@ def _fmt_metric_value(value: object) -> str:
     return str(value)
 
 
-def _table(caption: str, headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+def _table_html(caption: str, headers: Sequence[str], body: str, class_name: str = "") -> str:
     head_cells = "".join(f"<th>{_esc(item)}</th>" for item in headers)
-    body_rows = "".join(
+    table_class = f' class="{class_name}"' if class_name else ""
+    return (
+        f'<div class="scroller"><table{table_class}><caption>{_esc(caption)}</caption>'
+        f"<thead><tr>{head_cells}</tr></thead><tbody>{body}</tbody></table></div>"
+    )
+
+
+def _table(caption: str, headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    body = "".join(
         "<tr>" + "".join(f"<td>{_esc(cell)}</td>" for cell in row) + "</tr>" for row in rows
     )
-    return (
-        f"<table><caption>{_esc(caption)}</caption>"
-        f"<thead><tr>{head_cells}</tr></thead><tbody>{body_rows}</tbody></table>"
-    )
+    return _table_html(caption, headers, body)
 
 
 def _section(title: str, inner: str) -> str:
@@ -308,28 +318,26 @@ def _group_workflow_cell(completed: int, attempts: int) -> str:
     return _cell(f"{completed}/{attempts}", f"check {tone}".strip())
 
 
-def _topline_section(report: RunReport) -> str:
-    groups = [group for group in report.groups if group.topline is not None]
-    if not groups:
-        return _section("Summary", _note("This report has no variant groups to summarize."))
-    check_ids = list(
-        dict.fromkeys(
-            check.check_id for group in groups if group.topline for check in group.topline.checks
-        )
-    )
-    headers = [
-        "Variant / attempt",
-        "Turns",
-        "First check",
-        "Fix requests",
-        "Workflow",
-        "Time",
-        "Tokens",
-        "Cost",
-        *map(check_label, check_ids),
-    ]
+def _short(identifier: str, width: int) -> str:
+    return identifier[:width]
+
+
+def _model_text(setup: ModelSetup) -> str:
+    if setup.status == "none":
+        return DASH
+    if setup.status == "unavailable":
+        return UNKNOWN
+    if setup.model is None:
+        return "scripted" if setup.kind == "scripted" else "default model"
+    model = setup.model.removeprefix("claude-")
+    return f"{model}@{setup.effort}" if setup.effort else model
+
+
+def _group_rows(
+    report: RunReport, setup: RunSetup | None, check_ids: Sequence[str], run_column: bool
+) -> list[str]:
     rows = []
-    for group in groups:
+    for group in report.groups:
         topline = group.topline
         if topline is None:
             continue
@@ -340,9 +348,24 @@ def _topline_section(report: RunReport) -> str:
             and attempt.topline.latest
             and (attempt.variant or "") == (group.variant or "")
         ]
+        variant = setup.variants.get(group.variant) if setup and group.variant else None
+        label = " · ".join(
+            item
+            for item in (
+                group.variant or NO_VARIANT,
+                _model_text(variant) if variant else None,
+                f"mean of {topline.attempts}",
+            )
+            if item
+        )
+        run_cell = (
+            f'<td class="run" title="{_esc(report.run_id)}">'
+            f"{_esc(_short(report.run_id, RUN_ID_CHARS))}</td>"
+        )
         rows.append(
             '<tr class="variant">'
-            + _cell(f"{group.variant or NO_VARIANT} · mean of {topline.attempts}")
+            + (run_cell if run_column else "")
+            + _cell(label, "label")
             + _turns_cell(topline.turns)
             + _group_first_inspection_cell(
                 topline.first_inspection_passes, topline.first_inspection_attempts
@@ -355,7 +378,9 @@ def _topline_section(report: RunReport) -> str:
         )
         rows.extend(
             "<tr>"
-            + f'<td class="attempt" title="{_esc(attempt_id)}">{_esc(attempt_id[:10])}</td>'
+            + ("<td></td>" if run_column else "")
+            + f'<td class="attempt" title="{_esc(attempt_id)}">'
+            + f"{_esc(_short(attempt_id, ATTEMPT_ID_CHARS))}</td>"
             + _turns_cell(item.turns)
             + _first_inspection_cell(item.first_inspection)
             + _fix_requests_cell(item.fix_requests)
@@ -365,12 +390,141 @@ def _topline_section(report: RunReport) -> str:
             + "</tr>"
             for attempt_id, item in members
         )
-    head = "".join(f"<th>{_esc(item)}</th>" for item in headers)
-    table = (
-        '<table class="topline"><caption>Per variant and attempt, agent only.</caption>'
-        f"<thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+    return rows
+
+
+def _topline_section(entries: Sequence[tuple[RunReport, RunSetup | None]]) -> str:
+    groups = [
+        group for report, _setup in entries for group in report.groups if group.topline is not None
+    ]
+    if not groups:
+        return _section("Summary", _note("This report has no variant groups to summarize."))
+    check_ids = list(
+        dict.fromkeys(
+            check.check_id for group in groups if group.topline for check in group.topline.checks
+        )
     )
-    return _section("Summary", table + _note(TOPLINE_LEGEND))
+    run_column = len(entries) > 1
+    headers = [
+        *(["Run"] if run_column else []),
+        "Variant / attempt",
+        "Turns",
+        "First check",
+        "Fix requests",
+        "Workflow",
+        "Time",
+        "Tokens",
+        "Cost",
+        *map(check_label, check_ids),
+    ]
+    rows = "".join(
+        row
+        for report, setup in entries
+        for row in _group_rows(report, setup, check_ids, run_column)
+    )
+    caption = (
+        "Per run, variant and attempt, agent only."
+        if run_column
+        else "Per variant and attempt, agent only."
+    )
+    return _section(
+        "Summary", _table_html(caption, headers, rows, "topline") + _note(TOPLINE_LEGEND)
+    )
+
+
+def _role_identity(setup: ModelSetup) -> str | None:
+    if setup.status == "unavailable":
+        return None
+    return setup.identity if setup.status == "configured" else DASH
+
+
+_SETUP_FIELDS: tuple[
+    tuple[str, Callable[[RunSetup], str], Callable[[RunSetup], str | None]], ...
+] = (
+    (
+        "case",
+        lambda setup: (
+            ", ".join(_short(item, CASE_ID_CHARS) for item in setup.case_ids)
+            if setup.case_ids is not None
+            else UNKNOWN
+        ),
+        lambda setup: ",".join(setup.case_ids) if setup.case_ids is not None else None,
+    ),
+    (
+        "simulated user",
+        lambda setup: _model_text(setup.simulator),
+        lambda setup: _role_identity(setup.simulator),
+    ),
+    ("judge", lambda setup: _model_text(setup.judge), lambda setup: _role_identity(setup.judge)),
+    (
+        "inspector",
+        lambda setup: _model_text(setup.inspector),
+        lambda setup: _role_identity(setup.inspector),
+    ),
+)
+
+
+def _listed(names: Sequence[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _setups_section(setups: Sequence[RunSetup]) -> str:
+    unknown = [
+        name
+        for name, _text, identity in _SETUP_FIELDS
+        if any(identity(setup) is None for setup in setups)
+    ]
+    differing = [
+        name
+        for name, _text, identity in _SETUP_FIELDS
+        if name not in unknown and len({identity(setup) for setup in setups}) > 1
+    ]
+    headers = [
+        "Run",
+        "Variants",
+        *(name.capitalize() for name, _text, _identity in _SETUP_FIELDS),
+        "Price table",
+    ]
+    rows = "".join(
+        "<tr>"
+        + _cell(setup.run_id)
+        + _cell(
+            ", ".join(
+                f"{name} ({_model_text(variant)})" for name, variant in setup.variants.items()
+            )
+            or UNKNOWN
+        )
+        + "".join(
+            _cell(text(setup), "differs" if name in differing else "")
+            for name, text, _identity in _SETUP_FIELDS
+        )
+        + _cell(", ".join(setup.price_versions) or UNKNOWN)
+        + "</tr>"
+        for setup in setups
+    )
+    notes = []
+    if differing:
+        notes.append(
+            f"Highlighted settings differ between runs ({_listed(differing)}), so rows from "
+            "different runs were not measured under identical conditions."
+        )
+    if unknown:
+        notes.append(
+            f"Could not compare the {_listed(unknown)}: some runs' frozen settings are unavailable."
+        )
+    if not differing and not unknown:
+        notes.append(
+            "Every run used the same "
+            + _listed([name for name, _text, _identity in _SETUP_FIELDS])
+            + "."
+        )
+    issues = [f"Run {setup.run_id}: {issue}" for setup in setups for issue in setup.issues]
+    body = (
+        _table_html("Settings each run froze.", headers, rows)
+        + "".join(_note(note) for note in notes)
+        + (_bullets(issues) if issues else "")
+    )
+    return _section("Runs", body)
 
 
 def _report_header(report: RunReport) -> str:
@@ -922,9 +1076,12 @@ body {
   color: var(--fg);
   font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
 }
-main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+main { max-width: 1440px; margin: 0 auto; padding: 24px 16px 64px; }
 section { margin: 24px 0; padding: 16px; border: 1px solid var(--border); border-radius: 8px; }
 h2 { margin-top: 0; }
+.scroller { overflow-x: auto; }
+.scroller::-webkit-scrollbar { height: 10px; }
+.scroller::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 5px; }
 table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
 caption { text-align: left; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
 th, td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; vertical-align: top; }
@@ -942,8 +1099,11 @@ table.topline td.check { text-align: center; font-weight: 600; }
 table.topline td.pass { color: #1a7f37; }
 table.topline td.fail { color: #cf222e; }
 table.topline tr.variant td { font-weight: 600; border-top: 2px solid var(--border); }
+td.differs { background: rgba(207, 34, 46, 0.14); font-weight: 600; }
+h2.run { margin: 40px 0 0; }
 table.topline td.attempt { padding-left: 24px; font-family: ui-monospace, monospace; white-space: nowrap; }
-table.topline tr.variant td:first-child { white-space: nowrap; }
+table.topline td.label { white-space: nowrap; }
+table.topline td.run { font-family: ui-monospace, monospace; white-space: nowrap; }
 @media (prefers-color-scheme: dark) {
   table.topline td.pass { color: #3fb950; }
   table.topline td.fail { color: #f85149; }
@@ -951,15 +1111,9 @@ table.topline tr.variant td:first-child { white-space: nowrap; }
 """
 
 
-def render_report_html(
-    report: RunReport,
-    cases: Mapping[str, CaseView | None],
-    reasoning: Mapping[str, JudgeReasoningView] | None = None,
-) -> str:
-    reasoning = reasoning or {}
-    body = "".join(
+def _run_sections(report: RunReport, reasoning: Mapping[str, JudgeReasoningView]) -> str:
+    return "".join(
         [
-            _topline_section(report),
             _report_header(report),
             _results_section(report),
             _help_needed_section(report),
@@ -967,10 +1121,11 @@ def render_report_html(
             _checks_summary_section(report),
             _metrics_summary_section(report),
             _attempts_section(report, reasoning),
-            _cases_section(cases),
         ]
     )
-    title = f"dryheave report {report.run_id}"
+
+
+def _page(title: str, body: str) -> str:
     return (
         "<!doctype html>"
         f'<html lang="en"><head><meta charset="utf-8">'
@@ -979,3 +1134,29 @@ def render_report_html(
         f"<style>{_STYLE}</style>"
         f"</head><body><main>{body}</main></body></html>"
     )
+
+
+def render_report_html(
+    entries: Sequence[tuple[RunReport, RunSetup | None]],
+    cases: Mapping[str, CaseView | None],
+    *,
+    reasoning: Mapping[str, Mapping[str, JudgeReasoningView]] | None = None,
+) -> str:
+    combined = len(entries) > 1
+    sections = "".join(
+        (f'<h2 class="run">Run {_esc(report.run_id)}</h2>' if combined else "")
+        + _run_sections(report, (reasoning or {}).get(report.run_id, {}))
+        for report, _setup in entries
+    )
+    setups = [setup for _report, setup in entries if setup is not None]
+    body = (
+        _topline_section(entries)
+        + (_setups_section(setups) if combined else "")
+        + sections
+        + _cases_section(cases)
+    )
+    title = "dryheave report " + ", ".join(
+        _short(report.run_id, RUN_ID_CHARS) if combined else report.run_id
+        for report, _setup in entries
+    )
+    return _page(title, body)

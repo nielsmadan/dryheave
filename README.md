@@ -105,7 +105,8 @@ Follow the packaged [real workflow](src/dryheave/resources/examples/real-workflo
    calibration, audits and judge reasoning in a Results tab (per-variant
    comparison) and a Case tab (the frozen case), plus role usage and cost.
    `report RUN_ID --html PATH` writes the same results as one self-contained
-   file. Viewing never runs, assesses, grades or calls a model.
+   file; several run IDs give one summary table across the runs. Viewing never
+   runs, assesses, grades or calls a model.
 6. `export/import` transports curated inputs and structured results. Raw captures,
    source sessions and grading artifacts require explicit sensitive-class flags.
 

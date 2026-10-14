@@ -196,6 +196,36 @@ def test_cli_report_html_writes_self_contained_file_and_refuses_overwrite(
 
 
 @pytest.mark.integration
+def test_cli_report_of_several_runs_returns_each_report_with_its_settings(
+    store, graded_benchmark, tmp_path, capsys
+):
+    benchmark, _case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    prefix = ["--store", str(store.root), "--json"]
+    identifier = create_experiment(store, benchmark)
+    run_ids = []
+    for _ in range(2):
+        assert main([*prefix, "run", identifier, "--mode", "offline-fixture"]) == 0
+        run_ids.append(json.loads(capsys.readouterr().out)["data"]["run_id"])
+        assert main([*prefix, "assess", run_ids[-1]]) == 0
+        capsys.readouterr()
+
+    assert main([*prefix, "report", *run_ids]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert [report["run_id"] for report in data["reports"]] == run_ids
+    assert [setup["run_id"] for setup in data["setups"]] == run_ids
+    assert data["setups"][0]["variants"].keys() == {variant.name for variant in benchmark.variants}
+
+    destination = tmp_path / "combined.html"
+    assert main(["--store", str(store.root), "report", *run_ids, "--html", str(destination)]) == 0
+    content = destination.read_text()
+    assert content.count('<table class="topline">') == 1
+    assert all(f'<h2 class="run">Run {run_id}</h2>' in content for run_id in run_ids)
+
+    assert main(["--store", str(store.root), "report", run_ids[0], run_ids[0]]) == 2
+    assert capsys.readouterr().err == "dryheave: Each report reference may appear only once.\n"
+
+
+@pytest.mark.integration
 def test_cli_report_html_renders_missing_case_without_aborting(
     store, graded_benchmark, tmp_path, capsys, monkeypatch
 ):
@@ -219,6 +249,27 @@ def test_cli_report_html_renders_missing_case_without_aborting(
     content = destination.read_text()
     assert "case not available in this store" in content
     assert case_id in content
+
+
+def test_report_rejects_more_references_than_its_cap(store, capsys):
+    references = [f"{index:032x}" for index in range(17)]
+    assert main(["--store", str(store.root), "report", *references]) == 2
+    assert capsys.readouterr().err == "dryheave: Report at most 16 runs at once.\n"
+
+
+def test_report_rejects_two_references_to_the_same_run(store, capsys, monkeypatch):
+    from dryheave import result_cli
+    from dryheave.report_models import RunReport
+
+    monkeypatch.setattr(
+        result_cli,
+        "report_run",
+        lambda _store, _reference: RunReport.model_construct(run_id="a" * 32),
+    )
+    assert main(["--store", str(store.root), "report", "a" * 32, "portable-copy"]) == 2
+    assert capsys.readouterr().err == (
+        "dryheave: Each run may appear only once; two references name the same run.\n"
+    )
 
 
 def test_report_rejects_force_or_include_sensitive_without_html(store, capsys):

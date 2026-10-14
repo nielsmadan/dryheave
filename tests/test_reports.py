@@ -7,12 +7,20 @@ from pathlib import Path
 import pytest
 
 from dryheave.assessments import assess_run
-from dryheave.controller_models import ControllerRecipe
+from dryheave.controller_models import ControllerRecipe, RoleBudget
+from dryheave.errors import DryheaveError
 from dryheave.experiment_models import PriceRate, PriceTable, ScoringConfig
-from dryheave.experiments import create_experiment
+from dryheave.experiments import create_experiment, load_experiment
 from dryheave.models import CommandSpec, TokenUsage
-from dryheave.report_models import AttemptReport, Distribution, GroupMetrics
-from dryheave.reports import compare_runs, distribution, group_metrics, report_run
+from dryheave.report_models import (
+    AttemptReport,
+    Distribution,
+    GroupMetrics,
+    ModelSetup,
+    PriceBasis,
+    RunReport,
+)
+from dryheave.reports import compare_runs, distribution, group_metrics, report_run, run_setups
 from dryheave.result_models import (
     Assessment,
     AuditReport,
@@ -26,7 +34,7 @@ from dryheave.result_models import (
 )
 from dryheave.runner import run_experiment
 from dryheave.runner_models import RunOptions
-from dryheave.serialization import canonical_json
+from dryheave.serialization import canonical_json, digest
 
 
 @pytest.mark.integration
@@ -1285,3 +1293,91 @@ def test_attempt_topline_hides_workflow_and_fix_requests_for_dialogs_without_a_w
         group.workflow_attempts,
         group.workflows_completed,
     ) == (0, 0, 0)
+
+
+JUDGE = ControllerRecipe(
+    kind="json-command",
+    isolation="trusted-native",
+    model="claude-opus-5-5",
+    effort="high",
+    command=CommandSpec(argv=(sys.executable, "judge.py")),
+)
+
+
+def _bare_report(experiment_id: str, run_id: str = "a" * 32, versions=()) -> RunReport:
+    return RunReport.model_construct(
+        run_id=run_id,
+        experiment_id=experiment_id,
+        groups=(GroupMetrics.model_construct(price_basis=PriceBasis(versions=versions)),),
+    )
+
+
+def test_run_setups_read_the_frozen_case_roles_and_variant_profiles(store, benchmark):
+    identifier = create_experiment(
+        store, benchmark.model_copy(update={"scoring": ScoringConfig(judge=JUDGE)})
+    )
+    experiment = load_experiment(store, identifier)
+    (setup,) = run_setups(store, [_bare_report(identifier, versions=("v1",))])
+    assert setup.case_ids == experiment.case_ids
+    assert setup.variants["base"].status == "configured"
+    assert setup.variants["base"].identity == experiment.variants[0].profile_id
+    assert (setup.simulator.kind, setup.simulator.identity) == ("scripted", experiment.simulator_id)
+    judge = ModelSetup(
+        status="configured",
+        kind="json-command",
+        model="claude-opus-5-5",
+        effort="high",
+        identity=digest(canonical_json(JUDGE)),
+    )
+    assert (setup.judge, setup.inspector) == (judge, judge)
+    assert setup.price_versions == ("v1",)
+    assert setup.issues == ()
+
+
+def test_run_setups_show_no_inspector_when_its_budget_disables_inspection(store, benchmark):
+    disabled = JUDGE.model_copy(update={"budget": RoleBudget(max_calls=0)})
+    identifier = create_experiment(
+        store, benchmark.model_copy(update={"scoring": ScoringConfig(judge=disabled)})
+    )
+    (setup,) = run_setups(store, [_bare_report(identifier)])
+    assert setup.judge.status == "configured"
+    assert setup.inspector == ModelSetup(status="none")
+
+
+def test_run_setups_mark_a_missing_experiment_unavailable_with_its_reason(store):
+    (setup,) = run_setups(store, [_bare_report("f" * 64)])
+    assert setup.case_ids is None
+    assert setup.simulator.status == "unavailable"
+    assert setup.issues[0].startswith("Experiment " + "f" * 64)
+
+
+def test_run_setups_record_an_unloadable_profile_as_an_issue(store, benchmark, monkeypatch):
+    identifier = create_experiment(store, benchmark)
+    profile_id = load_experiment(store, identifier).variants[0].profile_id
+
+    def unloadable(_store, _reference):
+        raise DryheaveError("profile corrupt")
+
+    monkeypatch.setattr("dryheave.reports.load_profile", unloadable)
+    (setup,) = run_setups(store, [_bare_report(identifier)])
+    assert setup.variants["base"] == ModelSetup(status="unavailable", identity=profile_id)
+    assert setup.issues == (f"Profile {profile_id}: profile corrupt",)
+
+
+def test_run_setups_load_a_shared_experiment_once(store, benchmark, monkeypatch):
+    identifier = create_experiment(store, benchmark)
+    from dryheave import reports
+
+    inspected = []
+    original = reports.inspect_experiment
+
+    def counting(store_, reference):
+        inspected.append(reference)
+        return original(store_, reference)
+
+    monkeypatch.setattr(reports, "inspect_experiment", counting)
+    setups = run_setups(
+        store, [_bare_report(identifier, "1" * 32), _bare_report(identifier, "2" * 32)]
+    )
+    assert inspected == [identifier]
+    assert [setup.run_id for setup in setups] == ["1" * 32, "2" * 32]

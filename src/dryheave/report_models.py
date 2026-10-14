@@ -192,6 +192,31 @@ class RunReport(StrictModel):
     )
 
 
+class ModelSetup(StrictModel):
+    status: Literal["configured", "none", "unavailable"]
+    kind: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    identity: str | None = None
+
+
+def _unavailable() -> ModelSetup:
+    return ModelSetup(status="unavailable")
+
+
+class RunSetup(StrictModel):
+    schema_version: Literal[1] = 1
+    kind: Literal["run-setup"] = "run-setup"
+    run_id: RunId
+    case_ids: tuple[ObjectId, ...] | None = None
+    variants: dict[str, ModelSetup] = Field(default_factory=dict)
+    simulator: ModelSetup = Field(default_factory=_unavailable)
+    judge: ModelSetup = Field(default_factory=_unavailable)
+    inspector: ModelSetup = Field(default_factory=_unavailable)
+    price_versions: tuple[str, ...] = ()
+    issues: tuple[str, ...] = ()
+
+
 class PairChange(StrictModel):
     case_id: ObjectId
     repetition: int

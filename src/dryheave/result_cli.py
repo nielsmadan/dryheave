@@ -11,13 +11,15 @@ from dryheave.commands import CommandRegistry
 from dryheave.errors import CancelledError, ConflictError, DryheaveError, InputError
 from dryheave.filesystem import atomic_write
 from dryheave.report_html import render_report_html
-from dryheave.reports import compare_runs, report_run
+from dryheave.report_models import RunReport, RunSetup
+from dryheave.reports import compare_runs, report_run, run_setups
 from dryheave.result_models import AuditReview
 from dryheave.storage import ObjectStore
 from dryheave.viewer import AttemptIdentity, ViewerService
 from dryheave.viewer_models import CaseView
 
 REPORT_SENSITIVE_CLASSES = ("assessment-evidence",)
+MAX_REPORT_REFERENCES = 16
 
 
 def _assess(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
@@ -54,39 +56,48 @@ def _safe_case(service: ViewerService, case_id: str) -> CaseView | None:
         return None
 
 
-def _report(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
-    if args.html is None and (args.force or args.include_sensitive):
-        raise InputError("--force and --include-sensitive require --html.")
-    report = report_run(store, args.reference)
-    if args.html is None:
-        return report.model_dump(mode="json")
-    destination = args.html.absolute()
-    if not args.force and (destination.exists() or destination.is_symlink()):
-        raise ConflictError(
-            f"Report destination already exists: {destination}. Use --force to overwrite."
-        )
-    service = ViewerService(store)
+def _report_cases(service: ViewerService, reports: list[RunReport]) -> dict[str, CaseView | None]:
     case_ids = sorted(
         {
             case_id
+            for report in reports
             for attempt in report.attempts
             if attempt.result
             for case_id in (attempt.result.case_id, attempt.result.graded_case_id)
             if case_id is not None
         }
     )
-    cases = {case_id: _safe_case(service, case_id) for case_id in case_ids}
+    return {case_id: _safe_case(service, case_id) for case_id in case_ids}
+
+
+def _write_report_html(
+    args: argparse.Namespace,
+    store: ObjectStore,
+    entries: list[tuple[RunReport, RunSetup | None]],
+) -> dict[str, JsonValue]:
+    destination = args.html.absolute()
+    if not args.force and (destination.exists() or destination.is_symlink()):
+        raise ConflictError(
+            f"Report destination already exists: {destination}. Use --force to overwrite."
+        )
+    service = ViewerService(store)
+    reports = [report for report, _setup in entries]
     reasoning = {}
     if "assessment-evidence" in args.include_sensitive:
         reasoning = {
-            attempt.attempt_id: service.reasoning_for_identity(
-                report.run_id,
-                attempt.attempt_id,
-                AttemptIdentity(attempt.capture_id, attempt.quarantine_id, attempt.assessment_id),
-            )
-            for attempt in report.attempts
+            report.run_id: {
+                attempt.attempt_id: service.reasoning_for_identity(
+                    report.run_id,
+                    attempt.attempt_id,
+                    AttemptIdentity(
+                        attempt.capture_id, attempt.quarantine_id, attempt.assessment_id
+                    ),
+                )
+                for attempt in report.attempts
+            }
+            for report in reports
         }
-    content = render_report_html(report, cases, reasoning)
+    content = render_report_html(entries, _report_cases(service, reports), reasoning=reasoning)
     try:
         atomic_write(destination, content.encode("utf-8"), replace=args.force)
     except FileExistsError as error:
@@ -94,6 +105,29 @@ def _report(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue
             f"Report destination already exists: {destination}. Use --force to overwrite."
         ) from error
     return {"path": str(destination)}
+
+
+def _report(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
+    if args.html is None and (args.force or args.include_sensitive):
+        raise InputError("--force and --include-sensitive require --html.")
+    if len(args.references) > MAX_REPORT_REFERENCES:
+        raise InputError(f"Report at most {MAX_REPORT_REFERENCES} runs at once.")
+    if len(set(args.references)) != len(args.references):
+        raise InputError("Each report reference may appear only once.")
+    reports = [report_run(store, reference) for reference in args.references]
+    if len({report.run_id for report in reports}) != len(reports):
+        raise InputError("Each run may appear only once; two references name the same run.")
+    setups: tuple[RunSetup | None, ...] = (
+        run_setups(store, reports) if len(reports) > 1 else (None,)
+    )
+    if args.html is not None:
+        return _write_report_html(args, store, list(zip(reports, setups, strict=True)))
+    if len(reports) == 1:
+        return reports[0].model_dump(mode="json")
+    return {
+        "reports": [report.model_dump(mode="json") for report in reports],
+        "setups": [setup.model_dump(mode="json") for setup in setups if setup is not None],
+    }
 
 
 def _compare(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
@@ -157,7 +191,12 @@ def register_results(registry: CommandRegistry) -> None:
         "report",
         help_text="Read durable run progress or an imported portable report without taking the writer lock.",
     )
-    report.add_argument("reference")
+    report.add_argument(
+        "references",
+        metavar="REF",
+        nargs="+",
+        help="Run or portable report IDs; several give one combined report.",
+    )
     report.add_argument(
         "--html", type=Path, help="Write a self-contained shareable HTML report to this path."
     )

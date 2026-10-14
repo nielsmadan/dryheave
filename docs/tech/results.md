@@ -205,6 +205,7 @@ uv run dryheave --store .dryheave report RUN_ID --html report.html
 uv run dryheave --store .dryheave report RUN_ID --html report.html --force
 uv run dryheave --store .dryheave report RUN_ID --html report.html \
   --include-sensitive assessment-evidence
+uv run dryheave --store .dryheave report RUN_ID OTHER_RUN_ID --html combined.html
 ```
 
 `--html PATH` renders `report_run`'s `RunReport`, each referenced case's
@@ -212,8 +213,10 @@ uv run dryheave --store .dryheave report RUN_ID --html report.html \
 reasoning into one self-contained HTML file: inline CSS with light/dark support
 via `prefers-color-scheme`, no `<script>`, no external resource references, and
 every value HTML-escaped. `render_report_html` in `report_html.py` is a pure
-function from that data to the page string; the CLI does the I/O (resolving the
-reference, loading cases, optionally loading reasoning, writing the file).
+function from a list of `(RunReport, RunSetup | None)` entries, the cases and the
+reasoning to the page string; the CLI does the I/O (resolving each reference, loading
+run settings through `run_setups` when there are several, loading cases, optionally
+loading reasoning, writing the file).
 Both open with a Summary table: one row per variant, then one row per latest
 attempt of each trial, giving the agent's accepted turns, first inspection
 (✓ passed, ✗ failed, ? unavailable, – no inspection), fix requests, workflow
@@ -245,6 +248,24 @@ entrypoint content is never shown). A case referenced by a result (e.g. a
 regrade's replacement case dropped from a portable bundle's closure) that
 cannot be loaded from the store renders its section as "case not available
 in this store" rather than aborting the export.
+
+Several references produce one page with a single Summary table across every
+run: a Run column, and each variant row labelled with its variant name and the
+model and effort its frozen profile requested. A single-run page carries no model
+labels, so its Summary matches the viewer's. A Runs section lists each run's frozen
+settings (`run_setups` in `reports.py`, which loads each distinct experiment once:
+cases, variant profiles, simulated user, judge, inspector as `inspection_recipe`
+selects it, and the price table versions the run's charges cite). Cases, simulated
+user, judge and inspector are compared by frozen identity (case IDs, simulator object
+ID, recipe digest), never by label: a differing one is highlighted, a setting
+unavailable for any run is reported as not comparable instead of equal, and only when
+every compared setting is known and equal does the page say the runs match. Variants
+and price tables are listed but not compared. Settings that failed to load are listed
+as issues with their reason. Each run's full report follows under its own heading.
+Without `--html`, several references return `{"reports": [...], "setups": [...]}`,
+each setup a versioned `run-setup`. A report takes at most 16 references, and each
+run may appear only once, including through two references that resolve to it. Judge
+reasoning is keyed by run and attempt, so each run's section shows its own.
 
 Judge rationale per criterion and check is included only with
 `--include-sensitive assessment-evidence` — the only accepted value for
