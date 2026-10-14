@@ -372,6 +372,15 @@ button[disabled] {
   overflow-x: auto;
 }
 
+.scroller::-webkit-scrollbar {
+  height: 10px;
+}
+
+.scroller::-webkit-scrollbar-thumb {
+  background: var(--muted);
+  border-radius: 5px;
+}
+
 table.topline th {
   white-space: normal;
 }

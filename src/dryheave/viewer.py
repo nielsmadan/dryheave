@@ -1,5 +1,7 @@
 import base64
 import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -70,7 +72,9 @@ JUDGE_RESPONSE_FILE = re.compile(r"/judge/([^/]+)/\d{6}-response\.json$")
 MAX_LIST_LIMIT = 100
 MAX_DETAIL_BYTES = 4 * 1024 * 1024
 MAX_ROW_JOURNAL_BYTES = 256 * 1024
-MAX_REQUEST_JOURNAL_BYTES = 8 * 1024 * 1024
+MAX_REQUEST_JOURNAL_BYTES = 64 * 1024 * 1024
+MAX_LIST_JOURNAL_BYTES = 8 * 1024 * 1024
+PARSED_JOURNAL_CACHE = 4
 MAX_SCAN_OBJECTS = 4096
 MAX_VERIFIED_CALIBRATIONS = 32
 
@@ -222,6 +226,8 @@ class ViewerService:
     ) -> None:
         self.store = store
         self.target = target
+        self._executions: OrderedDict[tuple[str, int, int, int], ExecutionJournal] = OrderedDict()
+        self._executions_lock = threading.Lock()
         self.max_detail_bytes = max_detail_bytes
         self.max_scan_objects = max_scan_objects
         self.max_verified_calibrations = max_verified_calibrations
@@ -243,7 +249,7 @@ class ViewerService:
             raise InputError(f"Listing requires offset >= 0 and 1 <= limit <= {MAX_LIST_LIMIT}.")
         runs = RunStore(self.store.root)
         identifiers = runs.list_runs()
-        budget = self.max_request_journal_bytes
+        budget = MAX_LIST_JOURNAL_BYTES
         rows = []
         for run_id in identifiers[offset : offset + limit]:
             row, used = self._row(runs, run_id, max(0, min(MAX_ROW_JOURNAL_BYTES, budget)))
@@ -274,11 +280,33 @@ class ViewerService:
             finished=sum(stage == TrialStage.FINISHED for stage in stages.values()),
         ), prefix.bytes_read
 
+    def _execution(self, run_id: str) -> ExecutionJournal:
+        try:
+            info = (self.store.root / "runs" / run_id / "events.jsonl").stat()
+        except OSError:
+            return ExecutionJournal(
+                RunStore(self.store.root).inspect(run_id, limit=self.max_request_journal_bytes)
+            )
+        key = (run_id, info.st_ino, info.st_size, info.st_mtime_ns)
+        with self._executions_lock:
+            cached = self._executions.get(key)
+            if cached is not None:
+                self._executions.move_to_end(key)
+                return cached
+        execution = ExecutionJournal(
+            RunStore(self.store.root).inspect(run_id, limit=self.max_request_journal_bytes)
+        )
+        with self._executions_lock:
+            self._executions[key] = execution
+            while len(self._executions) > PARSED_JOURNAL_CACHE:
+                self._executions.popitem(last=False)
+        return execution
+
     def progress(self, run_id: str) -> RunProgress:
         if not re.fullmatch(RUN_ID_PATTERN, run_id):
             raise InputError("Expected a 32-character lowercase run ID.")
-        journal = RunStore(self.store.root).inspect(run_id, limit=self.max_request_journal_bytes)
-        execution = ExecutionJournal(journal)
+        execution = self._execution(run_id)
+        journal = execution.journal
         return RunProgress(
             run_id=run_id,
             experiment_id=journal.metadata.experiment_id,
@@ -301,7 +329,7 @@ class ViewerService:
     def run_report(self, run_id: str) -> RunReport:
         if not re.fullmatch(RUN_ID_PATTERN, run_id):
             raise InputError("Expected a 32-character lowercase run ID.")
-        return report_run(self.store, run_id, journal_limit=self.max_request_journal_bytes)
+        return report_run(self.store, run_id, execution=self._execution(run_id))
 
     def portable_report(self, report_id: str) -> RunReport:
         if not re.fullmatch(OBJECT_ID_PATTERN, report_id):
@@ -329,14 +357,11 @@ class ViewerService:
         if kind == "run":
             if not re.fullmatch(RUN_ID_PATTERN, source_id):
                 raise InputError("Expected a 32-character lowercase run ID.")
-            journal = RunStore(self.store.root).inspect(
-                source_id, limit=self.max_request_journal_bytes
-            )
-            execution = ExecutionJournal(journal)
+            execution = self._execution(source_id)
             state = execution.attempts.get(attempt_id)
             if state is None:
                 raise NotFoundError(f"Run has no retained attempt: {attempt_id}")
-            return journal.metadata.run_id, AttemptIdentity(
+            return execution.journal.metadata.run_id, AttemptIdentity(
                 state.capture_id, state.quarantine_id, state.assessment_id
             )
         if not re.fullmatch(OBJECT_ID_PATTERN, source_id):

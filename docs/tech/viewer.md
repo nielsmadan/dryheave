@@ -86,7 +86,14 @@ deletion changes validity without a journal sequence change, so nothing is cache
 on sequence alone. Progress, report, comparison and attempt detail routes need
 whole execution state, so they read each journal under the same per-request
 budget and answer `limit_exceeded` above it instead of parsing up to the 128 MiB
-storage ceiling.
+storage ceiling. The budget is 64 MiB per journal: a workflow run of four
+attempts already journals about 8.6 MB, mostly repeated attempt-state snapshots,
+which the earlier 8 MiB budget refused. Parsing that run takes about 0.6 s, so
+`ViewerService` keeps the last four parsed journals keyed by run ID and the events
+file's inode, size and modification time; any append changes the key and forces a
+fresh parse. Only the parsed journal is reused: capture, assessment and blob
+verification still run on every request. The run listing keeps its own 8 MiB
+aggregate budget (`MAX_LIST_JOURNAL_BYTES`).
 
 Retained dialogue, final patch and verifier evidence load on demand. Blob reads
 apply the viewer's per-response limit before allocating, so a blob within the

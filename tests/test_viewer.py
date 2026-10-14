@@ -1,4 +1,5 @@
 import base64
+import os
 import re
 
 import pytest
@@ -486,11 +487,12 @@ def test_corrupt_capture_object_and_blob_are_reported_as_invalid(store, assessed
     assert dialogue.messages == ()
 
 
-def test_listing_bounds_the_journal_bytes_it_reads(store, assessed):
+def test_listing_bounds_the_journal_bytes_it_reads(store, assessed, monkeypatch):
     exact = ViewerService(store).runs().runs[0]
     assert exact.truncated is False
     assert exact.durable_sequence == exact.observed_events > 0
-    bounded = ViewerService(store, max_request_journal_bytes=64).runs().runs[0]
+    monkeypatch.setattr(viewer, "MAX_LIST_JOURNAL_BYTES", 64)
+    bounded = ViewerService(store).runs().runs[0]
     assert bounded.truncated is True
     assert bounded.durable_sequence is None
     assert bounded.observed_events < exact.observed_events
@@ -521,6 +523,27 @@ def test_listing_counts_attempts_from_the_checkpoint_beyond_the_row_budget(
     assert fallback.error is None
     assert fallback.counted_through is None
     assert fallback.truncated is True
+
+
+def test_detail_routes_reuse_a_parsed_journal_until_it_changes(store, assessed, monkeypatch):
+    service = ViewerService(store)
+    reads = []
+    inspect = journals.RunStore.inspect
+
+    def counting(self, identifier, *, limit=None):
+        reads.append(identifier)
+        return inspect(self, identifier, limit=limit)
+
+    monkeypatch.setattr(journals.RunStore, "inspect", counting)
+    attempt_id = service.progress(assessed.run_id).attempts[0].attempt_id
+    service.run_report(assessed.run_id)
+    assert service.dialogue("run", assessed.run_id, attempt_id).status == "ok"
+    assert reads == [assessed.run_id]
+    events = store.root / "runs" / assessed.run_id / "events.jsonl"
+    modified = events.stat().st_mtime_ns + 1_000_000_000
+    os.utime(events, ns=(modified, modified))
+    service.progress(assessed.run_id)
+    assert reads == [assessed.run_id, assessed.run_id]
 
 
 def test_detail_routes_bound_the_journal_bytes_they_read(store, assessed):
@@ -560,7 +583,8 @@ def test_listing_charges_every_row_for_the_prefix_bytes_it_read(
         return content, truncated
 
     monkeypatch.setattr(journals, "read_prefix", spy)
-    listing = ViewerService(store, max_request_journal_bytes=100).runs()
+    monkeypatch.setattr(viewer, "MAX_LIST_JOURNAL_BYTES", 100)
+    listing = ViewerService(store).runs()
     assert {row.run_id for row in listing.runs} == {first.run_id, second.run_id}
     assert len(read) == 2
     assert read[0] == 100
@@ -585,7 +609,8 @@ def test_listing_never_reads_with_a_negative_allowance_once_the_budget_is_spent(
 
     monkeypatch.setattr(journals, "read_prefix", spy)
     monkeypatch.setattr(viewer, "MAX_ROW_JOURNAL_BYTES", 2048)
-    listing = ViewerService(store, max_request_journal_bytes=2100).runs(limit=2)
+    monkeypatch.setattr(viewer, "MAX_LIST_JOURNAL_BYTES", 2100)
+    listing = ViewerService(store).runs(limit=2)
     assert {row.run_id for row in listing.runs} == {first.run_id, second.run_id}
     assert limits == [2048, 0]
     spent = listing.runs[1]
