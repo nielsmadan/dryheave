@@ -21,8 +21,7 @@ class FrozenVariant(StrictModel):
     profile_id: ObjectId
 
 
-class PriceRate(StrictModel):
-    model: str = Field(min_length=1)
+class TokenRates(StrictModel):
     uncached_input: float = Field(ge=0)
     cache_read: float = Field(ge=0)
     cache_write: float = Field(ge=0)
@@ -32,9 +31,26 @@ class PriceRate(StrictModel):
     @model_serializer(mode="wrap")
     def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         value: dict[str, object] = handler(self)
-        if self.cache_write_1h is None:
-            value.pop("cache_write_1h", None)
-        return value
+        return {name: item for name, item in value.items() if item is not None}
+
+
+class LongPromptRates(TokenRates):
+    above_total_input_tokens: int = Field(gt=0)
+
+
+class PriceRate(TokenRates):
+    model: str = Field(min_length=1)
+    long_prompt: LongPromptRates | None = None
+
+    @model_validator(mode="after")
+    def long_prompt_keeps_the_1h_rate(self) -> Self:
+        if (
+            self.long_prompt is not None
+            and self.cache_write_1h is not None
+            and self.long_prompt.cache_write_1h is None
+        ):
+            raise ValueError("long_prompt needs cache_write_1h when the base rate has one")
+        return self
 
 
 class PriceTable(StrictModel):

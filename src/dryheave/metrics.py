@@ -6,7 +6,7 @@ from pydantic import JsonValue
 from dryheave.controller_models import ControllerRecipe, RoleCall
 from dryheave.drivers.models import NativeEvent, NativeUsage
 from dryheave.errors import DryheaveError
-from dryheave.experiment_models import PriceRate, PriceTable
+from dryheave.experiment_models import PriceRate, PriceTable, TokenRates
 from dryheave.models import TokenUsage
 from dryheave.result_models import RoleMetrics, UsageCharge
 from dryheave.runner_models import CapturedAttempt
@@ -44,7 +44,7 @@ def token_sum(usages: Iterable[TokenUsage | None]) -> TokenUsage:
     )
 
 
-def _write_cost(usage: TokenUsage, rate: PriceRate) -> tuple[float, str | None]:
+def _write_cost(usage: TokenUsage, rate: TokenRates) -> tuple[float, str | None]:
     cache_write = usage.cache_write or 0
     if usage.cache_write_1h is not None and rate.cache_write_1h is not None:
         return (
@@ -91,7 +91,33 @@ def call_usage_with_raw_split(
     return usage.model_copy(update={"cache_write_1h": derived})
 
 
-def _charge(record: UsageCharge, table: PriceTable | None) -> UsageCharge:
+def total_input(usage: TokenUsage) -> int | None:
+    if usage.uncached_input is None or usage.cache_read is None or usage.cache_write is None:
+        return None
+    return usage.uncached_input + usage.cache_read + usage.cache_write
+
+
+def _tier(
+    rate: PriceRate, usage: TokenUsage, *, per_request: bool
+) -> tuple[TokenRates | None, str]:
+    long_prompt = rate.long_prompt
+    if long_prompt is None:
+        return rate, ""
+    total = total_input(usage)
+    if not per_request or total is None:
+        return None, (
+            " The price depends on each request's total input, and this record is not known "
+            "to cover a single request."
+        )
+    if total > long_prompt.above_total_input_tokens:
+        return long_prompt, (
+            f" Priced at the long-prompt rates: total input of {total} tokens exceeds "
+            f"{long_prompt.above_total_input_tokens}."
+        )
+    return rate, ""
+
+
+def _charge(record: UsageCharge, table: PriceTable | None, *, per_request: bool) -> UsageCharge:
     model = record.observed_model or (
         record.requested_model if record.model_basis == "requested-root" else None
     )
@@ -100,10 +126,13 @@ def _charge(record: UsageCharge, table: PriceTable | None) -> UsageCharge:
     rate = next((rate for rate in table.rates if rate.model == model), None)
     if rate is None or any(getattr(record.usage, name) is None for name in BILLABLE_FIELDS):
         return record
-    write_cost, write_reason = _write_cost(record.usage, rate)
+    tier, tier_reason = _tier(rate, record.usage, per_request=per_request)
+    if tier is None:
+        return record.model_copy(update={"reason": record.reason + tier_reason})
+    write_cost, write_reason = _write_cost(record.usage, tier)
     cost = (
         sum(
-            getattr(record.usage, name) * getattr(rate, name)
+            getattr(record.usage, name) * getattr(tier, name)
             for name in BILLABLE_FIELDS
             if name != "cache_write"
         )
@@ -116,7 +145,7 @@ def _charge(record: UsageCharge, table: PriceTable | None) -> UsageCharge:
             "currency": table.currency,
             "price_version": table.version,
             "price_date": table.effective_date,
-            "reason": record.reason + (" " + write_reason if write_reason else ""),
+            "reason": record.reason + tier_reason + (" " + write_reason if write_reason else ""),
         }
     )
 
@@ -310,6 +339,7 @@ def subject_metrics(
                     reason="Observed native usage; descendant model is unknown unless metadata establishes it.",
                 ),
                 table,
+                per_request=record.accounting == "response",
             )
         )
     return summarize_role(
@@ -369,6 +399,7 @@ def call_metrics(
                     reason=call.usage_reason,
                 ),
                 table,
+                per_request=False,
             )
         )
     if not calls and recipe is not None:

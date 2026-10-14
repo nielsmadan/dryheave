@@ -217,7 +217,12 @@ a stop, cancellation, budget exhaustion or unresolved delivery.
 
 `scoring` freezes `policy: "required-criteria-v1"`, optional `judge` controller
 recipe, and an optional version/date/currency price table with per-million-token
-rates. These are saved assessment inputs, interpreted by explicit `assess` or
+rates. A rate may carry a `long_prompt` tier that applies to a single request whose
+total input (uncached input, cache reads and cache writes) exceeds
+`above_total_input_tokens`, and the charge's reason says when it applied. A record
+not known to cover a single request of such a model, including every simulator,
+judge and inspector call, stays unpriced. These are saved
+assessment inputs, interpreted by explicit `assess` or
 `run --assess`, and are not current market pricing. The convenience flag rejects
 status-only requests, incomplete capture and unresolved cleanup. It preserves
 the run ID and evidence on failure or cancellation; normal `run` stays

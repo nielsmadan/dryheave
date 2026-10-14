@@ -1,7 +1,16 @@
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from dryheave.controller_models import ControllerRecipe, RoleBudget
-from dryheave.experiment_models import PriceRate, PriceTable, ScoringConfig, inspection_recipe
+from dryheave.experiment_models import (
+    LongPromptRates,
+    PriceRate,
+    PriceTable,
+    ScoringConfig,
+    inspection_recipe,
+)
 from dryheave.models import ObjectKind
 from dryheave.serialization import canonical_json, parse_model
 from dryheave.storage import ObjectStore
@@ -15,6 +24,41 @@ def test_price_rate_without_cache_write_1h_round_trips_byte_identically() -> Non
     rate = PriceRate.model_validate_json(old)
     assert rate.cache_write_1h is None
     assert canonical_json(rate) == canonical_json(json.loads(old))
+
+
+def test_price_rate_with_a_long_prompt_tier_round_trips_byte_identically() -> None:
+    old = (
+        b'{"model":"tiered","uncached_input":0.1,"cache_read":0.01,"cache_write":0.125,'
+        b'"output":0.5,"long_prompt":{"above_total_input_tokens":100000,'
+        b'"uncached_input":0.5,"cache_read":0.05,"cache_write":0.625,"output":2.5}}'
+    )
+    rate = PriceRate.model_validate_json(old)
+    assert rate.long_prompt == LongPromptRates(
+        above_total_input_tokens=100000,
+        uncached_input=0.5,
+        cache_read=0.05,
+        cache_write=0.625,
+        output=2.5,
+    )
+    assert canonical_json(rate) == canonical_json(json.loads(old))
+
+
+def test_price_rate_rejects_a_long_prompt_tier_without_the_base_1h_rate() -> None:
+    tier = {"above_total_input_tokens": 10, "uncached_input": 1, "cache_read": 1}
+    rate = {"model": "m", "uncached_input": 1, "cache_read": 1, "cache_write": 1, "output": 1}
+    with pytest.raises(ValidationError, match="long_prompt needs cache_write_1h"):
+        PriceRate.model_validate(
+            {**rate, "cache_write_1h": 2, "long_prompt": {**tier, "cache_write": 1, "output": 1}}
+        )
+    accepted = PriceRate.model_validate(
+        {
+            **rate,
+            "cache_write_1h": 2,
+            "long_prompt": {**tier, "cache_write": 1, "cache_write_1h": 2, "output": 1},
+        }
+    )
+    assert accepted.long_prompt is not None
+    assert accepted.long_prompt.cache_write_1h == 2
 
 
 def test_price_rate_carries_cache_write_1h_when_present() -> None:
