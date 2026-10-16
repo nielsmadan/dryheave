@@ -215,15 +215,35 @@ def test_timeout_is_a_retained_error_and_stops_verifier(store, graded_benchmark)
 
 
 @pytest.mark.integration
-def test_completed_verifier_stops_observed_detached_child_before_snapshot(store, graded_benchmark):
+def test_completed_verifier_stops_observed_detached_child_before_snapshot(
+    store, graded_benchmark, tmp_path, monkeypatch
+):
+    from dryheave.process_ownership import ProcessOwner
+
+    child_pid, observed = tmp_path / "child.pid", tmp_path / "observed"
+    scan = ProcessOwner.scan
+
+    def acknowledging_scan(owner):
+        scan(owner)
+        if child_pid.exists() and any(
+            str(identity.pid) == child_pid.read_text() for identity in owner.snapshot()
+        ):
+            observed.touch()
+
+    monkeypatch.setattr(ProcessOwner, "scan", acknowledging_scan)
     program = (
-        "import subprocess, sys, time\n"
+        "import pathlib, subprocess, sys, time\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
         "start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
-        "time.sleep(0.3)\nprint('PRIVATE_VERIFIER_SENTINEL', flush=True)\n"
+        f"pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))\n"
+        "deadline = time.monotonic() + 10\n"
+        f"while not pathlib.Path({str(observed)!r}).exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.05)\n"
+        "print('PRIVATE_VERIFIER_SENTINEL', flush=True)\n"
     )
     case_id = altered_case(store, graded_benchmark.cases[0], program=program, reference_patch=False)
     record = load_calibration(store, calibrate_case(store, case_id))
+    assert observed.exists()
     assert record.status == "ineffective"
     state = parse_model(
         next((store.root / "calibrations").glob("*/operation.json")).read_bytes(),

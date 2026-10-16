@@ -78,6 +78,12 @@ def fake_executable(
 
 def invoke(tmp_path, recipe, request, *, cancelled=None, duration=BUDGET_SECONDS * 2, **options):
     identities = []
+
+    def record(batch):
+        identities.extend(batch)
+        if options.get("after_identities"):
+            options["after_identities"](identities)
+
     context = CallContext(
         call_id="synthetic-call",
         index=options.get("index", 0),
@@ -91,7 +97,7 @@ def invoke(tmp_path, recipe, request, *, cancelled=None, duration=BUDGET_SECONDS
             "CLAUDE_CODE_OAUTH_TOKEN": "synthetic-offline-value",
             "ANTHROPIC_API_KEY": "must-not-inherit",
         },
-        on_identities=identities.extend,
+        on_identities=record,
         runtime_root=tmp_path / "runtime",
     )
     writer = ArtifactWriter(tmp_path / "evidence", 1024 * 1024)
@@ -253,12 +259,27 @@ def test_owned_child_is_stopped_before_return(store, benchmark, tmp_path):
     extra = (
         "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
         "pathlib.Path('child.pid').write_text(str(child.pid))\n"
-        "time.sleep(0.2)\n"
+        "deadline = time.monotonic() + 10\n"
+        "while not pathlib.Path('observed').exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.05)\n"
     )
+    work = tmp_path / "runtime/work"
+
+    def acknowledge(identities):
+        child = work / "child.pid"
+        if child.exists() and any(
+            str(identity.pid) == child.read_text() for identity in identities
+        ):
+            (work / "observed").touch()
+
     call, identities = invoke(
-        tmp_path, recipe_for(fake_executable(tmp_path, extra=extra)), request_for(store)
+        tmp_path,
+        recipe_for(fake_executable(tmp_path, extra=extra)),
+        request_for(store),
+        after_identities=acknowledge,
     )
-    pid = int((tmp_path / "runtime/work/child.pid").read_text())
+    pid = int((work / "child.pid").read_text())
+    assert (work / "observed").exists()
     assert any(identity.pid == pid for identity in identities)
     assert call.cleanup.known_writers_stopped
     assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
