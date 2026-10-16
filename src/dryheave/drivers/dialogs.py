@@ -23,6 +23,9 @@ CODEX_APPROVALS = (
 RULE = re.compile("\u2500+")
 MENU_HIGHLIGHT = re.compile(r"\s+\u276f (/\S+)(?:\s{2,}|$)")
 MENU_ROW = re.compile(r"\s+(?:[/\u2026]\S|No commands match \")")
+MENU_NO_MATCH = re.compile(r'\s+No commands match "')
+MENU_GAP_LINES = 3
+DETACHED_HIGHLIGHT = re.compile(r"\s+\u276f (/[\w.:-]+)(?:\s{2,}|$)")
 
 
 @dataclass(frozen=True)
@@ -563,8 +566,22 @@ def command_menu(screen: Screen) -> CommandMenu | None:
     rows = [line for line in nearby if len(line) - len(line.lstrip()) > indentation]
     highlighted = [match[1] for line in rows if (match := MENU_HIGHLIGHT.match(line))]
     if not highlighted and not any(map(MENU_ROW.match, rows)):
-        return None
+        detached = _detached_menu(lines, top, indentation)
+        highlighted = [match[1] for line in detached if (match := DETACHED_HIGHLIGHT.match(line))]
+        if not highlighted and not any(map(MENU_NO_MATCH.match, detached)):
+            return None
     return CommandMenu(highlighted=highlighted[0] if len(highlighted) == 1 else None)
+
+
+def _detached_menu(lines: list[str], top: int, indentation: int) -> list[str]:
+    def gap(line: str) -> bool:
+        return not line.strip() or len(line) - len(line.lstrip()) <= indentation
+
+    end = top
+    while end > 0 and top - end < MENU_GAP_LINES and gap(lines[end - 1]):
+        end -= 1
+    block = takewhile(str.strip, reversed(lines[:end]))
+    return [line for line in block if len(line) - len(line.lstrip()) > indentation]
 
 
 def command_ready(screen: Screen, prompt: str) -> bool:

@@ -81,6 +81,8 @@ class ClaudeAdapter:
         self.turn_id: TurnId | None = None
         self.chain: dict[str, TurnId] = {}
         self.pending_completion: TurnId | None = None
+        self.held: TurnId | None = None
+        self.held_agents: int | None = None
         self.described = False
         self.background: dict[TaskId, BackgroundOwner] = {}
         self.launches: dict[ToolUseId, TaskId] = {}
@@ -112,7 +114,7 @@ class ClaudeAdapter:
         if local_output is not None:
             events.extend(self._handle_local_output(record, local_output, native_id, parent_turn))
         elif notification is not None:
-            events.extend(self._handle_notification(notification, native_id, parent_turn))
+            events.extend(self._handle_notification(record, notification, native_id, parent_turn))
         elif self._human(record, message):
             events.extend(self._handle_human(record, message, native_id))
         elif message.get("role") in {"assistant", "user"}:
@@ -155,14 +157,29 @@ class ClaudeAdapter:
         ]
 
     def _handle_notification(
-        self, text: str, native_id: str | None, parent_turn: TurnId | None
+        self,
+        record: dict[str, JsonValue],
+        text: str,
+        native_id: str | None,
+        parent_turn: TurnId | None,
     ) -> list[NativeEvent]:
         owners = self._finish_background_tasks(text)
-        self.turn_id = parent_turn or next(iter(owners), None)
+        self.turn_id = parent_turn or next(
+            (owner.turn for owner in owners if owner.turn is not None), None
+        )
         self.pending_completion = None
         if native_id is not None and self.turn_id is not None:
             self.chain[native_id] = self.turn_id
-        return []
+        if record.get("queueTranscriptOnly") is not True or self.held is None:
+            return []
+        # Claude records this notification without answering it, so no turn_duration follows.
+        if self.held_agents is not None:
+            self.held_agents -= sum(owner.agent for owner in owners)
+        if (self.held_agents or 0) > 0 or any(owner.agent for owner in self.background.values()):
+            return []
+        held, self.held, self.held_agents = self.held, None, None
+        self.turn_id = held
+        return [self._event("completed", record, turn_id=held, data={"subtype": "notification"})]
 
     def _handle_human(
         self, record: dict[str, JsonValue], message: dict[str, JsonValue], native_id: str | None
@@ -172,6 +189,7 @@ class ClaudeAdapter:
         self.turn_id = TurnId(native_id)
         self.chain[native_id] = self.turn_id
         self.pending_completion = None
+        self.held = self.held_agents = None
         self.background.clear()
         self.launches.clear()
         command = command_line(message.get("content"))
@@ -225,12 +243,12 @@ class ClaudeAdapter:
             )
         return []
 
-    def _finish_background_tasks(self, text: str) -> list[TurnId]:
+    def _finish_background_tasks(self, text: str) -> list[BackgroundOwner]:
         owners = []
         for task in sorted(_notified_tasks(text, self.launches)):
             owner = self._forget(task)
-            if owner is not None and owner.turn is not None:
-                owners.append(owner.turn)
+            if owner is not None:
+                owners.append(owner)
         return owners
 
     def _forget(self, task: TaskId) -> BackgroundOwner | None:
@@ -334,9 +352,17 @@ class ClaudeAdapter:
     def _system(self, record: dict[str, JsonValue]) -> list[NativeEvent]:
         subtype = record.get("subtype")
         if subtype == "turn_duration" and self.pending_completion is not None:
-            if self._agents_pending(record.get("pendingBackgroundAgentCount")):
+            reported = record.get("pendingBackgroundAgentCount")
+            if self._agents_pending(reported):
+                self.held = self.pending_completion
+                self.held_agents = (
+                    reported
+                    if isinstance(reported, int) and not isinstance(reported, bool)
+                    else None
+                )
                 self.pending_completion = None
                 return []
+            self.held = self.held_agents = None
             return [
                 self._event(
                     "completed", record, turn_id=self.pending_completion, data={"subtype": subtype}

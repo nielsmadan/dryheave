@@ -292,6 +292,39 @@ def test_claude_command_menu_without_a_match_blocks_submission():
     assert not command_ready(screen, "/zzqq")
 
 
+def test_claude_command_menu_above_a_status_widget_and_blank_line_is_read():
+    lines = [
+        f"  \u276f {'/code-review':<48}Clean up comments and mechanical loose ends, then review",
+        f"    {'':<48}comprehensive and quick modes.",
+        f"    {'/plan':<48}Lightweight planning workflow.",
+        "\u25cf no phase yet" + " " * 90 + "[-]",
+        "",
+        RULE,
+        "\u276f /code-review",
+        RULE,
+        "  \U0001f969 \u2502 \U0001f916 sonnet5 low \u2502 \U0001f9e0 0%",
+        FOOTER,
+    ]
+    screen = Screen(text="\n".join(lines), exited=None, cursor={"x": 14, "y": 6})
+    assert command_menu(screen).highlighted == "/code-review"
+    assert submittable(AgentKind.CLAUDE, screen, "/code-review")
+
+
+def test_claude_reply_text_above_a_closed_composer_is_not_a_command_menu():
+    lines = [
+        "\u25cf Ran the review.",
+        "  /code-review found nothing to fix.",
+        "",
+        RULE,
+        "\u276f /code-review",
+        RULE,
+        FOOTER,
+    ]
+    screen = Screen(text="\n".join(lines), exited=None, cursor={"x": 14, "y": 4})
+    assert command_menu(screen) is None
+    assert not submittable(AgentKind.CLAUDE, screen, "/code-review")
+
+
 def test_claude_closed_command_menu_submits_only_a_command_with_arguments():
     typed = "/code-review --quick"
     screen = Screen(

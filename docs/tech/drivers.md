@@ -138,12 +138,22 @@ Claude does not wait for them; a dev server that never exits leaves the turn fre
 to complete. A new human turn clears every tracked task. Notification records are
 never human acceptance: they and the continuation they start stay in the turn they
 are parented on, so a held turn completes once Claude ends a turn with no agents
-pending, or reaches the driver timeout. A notification with no tracked parent and no
-tracked task belongs to no turn.
+pending, or reaches the driver timeout. Claude 2.1.300 hands a finished subagent's
+report back as an `isMeta` peer message (`origin.kind: "peer"`) that Claude answers
+inside the held turn, and then records the agent's `<task-notification>` with
+`queueTranscriptOnly: true`, which Claude never answers, so no further
+`turn_duration` arrives. Such a notification finishes its tasks and, once the agents
+the held turn's `pendingBackgroundAgentCount` reported and every tracked agent are
+finished, completes the held turn itself. A notification with no tracked parent and
+no tracked task belongs to no turn.
 
 Curated Claude slash commands are typed like other Claude input. Claude 2.1.296
 shows its command menu above the composer, highlighting one `❯ /name` entry, and
-closes it once arguments are typed. Enter is sent only when the highlighted entry is
+closes it once arguments are typed. Claude 2.1.300 can put up to three blank or
+unindented status lines (such as a plugin's `● no phase yet` widget) between the menu
+and the composer's top rule; across that gap only a highlighted entry whose name looks
+like a command (`/name` or `/plugin:name`) counts as the menu, so indented transcript
+paths are not mistaken for one. Enter is sent only when the highlighted entry is
 exactly the typed name, or when the menu is closed and the command has arguments; an
 unmatched or differently highlighted menu stops as `partial_input`. Escape is never
 sent. Claude records the command as a user record of `<command-message>`,

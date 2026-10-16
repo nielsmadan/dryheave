@@ -729,3 +729,63 @@ def test_a_compact_summary_is_never_human_input():
         if event.kind == "accepted"
     ]
     assert (accepted, adapter.chain["summary"]) == ([("human", "Hello")], "human")
+
+
+def hand_back(task, parent, *, uuid="handback"):
+    return {
+        "type": "user",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": "root",
+        "isMeta": True,
+        "message": {
+            "role": "user",
+            "content": f'Another Claude session sent a message:\n<agent-message from="{task}">\n'
+            "[Subagent hand-back] Review found nothing.\n</agent-message>",
+        },
+        "origin": {"kind": "peer", "from": task, "senderTaskId": task},
+    }
+
+
+def transcript_only(record):
+    return {**record, "queueTranscriptOnly": True, "queueSkipAttachments": True}
+
+
+def test_a_transcript_only_notification_completes_a_turn_held_for_its_agent():
+    adapter = fed(
+        ClaudeAdapter(),
+        [
+            human(),
+            *background_launch("Agent", "agent-1"),
+            *turn_end("launch-result", "Review running.", uuid="first", pending=1),
+        ],
+    )
+    answered = lifecycle(
+        adapter,
+        [
+            hand_back("agent-1", "first-duration"),
+            *turn_end("handback", "Review found nothing.", uuid="second", pending=1),
+        ],
+    )
+    assert answered == [("assistant", "human", "Review found nothing.")]
+    finished = lifecycle(adapter, [transcript_only(notification("agent-1", "second-duration"))])
+    assert finished == [("completed", "human", "")]
+
+
+def test_a_transcript_only_notification_keeps_holding_while_another_agent_runs():
+    adapter = fed(
+        ClaudeAdapter(),
+        [
+            human(),
+            *background_launch("Agent", "agent-1"),
+            *background_launch("Agent", "agent-2", parent="launch-result", uuid="again"),
+            *turn_end("again-result", "Reviews running.", uuid="first", pending=2),
+        ],
+    )
+    first = lifecycle(adapter, [transcript_only(notification("agent-1", "first-duration"))])
+    assert first == []
+    second = lifecycle(
+        adapter,
+        [transcript_only(notification("agent-2", "notified", uuid="notified-2"))],
+    )
+    assert second == [("completed", "human", "")]
