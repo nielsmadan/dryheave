@@ -630,6 +630,61 @@ def test_failed_inspection_sends_a_fix_request_then_passes(store, graded_benchma
 
 
 @pytest.mark.integration
+def test_a_simulator_that_keeps_stopping_on_findings_gets_a_corrected_retry_then_a_fallback(
+    store, graded_benchmark, tmp_path
+):
+    from dryheave.controller_models import ScriptStep, SimulatorDecision
+    from dryheave.experiment_models import FixtureTurn
+    from dryheave.runner_attempt import FALLBACK_FIX_REPLY, STOP_CORRECTION
+
+    draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path)
+    fixed = broken_then_fixed(draft, max_calls=5)
+    stop = ScriptStep(
+        match="contains",
+        assistant="Done.",
+        decision=SimulatorDecision(action="stop", reason="Looks done to me."),
+    )
+    script = fixed.simulator.script
+    stubborn = fixed.model_copy(
+        update={
+            "fixture": (
+                *fixed.fixture[:2],
+                FixtureTurn(
+                    prompt=FALLBACK_FIX_REPLY,
+                    assistant="Fixed.",
+                    files={"greet.py": FIXED_GREETING},
+                ),
+            ),
+            "simulator": fixed.simulator.model_copy(
+                update={"script": (*script[:2], stop, stop, script[3])}
+            ),
+        }
+    )
+    result = run_experiment(store, create_experiment(store, stubborn), options=workflow_options())
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "workflow_complete"
+    assert workflow_events(capture) == [
+        ("inspect", "failed"),
+        ("inspect", "fix_requested"),
+        ("inspect", "passed"),
+    ]
+    first, retried = [
+        call for call in capture.controller_calls if call.error == "stop_with_findings"
+    ]
+    blobs = store.read_blobs(result.pending_assessment[0])
+
+    def request(call):
+        return json.loads(blobs[f"evidence/controller/{call.call_id}/000001-request.json"])
+
+    assert "correction" not in request(first)
+    assert request(retried)["correction"] == STOP_CORRECTION
+    assert capture.dialogue[-2].text == FALLBACK_FIX_REPLY
+    journal = RunStore(store.root).inspect(result.run_id)
+    (fallback,) = [event for event in journal.events if event.event == "simulator-fallback"]
+    assert fallback.data["text"] == FALLBACK_FIX_REPLY
+
+
+@pytest.mark.integration
 def test_exhausted_simulator_budget_keeps_its_stop_reason_and_progress(
     store, graded_benchmark, tmp_path
 ):

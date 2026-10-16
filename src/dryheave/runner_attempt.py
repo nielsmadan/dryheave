@@ -98,11 +98,19 @@ from dryheave.workflow import dialog_source, next_workflow_action
 type SubmissionPolicy = Literal["conversation", "curated-native-command"]
 
 INSPECTION_ATTEMPTS = 2
+STOP_WITH_FINDINGS = "stop_with_findings"
+STOP_CORRECTION = (
+    "You answered stop, but the inspection still lists problems you found when trying the "
+    "result. Reply as this user describing what is still wrong and ask for it to be fixed."
+)
+FALLBACK_FIX_REPLY = (
+    "I tried it again and it's still not quite right. Can you test it yourself and fix what's off?"
+)
 WORKFLOW_STEP_EVENT = "workflow-step"
 INVALID_DIALOG_ANSWER = "invalid_dialog_answer"
 INVALID_SCREEN_ANSWER = "invalid_screen_answer"
 UNANSWERED_REJECTIONS = frozenset({INVALID_DIALOG_ANSWER, INVALID_SCREEN_ANSWER})
-RETRIED_REJECTIONS = frozenset({"stop_with_findings", "empty_reply", *UNANSWERED_REJECTIONS})
+RETRIED_REJECTIONS = frozenset({STOP_WITH_FINDINGS, "empty_reply", *UNANSWERED_REJECTIONS})
 SCREEN_ACTIONS = 8
 SCREEN_WAITS = 4
 SCREEN_STEPS = 32
@@ -895,6 +903,7 @@ class TrialExecution:
         retry: bool = True,
         inspection: tuple[InspectionFinding, ...] = (),
         dialog: DialogAsk | None = None,
+        correction: str | None = None,
     ) -> SimulatorDecision | None:
         made = tuple(call for call in self.state.calls if call.role == "simulator")
         spent = sum(call.elapsed_seconds or 0 for call in made)
@@ -909,6 +918,8 @@ class TrialExecution:
             recipe=self.recipe,
             inspection=inspection,
         )
+        if correction is not None:
+            request = request.model_copy(update={"correction": correction})
         if dialog is not None and dialog.screen is not None:
             request = screen_projection(
                 request, dialog.screen, dialog.answer_hint, self.recipe.budget.max_input_bytes
@@ -957,7 +968,22 @@ class TrialExecution:
                 else call.error in RETRIED_REJECTIONS
             )
             if retry and stopped and self._interruption() is None:
-                return self._simulate(inherited, retry=False, inspection=inspection, dialog=dialog)
+                return self._simulate(
+                    inherited,
+                    retry=False,
+                    inspection=inspection,
+                    dialog=dialog,
+                    correction=STOP_CORRECTION if call.error == STOP_WITH_FINDINGS else None,
+                )
+            if call.error == STOP_WITH_FINDINGS and self._interruption() is None:
+                fallback = SimulatorDecision(
+                    action="reply",
+                    text=FALLBACK_FIX_REPLY,
+                    reason="Fallback fix request: the simulated user stopped twice although "
+                    "the inspection found problems.",
+                )
+                self.journal.evidence(self.state, "simulator-fallback", fallback)
+                return fallback
             self.update(
                 stop_reason=self._interruption()
                 or ("needs_input" if call.error in UNANSWERED_REJECTIONS else "controller_error")
@@ -974,7 +1000,7 @@ class TrialExecution:
         if decision is None:
             return None
         if inspection and decision.action == "stop":
-            return "stop_with_findings"
+            return STOP_WITH_FINDINGS
         if dialog is not None and dialog.screen is not None:
             return None if screen_answer(decision) else INVALID_SCREEN_ANSWER
         if dialog is not None and dialog.prompt is not None:

@@ -221,7 +221,8 @@ FIX_IT = (
     "reply as this user describing what you observed when using the result, symptoms not "
     "code, and ask for it to be fixed. Name no file, type or symbol the assistant has not "
     "used, never mention criteria, rubrics, judges or tests, and do not quote the "
-    "inspection rationales. "
+    "inspection rationales. When correction is present it says why your previous answer "
+    "was rejected; follow it. "
 )
 DIALOG = (
     "The assistant is waiting on the selection dialog described in dialog. Answer it as this "
@@ -280,6 +281,7 @@ class SimulatorInput(StrictModel):
     dialog: DialogPrompt | None = None
     answer_hint: str | None = None
     screen: str | None = None
+    correction: str | None = None
     instruction: str = SIMULATOR_INSTRUCTION
 
     @model_serializer(mode="wrap")
@@ -287,7 +289,7 @@ class SimulatorInput(StrictModel):
         value: dict[str, object] = handler(self)
         if not self.inspection:
             value.pop("inspection", None)
-        for name in ("dialog", "answer_hint", "screen"):
+        for name in ("dialog", "answer_hint", "screen", "correction"):
             if getattr(self, name) is None:
                 value.pop(name, None)
         return value

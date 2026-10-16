@@ -258,7 +258,11 @@ as today. At a done point the runner asks `next_workflow_action` what to do:
   the step and asks the simulator for a fix-it reply: `SimulatorInput.inspection`
   carries the findings and the instruction replaces "stop when the work is done"
   with the user-voice fix-it rules. A `stop` returned with findings is recorded as a
-  failed call with error `stop_with_findings` and retried once.
+  failed call with error `stop_with_findings` and retried once with
+  `SimulatorInput.correction` saying why the stop was rejected. A second such stop
+  does not end the attempt: the runner sends a fixed, neutral fix-it reply
+  (`FALLBACK_FIX_REPLY`, which quotes nothing from the inspection) and records it as a
+  `simulator-fallback` journal event.
 - `complete`: stop with `stop_reason: "workflow_complete"`.
 
 A `declined` stop ends the run as `simulator_stop`. Native events are ingested before
