@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
@@ -10,13 +11,17 @@ from pydantic import JsonValue, ValidationError
 from dryheave.authoring_cli import register_authoring
 from dryheave.bench_cli import register_bench
 from dryheave.commands import ArgumentParser, CommandHandler, CommandRegistrar, CommandRegistry
+from dryheave.compaction import compact_run, prune_checks
 from dryheave.constants import VERSION
 from dryheave.errors import DryheaveError, InputError
+from dryheave.filesystem import atomic_write
 from dryheave.operator_cli import register_operators
 from dryheave.profile_cli import register_profiles
+from dryheave.report_export import write_report_html
+from dryheave.reports import report_run
 from dryheave.result_cli import register_results
 from dryheave.runner_cli import register_runner
-from dryheave.serialization import validation_message
+from dryheave.serialization import canonical_json, validation_message
 from dryheave.storage import ObjectStore, default_store_path
 from dryheave.viewer_cli import register_viewer
 from dryheave.workspace_cli import register_workspace
@@ -52,6 +57,37 @@ def _alias_delete(args: argparse.Namespace, store: ObjectStore) -> dict[str, Jso
     return {"deleted": args.name}
 
 
+def _compact(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
+    reports: list[str] = []
+    if args.report is not None:
+        report = report_run(store, args.run_id)
+        directory = args.report.absolute()
+        directory.mkdir(parents=True, exist_ok=True)
+        data = directory / f"{report.run_id}.json"
+        atomic_write(data, canonical_json(report), replace=True)
+        page = write_report_html(
+            store,
+            [(report, None)],
+            directory / f"{report.run_id}.html",
+            include_reasoning=True,
+            replace=True,
+        )
+        reports = [str(data), str(page)]
+    compaction = compact_run(store, args.run_id)
+    return {
+        "run_id": compaction.run_id,
+        "attempts": compaction.attempts,
+        "removed": list(compaction.removed),
+        "bytes_freed": compaction.bytes_freed,
+        "reports": list(reports),
+    }
+
+
+def _prune_checks(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
+    removed = prune_checks(store, time.time(), args.older_than_hours * 3600)
+    return {"removed": list(removed)}
+
+
 def register_store(registry: CommandRegistry) -> None:
     parser = registry.add("store", help_text="Inspect and verify stored artifacts and aliases.")
     commands = parser.add_subparsers(dest="store_command", required=True)
@@ -76,6 +112,23 @@ def register_store(registry: CommandRegistry) -> None:
     deleting = actions.add_parser("delete", help="Remove an alias, preserving its object.")
     deleting.add_argument("name")
     registry.handler(deleting, _alias_delete)
+    compact = commands.add_parser(
+        "compact",
+        help="Delete a finished run's working copies; results and evidence stay in the store.",
+    )
+    compact.add_argument("run_id")
+    compact.add_argument(
+        "--report",
+        type=Path,
+        metavar="DIR",
+        help="First write the run's JSON and HTML report (with judge reasoning) to DIR.",
+    )
+    registry.handler(compact, _compact)
+    prune = commands.add_parser(
+        "prune-checks", help="Delete failed launch-check evidence older than a cutoff."
+    )
+    prune.add_argument("--older-than-hours", type=float, default=1.0)
+    registry.handler(prune, _prune_checks)
 
 
 def build_parser(registrars: Sequence[CommandRegistrar] = ()) -> ArgumentParser:

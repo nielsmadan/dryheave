@@ -123,6 +123,16 @@ prefix uses `inspect`, whose optional `limit=` lowers the read ceiling below
 before parsing it; `report_run(..., journal_limit=...)` passes the same ceiling
 down.
 
+`compaction.compact_run` holds the run lock, requires every attempt to be finished
+and assessed with its capture (or quarantine) and assessment verifying, then deletes
+each attempt's `workspace`, `assessment`, `regrades` and `profile` directories and
+appends a `compacted` event listing them with the bytes freed. Nothing it deletes is
+read after assessment: reports and the viewer use the journal and stored objects,
+and a regrade rematerializes its grading workspace from the stored capture.
+`compaction.prune_checks` deletes `checks/<id>` directories (the evidence a failed
+`bench` launch check leaves) whose modification time is older than the cutoff, so a
+check still in progress is never touched.
+
 `RunStore.open` holds an exclusive stable run lock for its entire context and
 rejects a conflicting supplied experiment. All writes use the yielded journal.
 `ObjectStore.native_lock` additionally serializes native subject execution across

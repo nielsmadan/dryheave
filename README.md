@@ -220,6 +220,13 @@ to immutable IDs; moving one cannot change a frozen experiment. `store inspect`,
 changes; they are not signatures or access control. Stores and even curated
 exported inputs can contain sensitive task text and should be reviewed before sharing.
 
+Runs keep each attempt's working copies (the agent's workspace, its native profile and
+the grading workspaces) next to the journal, about 700 MB per attempt for an Xcode
+project. `store compact RUN_ID [--report DIR]` deletes them once every attempt is
+finished and assessed and its capture and assessment verify; results, captures and
+evidence stay in the store, so reports, the viewer and regrades keep working.
+`store prune-checks` deletes failed launch-check evidence older than an hour.
+
 Read the contracts for [authoring](docs/tech/authoring.md),
 [profiles](docs/tech/profiles.md), [runner](docs/tech/runner.md),
 [results and bundles](docs/tech/results.md), [drivers](docs/tech/drivers.md),
