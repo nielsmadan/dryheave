@@ -99,29 +99,88 @@ def test_capture_freezes_actual_layered_bytes_and_exec_mode(store, tmp_path: Pat
 
 
 @pytest.mark.parametrize(
-    "content",
+    ("content", "finding"),
     [
-        'api_key = "synthetic-secret-value"',
-        '[env]\nOPENAI_API_KEY="synthetic-secret-value"',
-        '[model_providers.custom.http_headers]\nAuthorization="synthetic-secret-value"',
-        'password = "synthetic-secret-value"',
-        'model="sk-proj-abcdefghijklmnop"',
+        ('api_key = "synthetic-secret-value"', "field api_key"),
+        ('[env]\nOPENAI_API_KEY="synthetic-secret-value"', "field env.OPENAI_API_KEY"),
+        (
+            '[model_providers.custom.http_headers]\nAuthorization="synthetic-secret-value"',
+            "field model_providers.custom.http_headers.Authorization",
+        ),
+        ('password = "synthetic-secret-value"', "field password"),
+        ('model="sk-proj-abcdefghijklmnop"', "material on line 1"),
     ],
 )
-def test_secret_config_rejected_before_any_publication(store, tmp_path: Path, content: str) -> None:
+def test_secret_config_rejected_before_any_publication(
+    store, tmp_path: Path, content: str, finding: str
+) -> None:
     source = tmp_path / "selected"
     source.mkdir()
     (source / "config.toml").write_text(content)
     with pytest.raises(InputError, match="credential") as error:
         capture(store, source, selection("config.toml", kind="config"))
-    assert (
-        str(error.value)
-        == "Recognized credential field in selected asset global/config/config.toml; use a runtime reference."
-        or str(error.value)
-        == "Recognized credential material in selected asset global/config/config.toml; use a runtime reference."
+    assert str(error.value) == (
+        f"Recognized credential {finding} in selected asset global/config/config.toml; "
+        "use a runtime reference."
     )
     assert list(store.root.rglob("manifest.json")) == []
     assert list(store.root.rglob("blobs")) == []
+
+
+@pytest.mark.parametrize(
+    ("content", "finding"),
+    [
+        (
+            '[model_providers.proxy]\nexperimental_bearer_token = "abcdef"',
+            "field model_providers.proxy.experimental_bearer_token",
+        ),
+        (
+            '[mcp_servers.x.http_headers]\nX-Api-Token = "abc"',
+            "field mcp_servers.x.http_headers.X-Api-Token",
+        ),
+        ('[mcp_servers.hf.env]\nHF_TOKEN = "hf_abc"', "field mcp_servers.hf.env.HF_TOKEN"),
+        (
+            '[mcp_servers.x]\nurl = "https://user:s3cret@host.invalid/mcp"',
+            "URL password in field mcp_servers.x.url",
+        ),
+    ],
+)
+def test_codex_config_tokens_are_refused_at_capture_but_not_at_load(
+    store, tmp_path: Path, monkeypatch, content: str, finding: str
+) -> None:
+    import dryheave.profiles as module
+
+    source = tmp_path / "selected"
+    source.mkdir()
+    (source / "config.toml").write_text(content)
+    asset = selection("config.toml", kind="config")
+    with pytest.raises(InputError) as error:
+        capture(store, source, asset)
+    assert str(error.value) == (
+        f"Recognized credential {finding} in selected asset global/config/config.toml; "
+        "use a runtime reference."
+    )
+    with monkeypatch.context() as earlier:
+        earlier.setattr(module, "_reject_codex_config_secrets", lambda profile, files: None)
+        identifier = capture(store, source, asset)
+    assert store.read_blob(identifier, "global/config/config.toml") == content.encode()
+    assert load_profile(store, identifier).assets[0].target == "config.toml"
+
+
+def test_derive_refuses_added_codex_config_tokens(store, tmp_path: Path) -> None:
+    source = tmp_path / "selected"
+    source.mkdir()
+    (source / "config.toml").write_text('model="before"')
+    asset = selection("config.toml", kind="config")
+    first = capture(store, source, asset)
+    (source / "config.toml").write_text('[mcp_servers.gh]\nbearer_token = "abcdef"')
+    additions = CaptureSpec(
+        recipe=recipe(), include_roots={"selected": str(source)}, assets=(asset,)
+    )
+    with pytest.raises(InputError, match=r"field mcp_servers\.gh\.bearer_token in selected asset"):
+        derive_profile(
+            store, first, DeriveSpec(additions=additions, replace=("global/config/config.toml",))
+        )
 
 
 @pytest.mark.parametrize(

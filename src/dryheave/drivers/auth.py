@@ -5,9 +5,10 @@ from pathlib import Path
 from types import TracebackType
 from typing import Protocol, Self
 
+from dryheave.codex_policy import CODEX_HOME_DIRECTORY, CODEX_HOME_VARIABLE
 from dryheave.errors import InputError
-from dryheave.filesystem import directory_fd
-from dryheave.profile_models import RuntimeFileReference
+from dryheave.filesystem import configured_directory, directory_fd, expand_home
+from dryheave.profile_models import RuntimeFileReference, codex_auth_reference
 
 
 class BindingPlan(Protocol):
@@ -16,6 +17,44 @@ class BindingPlan(Protocol):
 
     @property
     def runtime_files(self) -> tuple[RuntimeFileReference, ...]: ...
+
+
+def _codex_home_source(variable: str, environment: Mapping[str, str]) -> Path:
+    configured = environment.get(variable)
+    home = Path(value) if (value := environment.get("HOME")) else None
+    if configured:
+        if not configured.startswith("~") and not Path(configured).is_absolute():
+            raise InputError(
+                f"{variable} must be an absolute path or start with ~/, not {configured}."
+            )
+        return expand_home(configured, home)
+    return (
+        configured_directory(environment, CODEX_HOME_VARIABLE, home, CODEX_HOME_DIRECTORY)
+        / "auth.json"
+    )
+
+
+def runtime_file_source(reference: RuntimeFileReference, environment: Mapping[str, str]) -> str:
+    variable = reference.source_path_environment.name
+    if reference.default_source == "codex-home":
+        path = _codex_home_source(variable, environment)
+        if not path.exists():
+            raise InputError(
+                f"Codex auth file {path} does not exist; log in with Codex or set "
+                f"{variable} to the auth.json path Codex variants should use."
+            )
+        return str(path)
+    source = environment.get(variable)
+    if source is None:
+        raise InputError(
+            f"Runtime file reference is unavailable: {reference.name}; "
+            f"set {variable} to its absolute path."
+        )
+    return source
+
+
+def check_codex_auth(environment: Mapping[str, str]) -> None:
+    runtime_file_source(codex_auth_reference(), environment)
 
 
 class RuntimeBindings:
@@ -27,9 +66,7 @@ class RuntimeBindings:
     def __enter__(self) -> Self:
         try:
             for reference in self.plan.runtime_files:
-                source = self.inherited.get(reference.source_path_environment.name)
-                if source is None:
-                    raise InputError(f"Runtime file reference is unavailable: {reference.name}")
+                source = runtime_file_source(reference, self.inherited)
                 if not Path(source).is_absolute() or "\x00" in source:
                     raise InputError(
                         f"Runtime file reference needs an absolute path: {reference.name}"

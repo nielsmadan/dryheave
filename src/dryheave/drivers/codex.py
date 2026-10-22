@@ -10,11 +10,24 @@ class CodexAdapter:
         self.session_id: str | None = None
         self.parent_session_id: str | None = None
         self.turn_id: str | None = None
+        self.records = 0
+        self.copied_until = 0
+
+    def skips_next(self) -> bool:
+        # A forked subagent rollout repeats the parent's history before its own records.
+        return 0 < self.records < self.copied_until
+
+    def skip(self) -> None:
+        self.records += 1
 
     def feed(self, record: dict[str, JsonValue]) -> tuple[NativeEvent, ...]:
+        index, self.records = self.records, self.records + 1
         payload = mapping(record.get("payload"))
         source = record.get("type")
         if source == "session_meta":
+            ordinal = payload.get("subagent_history_start_ordinal")
+            if index == 0 and isinstance(ordinal, int):
+                self.copied_until = ordinal
             incoming = string(payload.get("id")) or string(payload.get("session_id"))
             if self.session_id is not None and incoming != self.session_id:
                 raise InputError("Native log changed its session identity.")

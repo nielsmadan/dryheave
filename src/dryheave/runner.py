@@ -5,28 +5,40 @@ import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import NamedTuple
 
-from dryheave.cases import InspectStep, PromptStep, effective_workflow, load_frozen_case
+from dryheave.cases import (
+    InspectStep,
+    WorkflowStep,
+    effective_workflow,
+    load_frozen_case,
+)
 from dryheave.constants import MAX_RUNTIME_PATH_BYTES
 from dryheave.errors import DryheaveError, InputError
 from dryheave.experiment_models import FrozenExperiment, ScoringConfig, inspection_recipe
 from dryheave.experiments import inspect_experiment, load_experiment, load_role
+from dryheave.host import HostContext
 from dryheave.journals import RunStore
 from dryheave.live_config import (
-    LIVE_CONFIG_DIRECTORY,
+    codex_skills,
+    journaled_manifests,
     live_source,
     load_snapshot_manifest,
     require_servers,
+    snapshot_directory,
     snapshot_live_config,
+    verify_snapshot,
 )
 from dryheave.models import AgentKind, ObjectKind, TrialStage
 from dryheave.native_recovery import reconcile_store_ownership
+from dryheave.profile_models import LiveConfigManifest, NativeRecipe
 from dryheave.profiles import load_profile
 from dryheave.runner_attempt import TrialExecution
 from dryheave.runner_models import CapturedAttempt, RunOptions, RunSummary
 from dryheave.runner_recovery import recover_attempt
 from dryheave.runner_state import ExecutionJournal
 from dryheave.storage import ObjectStore
+from dryheave.workflow import require_workflow_skills, slash_steps
 
 
 def load_capture(store: ObjectStore, reference: str) -> CapturedAttempt:
@@ -118,34 +130,79 @@ def _options(options: RunOptions) -> RunOptions:
     return options
 
 
-def require_workflow_support(
-    store: ObjectStore, experiment: FrozenExperiment, options: RunOptions
-) -> None:
-    if not options.workflow:
-        return
-    inspector = inspection_recipe(
-        load_role(store, experiment.scoring_id, ScoringConfig, ObjectKind.SCORING)
+class SlashTrial(NamedTuple):
+    variant: str
+    recipe: NativeRecipe
+    skill_names: tuple[str, ...]
+
+
+class WorkflowPlan(NamedTuple):
+    inspected: bool
+    workflows: dict[str, tuple[WorkflowStep, ...]]
+    slash_trials: tuple[SlashTrial, ...]
+
+
+def workflow_plan(store: ObjectStore, experiment: FrozenExperiment) -> WorkflowPlan:
+    inspected = (
+        inspection_recipe(
+            load_role(store, experiment.scoring_id, ScoringConfig, ObjectKind.SCORING)
+        )
+        is not None
     )
     workflows = {
         case_id: effective_workflow(
-            load_frozen_case(store, case_id), enabled=True, inspected=inspector is not None
+            load_frozen_case(store, case_id), enabled=True, inspected=inspected
         )
         for case_id in {trial.case_id for trial in experiment.trials}
     }
-    if inspector is None and any(
-        isinstance(step, InspectStep) for steps in workflows.values() for step in steps
+    skill_names = {
+        case_id: tuple(step.skill_name for step in slash_steps(steps) if step.skill_name)
+        for case_id, steps in workflows.items()
+    }
+    trials = [trial for trial in experiment.trials if skill_names[trial.case_id]]
+    recipes = {
+        profile: load_profile(store, profile).recipe
+        for profile in {trial.profile_id for trial in trials}
+    }
+    return WorkflowPlan(
+        inspected,
+        workflows,
+        tuple(
+            SlashTrial(trial.variant, recipes[trial.profile_id], skill_names[trial.case_id])
+            for trial in trials
+        ),
+    )
+
+
+def require_workflow_support(plan: WorkflowPlan) -> None:
+    if not plan.inspected and any(
+        isinstance(step, InspectStep) for steps in plan.workflows.values() for step in steps
     ):
         raise InputError(
             "Workflow inspect steps need an inspector or judge with max_calls above zero."
         )
-    slashed = {
-        case_id
-        for case_id, steps in workflows.items()
-        if any(isinstance(step, PromptStep) and step.slash for step in steps)
-    }
-    profiles = {trial.profile_id for trial in experiment.trials if trial.case_id in slashed}
-    if any(load_profile(store, profile).recipe.agent != AgentKind.CLAUDE for profile in profiles):
-        raise InputError("Slash-command workflow prompts are only delivered to Claude.")
+    if not all(
+        trial.recipe.agent == AgentKind.CLAUDE or trial.recipe.live_codex
+        for trial in plan.slash_trials
+    ):
+        raise InputError(
+            "Slash-command workflow prompts are only delivered to Claude and to Codex "
+            "on its live config."
+        )
+
+
+def codex_workflow_skills(plan: WorkflowPlan) -> dict[str, tuple[str, ...]]:
+    skills: dict[str, tuple[str, ...]] = {}
+    for trial in plan.slash_trials:
+        if trial.recipe.agent == AgentKind.CODEX:
+            skills[trial.variant] = tuple(
+                dict.fromkeys((*skills.get(trial.variant, ()), *trial.skill_names))
+            )
+    return skills
+
+
+def require_snapshot_skills(plan: WorkflowPlan, manifest: LiveConfigManifest) -> None:
+    require_workflow_skills("Codex", codex_workflow_skills(plan), manifest.skills)
 
 
 @contextmanager
@@ -167,7 +224,7 @@ def cancellation_signals(cancelled: threading.Event) -> Iterator[None]:
             signal.signal(kind, handler)
 
 
-def run_experiment(
+def run_experiment(  # noqa: PLR0913
     store: ObjectStore,
     reference: str | None = None,
     *,
@@ -175,6 +232,7 @@ def run_experiment(
     retry: tuple[str, ...] = (),
     options: RunOptions | None = None,
     cancelled: threading.Event | None = None,
+    host: HostContext,
 ) -> RunSummary:
     identifier = store.resolve(reference) if reference is not None else None
     if resume is None:
@@ -186,7 +244,9 @@ def run_experiment(
             raise InputError("Offline fixture mode requires a frozen subject fixture.")
         if retry:
             raise InputError("Explicit retry requires --resume RUN_ID.")
-        require_workflow_support(store, experiment, selected)
+        _require_workflow_inputs(
+            selected_workflow_plan(store, experiment, enabled=selected.workflow), host
+        )
         resume = RunStore(store.root).create(identifier)
         print(f"dryheave run reserved: {resume}", file=sys.stderr, flush=True)
     cancelled = cancelled or threading.Event()
@@ -215,46 +275,92 @@ def run_experiment(
                             )
                         )
                 raise
-            _prepare_live_config(store, execution, experiment, os.environ)
-            _run_trials(store, execution, experiment, retry, cancelled, os.environ)
+            manifests = _prepare_live_config(store, execution, experiment, host)
+            if AgentKind.CODEX in manifests and execution.options is not None:
+                require_snapshot_skills(
+                    selected_workflow_plan(store, experiment, enabled=execution.options.workflow),
+                    manifests[AgentKind.CODEX],
+                )
+            _run_trials(
+                store,
+                execution,
+                experiment,
+                retry,
+                cancelled,
+                host.environment,
+                manifests=manifests,
+            )
         result = _summary(execution, experiment)
         journal.write_result(result.model_dump(mode="json"))
         return result
+
+
+def selected_workflow_plan(
+    store: ObjectStore, experiment: FrozenExperiment, *, enabled: bool
+) -> WorkflowPlan:
+    return workflow_plan(store, experiment) if enabled else WorkflowPlan(False, {}, ())
+
+
+def _require_workflow_inputs(plan: WorkflowPlan, host: HostContext) -> None:
+    require_workflow_support(plan)
+    skills = codex_workflow_skills(plan)
+    if skills:
+        require_workflow_skills(
+            "Codex",
+            skills,
+            codex_skills(live_source(AgentKind.CODEX, host.environment, host.home).root),
+        )
 
 
 def _prepare_live_config(
     store: ObjectStore,
     execution: ExecutionJournal,
     experiment: FrozenExperiment,
-    environment: Mapping[str, str],
-) -> None:
+    host: HostContext,
+) -> dict[AgentKind, LiveConfigManifest]:
     profiles = [
         load_profile(store, identifier)
         for identifier in sorted({trial.profile_id for trial in experiment.trials})
     ]
     live = [profile for profile in profiles if profile.recipe.config_source == "live"]
-    if not live:
-        return
-    snapshot = execution.journal.path / LIVE_CONFIG_DIRECTORY
-    if snapshot.exists():
-        manifest = load_snapshot_manifest(snapshot)
-    else:
-        source, state = live_source(environment, Path.home())
-        manifest = snapshot_live_config(source, state, snapshot)
-        execution.journal.append("live-config", manifest.model_dump(mode="json"))
-    require_servers(
-        manifest.mcp_servers,
-        (name for profile in live for name in profile.recipe.removed_mcp_servers),
-    )
+    recorded = journaled_manifests(execution.journal.events)
+    manifests: dict[AgentKind, LiveConfigManifest] = {}
+    for agent in sorted({profile.recipe.agent for profile in live}):
+        snapshot = execution.journal.path / snapshot_directory(agent)
+        manifest = recorded.get(agent)
+        if manifest is None:
+            if snapshot.exists():
+                manifest = load_snapshot_manifest(snapshot)
+                verify_snapshot(snapshot, manifest)
+            else:
+                manifest = snapshot_live_config(
+                    live_source(agent, host.environment, host.home), snapshot
+                )
+            execution.journal.append("live-config", manifest.model_dump(mode="json"))
+        else:
+            verify_snapshot(snapshot, manifest)
+        manifests[agent] = manifest
+        require_servers(
+            manifest.mcp_servers,
+            (
+                name
+                for profile in live
+                if profile.recipe.agent == agent
+                for name in profile.recipe.removed_mcp_servers
+            ),
+        )
+    return manifests
 
 
-def _run_trials(
+def _run_trials(  # noqa: PLR0913
     store: ObjectStore,
     execution: ExecutionJournal,
     experiment: FrozenExperiment,
     retry: tuple[str, ...],
     cancelled: threading.Event,
     inherited: Mapping[str, str],
+    *,
+    manifests: Mapping[AgentKind, LiveConfigManifest],
 ) -> None:
     trials = {trial.trial_id: trial for trial in experiment.trials}
     attempted = {state.trial_id for state in execution.attempts.values()}
@@ -286,7 +392,7 @@ def _run_trials(
             continue
         state = execution.reserve(trial.trial_id)
         runner = TrialExecution(store, execution, experiment, trial, state, cancelled)
-        runner.execute(inherited)
+        runner.execute(inherited, manifests)
         if (
             runner.state.capture_error
             or not runner.cleanup.terminal_closed

@@ -1,9 +1,10 @@
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
 from dryheave.errors import InputError, IntegrityError
-from dryheave.models import ObjectKind
+from dryheave.models import AgentKind, ObjectKind
 from dryheave.profile_capture import SelectedReader, validate_target
 from dryheave.profile_models import (
     CaptureSpec,
@@ -15,6 +16,7 @@ from dryheave.profile_models import (
 )
 from dryheave.profile_security import (
     inspect_config,
+    reject_codex_config_secrets,
     reject_secret_bytes,
     reject_secret_fields,
     validate_arguments,
@@ -102,9 +104,11 @@ def profile_issues(profile: FrozenProfile, files: dict[str, bytes]) -> tuple[Pro
             profile.recipe.agent, asset.selection.model_copy(update={"target": asset.target})
         )
         content = files[asset.blob]
-        reject_secret_bytes(content, location=f"selected asset {asset.blob}")
-        if asset.selection.kind == "config":
-            config = inspect_config(content, asset.target)
+        location = f"selected asset {asset.blob}"
+        if asset.selection.kind != "config":
+            reject_secret_bytes(content, location=location)
+        else:
+            config = inspect_config(content, asset.target, location=location)
             if profile.recipe.claude_discovery is not None:
                 _validate_claude_settings(profile.recipe, config)
             issues.extend(_config_issues(config, asset.blob))
@@ -166,6 +170,16 @@ def _config_issues(config: dict[str, object], blob: str) -> list[ProfileIssue]:
     return issues
 
 
+def _reject_codex_config_secrets(profile: FrozenProfile, files: Mapping[str, bytes]) -> None:
+    if profile.recipe.agent != AgentKind.CODEX:
+        return
+    for asset in profile.assets:
+        if asset.selection.kind == "config" and asset.blob in files:
+            location = f"selected asset {asset.blob}"
+            config = inspect_config(files[asset.blob], asset.target, location=location)
+            reject_codex_config_secrets(config, location=location)
+
+
 def capture_profile(store: ObjectStore, spec: CaptureSpec, *, base: Path | None = None) -> str:
     _recipe_issues(spec.recipe)
     reader = SelectedReader(spec, base or Path.cwd())
@@ -176,6 +190,7 @@ def capture_profile(store: ObjectStore, spec: CaptureSpec, *, base: Path | None 
     ):
         raise InputError("Selected plugins require the selected-plugins discovery policy.")
     profile = profile.model_copy(update={"issues": profile_issues(profile, files)})
+    _reject_codex_config_secrets(profile, files)
     return store.put(ObjectKind.PROFILE, profile, files=files)
 
 
@@ -237,6 +252,7 @@ def derive_profile(
     recipe = parse_model(json.dumps(recipe_data).encode(), NativeRecipe)
     assets = {item.blob: item for item in parent.assets}
     files = store.read_blobs(parent_id)
+    added_files: dict[str, bytes] = {}
     if len(set(spec.remove)) != len(spec.remove) or set(spec.remove) & set(spec.replace):
         raise InputError("Removal and replacement selections must be distinct.")
     for name in spec.remove:
@@ -247,12 +263,12 @@ def derive_profile(
     if spec.additions:
         if spec.additions.recipe != recipe:
             raise InputError("Addition capture recipe must equal the derived recipe.")
-        added, contents = SelectedReader(spec.additions, base or Path.cwd()).capture()
+        added, added_files = SelectedReader(spec.additions, base or Path.cwd()).capture()
         collisions = {item.blob for item in added} & assets.keys()
         if collisions != set(spec.replace):
             raise InputError("Replacement list must exactly name colliding additions.")
         assets.update({item.blob: item for item in added})
-        files.update(contents)
+        files.update(added_files)
     elif spec.replace:
         raise InputError("Replacement selections require captured additions.")
     profile = FrozenProfile(
@@ -270,6 +286,7 @@ def derive_profile(
     ):
         raise InputError("Derived profile exceeds the parent's capture bounds.")
     profile = profile.model_copy(update={"issues": profile_issues(profile, files)})
+    _reject_codex_config_secrets(profile, added_files)
     if canonical_json(profile.model_copy(update={"parent_id": parent.parent_id})) == canonical_json(
         parent
     ):

@@ -121,6 +121,13 @@ class NativeLogSource:
         events = []
         for line in lines:
             line_number += 1
+            if (
+                not current.old
+                and isinstance(current.adapter, CodexAdapter)
+                and current.adapter.skips_next()
+            ):
+                current.adapter.skip()
+                continue
             self.records_read += 1
             if self.records_read > self.limits.max_events:
                 raise LimitError("Native logs exceeded their record limit.")

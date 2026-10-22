@@ -9,14 +9,15 @@ from pathlib import Path
 from threading import Event
 from uuid import uuid4
 
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
-from dryheave.cases import FrozenCase, InspectStep, PromptStep, effective_workflow, load_frozen_case
+from dryheave.cases import FrozenCase, InspectStep, effective_workflow, load_frozen_case
+from dryheave.codex_policy import CODEX_SANDBOX_ARGUMENTS
 from dryheave.controller_models import ClaudeControllerRuntime, ControllerRecipe, RoleBudget
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.auth import RuntimeBindings
 from dryheave.drivers.base import TransportError
-from dryheave.drivers.dialogs import composer, submittable
+from dryheave.drivers.dialogs import composer, delivered_prompt, submittable
 from dryheave.drivers.log_source import NativeLogSource, native_log_root
 from dryheave.drivers.models import DriverLimits, Observation, Screen
 from dryheave.drivers.session import DriverSession, normalize_input
@@ -28,20 +29,45 @@ from dryheave.experiment_models import (
     VariantSpec,
     inspection_recipe,
 )
+from dryheave.experiments import load_experiment
 from dryheave.journals import RunStore
-from dryheave.live_config import live_source, require_servers, snapshot_live_config
-from dryheave.models import AgentKind, CommandSpec, EnvironmentReference, TrialStage
+from dryheave.live_config import (
+    journaled_manifests,
+    live_source,
+    require_servers,
+    snapshot_directory,
+    snapshot_live_config,
+)
+from dryheave.models import AgentKind, CommandSpec, EnvironmentReference, JournalEvent, TrialStage
 from dryheave.pricing import builtin_price_table
-from dryheave.profile_launch import LaunchOptions, launch_environment, materialize_profile
-from dryheave.profile_models import CaptureSpec, LiveConfigManifest, NativeRecipe
+from dryheave.profile_launch import (
+    LaunchOptions,
+    LiveSnapshots,
+    launch_environment,
+    materialize_profile,
+)
+from dryheave.profile_models import (
+    CaptureSpec,
+    LiveConfigManifest,
+    NativeRecipe,
+    codex_auth_reference,
+)
 from dryheave.profiles import capture_profile
 from dryheave.report_models import AttemptReport, GroupMetrics, RunReport
-from dryheave.runner import run_status
+from dryheave.runner import (
+    WorkflowPlan,
+    require_snapshot_skills,
+    run_status,
+    selected_workflow_plan,
+)
 from dryheave.runner_state import ExecutionJournal
 from dryheave.skills import SKILL_NAMES
 from dryheave.storage import ObjectStore
+from dryheave.workflow import slash_steps
 
-AUTH_REFERENCE = "CLAUDE_CODE_OAUTH_TOKEN"
+CLAUDE_AUTH_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
+VARIANT_AGENTS = {"claude": AgentKind.CLAUDE, "codex": AgentKind.CODEX}
+AGENT_PREFIX = re.compile(r"[A-Za-z]+")
 PROBE = "dryheave launch check"
 LAUNCH_CHECK_SECONDS = 180.0
 ROLE = re.compile(r"^([^@,\s]+)(?:@([a-z]+))?$")
@@ -61,6 +87,7 @@ class RoleChoice:
 @dataclass(frozen=True)
 class VariantChoice:
     name: str
+    agent: AgentKind
     role: RoleChoice
     removed_mcp_servers: tuple[str, ...]
 
@@ -75,29 +102,51 @@ def parse_role(text: str) -> RoleChoice:
 def parse_variant(text: str) -> VariantChoice:
     match = VARIANT.fullmatch(text.strip())
     if match is None:
-        raise InputError(f"Expected NAME=MODEL[@EFFORT][,-mcp:SERVER...], got {text!r}.")
+        raise InputError(f"Expected NAME=[AGENT:]MODEL[@EFFORT][,-mcp:SERVER...], got {text!r}.")
+    name = match[1]
+    prefix, sep, rest = match[2].partition(":")
+    if sep and prefix in VARIANT_AGENTS:
+        agent, model = VARIANT_AGENTS[prefix], rest
+    elif sep and AGENT_PREFIX.fullmatch(prefix):
+        raise InputError(
+            f"Variant {name}: unknown agent {prefix!r}; AGENT is {' or '.join(VARIANT_AGENTS)}."
+        )
+    else:
+        agent, model = AgentKind.CLAUDE, match[2]
     removed = []
     for change in filter(None, match[3].split(",")):
         kind, _, value = change.partition(":")
         if kind != "-mcp" or not value:
             raise InputError(f"Unsupported variant change {change!r}; supported: -mcp:SERVER.")
         removed.append(value)
-    return VariantChoice(
-        name=match[1], role=parse_role(match[2]), removed_mcp_servers=tuple(removed)
+    choice = VariantChoice(
+        name=name, agent=agent, role=parse_role(model), removed_mcp_servers=tuple(removed)
     )
+    try:
+        variant_recipe(choice, agent.value)
+    except ValidationError as error:
+        raise InputError(f"Variant {name}: {_recipe_refusal(error)}.") from error
+    return choice
+
+
+def _recipe_refusal(error: ValidationError) -> str:
+    return "; ".join(str(item.get("ctx", {}).get("error", item["msg"])) for item in error.errors())
 
 
 def variant_recipe(choice: VariantChoice, executable: str) -> NativeRecipe:
+    codex = choice.agent == AgentKind.CODEX
     return NativeRecipe(
-        agent=AgentKind.CLAUDE,
+        agent=choice.agent,
         executable=executable,
         model=choice.role.model,
         effort=choice.role.effort,
         config_source="live",
         workspace_trust="trusted",
-        removed_mcp_servers=choice.removed_mcp_servers,
         disabled_skill_names=SKILL_NAMES,
-        environment=(EnvironmentReference(name=AUTH_REFERENCE),),
+        removed_mcp_servers=choice.removed_mcp_servers,
+        arguments=CODEX_SANDBOX_ARGUMENTS if codex else (),
+        runtime_files=(codex_auth_reference(),) if codex else (),
+        environment=() if codex else (EnvironmentReference(name=CLAUDE_AUTH_VARIABLE),),
     )
 
 
@@ -126,7 +175,7 @@ def claude_role(
             "command": CommandSpec(
                 argv=(executable,),
                 timeout_seconds=budget.call_seconds,
-                environment=(EnvironmentReference(name=AUTH_REFERENCE),),
+                environment=(EnvironmentReference(name=CLAUDE_AUTH_VARIABLE),),
             ),
             "runtime": ClaudeControllerRuntime(),
             "budget": budget,
@@ -170,14 +219,16 @@ def check_workflow(case: FrozenCase, *, workflow: bool, scoring: ScoringConfig) 
 
 
 def capture_variants(
-    store: ObjectStore, variants: tuple[VariantChoice, ...], executable: str
+    store: ObjectStore,
+    variants: tuple[VariantChoice, ...],
+    executables: Mapping[AgentKind, str],
 ) -> dict[str, str]:
     names = [variant.name for variant in variants]
     if len(set(names)) != len(names):
         raise InputError("Variant names must be unique.")
     return {
         variant.name: capture_profile(
-            store, CaptureSpec(recipe=variant_recipe(variant, executable))
+            store, CaptureSpec(recipe=variant_recipe(variant, executables[variant.agent]))
         )
         for variant in variants
     }
@@ -192,24 +243,53 @@ def check_case(store: ObjectStore, reference: str, *, judged: bool) -> str:
     return case_id
 
 
-def slash_prompts(store: ObjectStore, case_id: str) -> tuple[str, ...]:
-    return tuple(
-        step.prompt
-        for step in load_frozen_case(store, case_id).workflow
-        if isinstance(step, PromptStep) and step.slash
+def bench_workflow(store: ObjectStore, experiment_id: str, *, workflow: bool) -> WorkflowPlan:
+    return selected_workflow_plan(store, load_experiment(store, experiment_id), enabled=workflow)
+
+
+def slash_commands(plan: WorkflowPlan) -> tuple[str, ...]:
+    return tuple(step.prompt for steps in plan.workflows.values() for step in slash_steps(steps))
+
+
+def snapshot_for_check(
+    agent: AgentKind, root: Path, *, environment: Mapping[str, str], home: Path
+) -> LiveConfigManifest:
+    return snapshot_live_config(
+        live_source(agent, environment, home), root / snapshot_directory(agent)
     )
 
 
-def check_removals(manifest: LiveConfigManifest, variants: tuple[VariantChoice, ...]) -> None:
-    require_servers(
-        manifest.mcp_servers,
-        (name for variant in variants for name in variant.removed_mcp_servers),
-    )
+def check_snapshots(
+    root: Path,
+    variants: tuple[VariantChoice, ...],
+    plan: WorkflowPlan,
+    *,
+    environment: Mapping[str, str],
+    home: Path,
+) -> dict[AgentKind, LiveConfigManifest]:
+    try:
+        manifests = {
+            agent: snapshot_for_check(agent, root, environment=environment, home=home)
+            for agent in sorted({variant.agent for variant in variants})
+        }
+        if AgentKind.CLAUDE in manifests:
+            require_servers(
+                manifests[AgentKind.CLAUDE].mcp_servers,
+                (name for variant in variants for name in variant.removed_mcp_servers),
+            )
+        if AgentKind.CODEX in manifests:
+            require_snapshot_skills(plan, manifests[AgentKind.CODEX])
+    except BaseException:
+        discard_check(root)
+        raise
+    return manifests
 
 
-def snapshot_for_check(root: Path, environment: Mapping[str, str]) -> LiveConfigManifest:
-    source, state = live_source(environment, Path.home())
-    return snapshot_live_config(source, state, root / "live-config")
+def summary_live_config(events: Sequence[JournalEvent]) -> dict[str, JsonValue]:
+    return {
+        agent.value: manifest.model_dump(mode="json", exclude={"agent"})
+        for agent, manifest in sorted(journaled_manifests(events).items())
+    }
 
 
 def launch_check(  # noqa: PLR0913
@@ -219,6 +299,7 @@ def launch_check(  # noqa: PLR0913
     *,
     paths: tuple[Path, Path],
     environment: Mapping[str, str],
+    manifests: Mapping[AgentKind, LiveConfigManifest],
     workflow: bool,
     commands: tuple[str, ...] = (),
 ) -> Observation:
@@ -230,7 +311,7 @@ def launch_check(  # noqa: PLR0913
         profile_id,
         workspace.parent / "profile",
         workspace,
-        LaunchOptions(probe_version=True, live_config=root / "live-config"),
+        LaunchOptions(probe_version=True, live=LiveSnapshots(root, manifests)),
     )
     if not plan.launchable:
         raise InputError(
@@ -252,8 +333,9 @@ def launch_check(  # noqa: PLR0913
         observation = session.start(plan, launch_environment(plan, environment))
         if observation.state != "ready":
             return observation
+        delivered = tuple(delivered_prompt(plan.agent, command) for command in commands)
         try:
-            return _probe(terminal, plan.agent, observation, commands if workflow else ())
+            return _probe(terminal, plan.agent, observation, delivered if workflow else ())
         except TransportError as error:
             return Observation(
                 state="unsupported",
@@ -266,6 +348,11 @@ def _probe(
     terminal: TuiTestTerminal, agent: AgentKind, ready: Observation, commands: tuple[str, ...]
 ) -> Observation:
     typed = (PROBE, *dict.fromkeys(text for command in commands for text in _typings(command)))
+    hint = (
+        "check that Claude's command menu offers it."
+        if agent == AgentKind.CLAUDE
+        else "check that the input box shows it unchanged."
+    )
     for text in typed:
         terminal.paste(text)
         if not _settles(terminal, partial(submittable, agent, text=text)):
@@ -273,8 +360,7 @@ def _probe(
                 terminal,
                 "Typed text did not appear in the input box as typed."
                 if text == PROBE
-                else f"Workflow command {text!r} was not ready to submit as typed; "
-                "check that Claude's command menu offers it.",
+                else f"Workflow command {text!r} was not ready to submit as typed; {hint}",
             )
         if not _clears(terminal, agent):
             return _unsupported(terminal, "The input box could not be cleared after typing.")

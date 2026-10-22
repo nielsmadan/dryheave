@@ -1,4 +1,5 @@
 import argparse
+import os
 from pathlib import Path
 from threading import Event
 
@@ -14,6 +15,7 @@ from dryheave.experiments import (
     read_experiment,
     validate_experiment,
 )
+from dryheave.host import HostContext
 from dryheave.native_recovery import cleanup_resolved
 from dryheave.runner import cancellation_signals, load_capture, run_experiment, run_status
 from dryheave.runner_models import RunOptions, RunSummary
@@ -98,6 +100,7 @@ def _run(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
             retry=tuple(args.retry),
             options=options,
             cancelled=cancelled,
+            host=HostContext(os.environ, Path.home()),
         )
         if not args.assess:
             return summary.model_dump(mode="json")

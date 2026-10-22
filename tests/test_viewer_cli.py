@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from conftest import HOST
 from dryheave import viewer_cli
 from dryheave.bundles import export_bundle, import_bundle
 from dryheave.cli import main
@@ -125,6 +126,7 @@ def test_view_never_triggers_assessment_or_model_calls(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capsys.readouterr()
 

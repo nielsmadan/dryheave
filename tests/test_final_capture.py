@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import HOST
 from dryheave.capture_models import CapturedFile
 from dryheave.cases import CapturePolicy, load_frozen_case
 from dryheave.errors import InputError
@@ -91,6 +92,7 @@ def test_links_to_workspace_root_preserve_bytes_and_remain_grade_eligible(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture_id = summary.pending_assessment[0]
     captured = load_capture(store, capture_id)

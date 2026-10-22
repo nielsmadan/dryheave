@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -8,9 +9,11 @@ from conftest import (
     CHANNEL,
     EDIT_PERMISSION,
     FIX_SCOPE,
+    HOST,
     AskedQuestion,
     ClaudeQuestionUI,
     ScreenUI,
+    live_codex_home,
     workflow_benchmark,
 )
 from dryheave.cli import main
@@ -18,6 +21,7 @@ from dryheave.drivers.models import CleanupReport, ProcessIdentity, Screen
 from dryheave.errors import ConflictError, InputError, NotFoundError
 from dryheave.experiments import create_experiment, load_experiment
 from dryheave.fixture_subject import FixtureTerminal
+from dryheave.host import HostContext
 from dryheave.journals import RunStore
 from dryheave.models import ObjectKind, TrialStage
 from dryheave.runner import load_capture, run_experiment, run_status
@@ -37,7 +41,12 @@ def test_run_options_drops_workflow_when_false() -> None:
 @pytest.mark.integration
 def test_fixture_clarification_capture_and_resume_without_paid_launch(store, benchmark):
     identifier = create_experiment(store, benchmark)
-    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    result = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     assert len(result.pending_assessment) == 1
     capture = load_capture(store, result.pending_assessment[0])
     assert (capture.mode, capture.assessment, capture.subject_completion) == (
@@ -61,9 +70,14 @@ def test_fixture_clarification_capture_and_resume_without_paid_launch(store, ben
     assert (
         store.read_blob(result.pending_assessment[0], "workspace/added.txt") == b"new task file\n"
     )
-    resumed = run_experiment(store, resume=result.run_id)
+    resumed = run_experiment(store, resume=result.run_id, host=HOST)
     assert resumed == result
-    retry = run_experiment(store, resume=result.run_id, retry=(result.attempts[0].trial_id,))
+    retry = run_experiment(
+        store,
+        resume=result.run_id,
+        retry=(result.attempts[0].trial_id,),
+        host=HOST,
+    )
     assert len(retry.attempts) == 2
     assert len(retry.pending_assessment) == 2
     assert len({state.workspace for state in retry.attempts}) == 2
@@ -85,7 +99,7 @@ def test_journal_ahead_of_checkpoint_recovery_preserves_launch_intent(
         execution.save(
             state.model_copy(update={"stage": TrialStage.LAUNCHING, "launch_attempted": True})
         )
-    result = run_experiment(store, resume=run_id)
+    result = run_experiment(store, resume=run_id, host=HOST)
     assert len(result.attempts) == 1
     assert result.attempts[0].launch_attempted
     capture = load_capture(store, result.pending_assessment[0])
@@ -96,10 +110,15 @@ def test_journal_ahead_of_checkpoint_recovery_preserves_launch_intent(
 @pytest.mark.integration
 def test_conflicting_resume_and_tampered_capture_map_rejected(store, benchmark):
     identifier = create_experiment(store, benchmark)
-    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    result = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     other = create_experiment(store, benchmark.model_copy(update={"seed": 3}))
     with pytest.raises(ConflictError, match="differs"):
-        run_experiment(store, other, resume=result.run_id)
+        run_experiment(store, other, resume=result.run_id, host=HOST)
     captured = load_capture(store, result.pending_assessment[0])
     bad = store.put(ObjectKind.CAPTURE, captured, references=(identifier,))
     with pytest.raises((InputError, NotFoundError)):
@@ -111,7 +130,11 @@ def test_cancellation_preserves_unstarted_trials_and_no_launch(store, benchmark)
     cancelled = threading.Event()
     cancelled.set()
     result = run_experiment(
-        store, identifier, options=RunOptions(mode="offline-fixture"), cancelled=cancelled
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        cancelled=cancelled,
+        host=HOST,
     )
     assert result.attempts == ()
     assert len(result.unstarted_trials) == 1
@@ -143,12 +166,13 @@ def test_cli_experiment_to_capture_and_status(store, benchmark, tmp_path, capsys
 def test_native_requires_explicit_short_runtime(store, benchmark):
     identifier = create_experiment(store, benchmark)
     with pytest.raises(InputError, match="runtime-root"):
-        run_experiment(store, identifier)
+        run_experiment(store, identifier, host=HOST)
     with pytest.raises(InputError, match="70-byte"):
         run_experiment(
             store,
             identifier,
             options=RunOptions(runtime_root="/" + "x" * 70, transport="/fixture/tui-test"),
+            host=HOST,
         )
 
 
@@ -161,7 +185,12 @@ def test_real_cli_resume_and_status_ignore_changed_workspace_runtime(store, benc
     from dryheave.workspaces import CONFIG_FILE
 
     identifier = create_experiment(store, benchmark)
-    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    result = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     (tmp_path / CONFIG_FILE).write_text(
         f'store = {json.dumps(str(store.root))}\nruntime = "{"long" * 40}"\n'
     )
@@ -186,12 +215,16 @@ def test_new_cli_run_uses_workspace_runtime_only_for_native(
     store, benchmark, tmp_path, monkeypatch, capsys, mode
 ):
     import json
-    from pathlib import Path
 
     from dryheave.workspaces import CONFIG_FILE
 
     identifier = create_experiment(store, benchmark)
-    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    result = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     runtime = (Path(".cache") / "rt").absolute()
     (tmp_path / CONFIG_FILE).write_text(
         f"store = {json.dumps(str(store.root))}\nruntime = {json.dumps(str(runtime))}\n"
@@ -223,7 +256,12 @@ def test_turn_and_controller_budgets_stop_further_submission(store, benchmark):
 
     recipe = benchmark.simulator.model_copy(update={"budget": RoleBudget(max_calls=0)})
     identifier = create_experiment(store, benchmark.model_copy(update={"simulator": recipe}))
-    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    result = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert (capture.stop_reason, capture.accepted_turns, capture.controller_calls) == (
         "controller_budget",
@@ -234,7 +272,6 @@ def test_turn_and_controller_budgets_stop_further_submission(store, benchmark):
 
 @pytest.mark.integration
 def test_stop_writers_then_capture_reads_their_final_bytes(store, benchmark, monkeypatch):
-    from pathlib import Path
 
     from dryheave.fixture_subject import FixtureTerminal
 
@@ -247,7 +284,10 @@ def test_stop_writers_then_capture_reads_their_final_bytes(store, benchmark, mon
 
     monkeypatch.setattr(FixtureTerminal, "close", close)
     result = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     assert (
         store.read_blob(result.pending_assessment[0], "workspace/last-write.txt")
@@ -274,7 +314,7 @@ def test_controller_intent_is_interrupted_on_recovery_without_reexecution(store,
                 }
             )
         )
-    result = run_experiment(store, resume=run_id)
+    result = run_experiment(store, resume=run_id, host=HOST)
     call = load_capture(store, result.pending_assessment[0]).controller_calls[0]
     assert (call.call_id, call.status, call.usage, call.cost, call.elapsed_seconds) == (
         "possibly-paid",
@@ -292,6 +332,7 @@ def test_permission_dialog_stops_without_a_simulator_call(store, benchmark):
         store,
         create_experiment(store, benchmark.model_copy(update={"fixture": (turn,)})),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "needs_input"
@@ -303,11 +344,16 @@ def test_native_and_run_locks_prevent_duplicate_work(store, benchmark):
     from dryheave.errors import LockBusyError
 
     identifier = create_experiment(store, benchmark)
-    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    result = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     with RunStore(store.root).open(result.run_id), pytest.raises(LockBusyError):
-        run_experiment(store, resume=result.run_id)
+        run_experiment(store, resume=result.run_id, host=HOST)
     with store.native_lock(), pytest.raises(LockBusyError):
-        run_experiment(store, resume=result.run_id)
+        run_experiment(store, resume=result.run_id, host=HOST)
     assert run_status(store, result.run_id).attempts == result.attempts
 
 
@@ -358,7 +404,12 @@ def test_controller_cleanup_failure_preserves_capture_after_fresh_reconciliation
     identifier = create_experiment(
         store, benchmark.model_copy(update={"simulator": recipe, "repetitions": 2})
     )
-    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    result = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     assert len(result.attempts) == len(result.unstarted_trials) == 1
     captured = load_capture(store, result.pending_assessment[0])
     call = captured.controller_calls[0]
@@ -371,7 +422,12 @@ def test_controller_cleanup_failure_preserves_capture_after_fresh_reconciliation
     assert captured.workspace.complete is False
     assert captured.evidence_omissions == ("cleanup_unresolved",)
     monkeypatch.undo()
-    resumed = run_experiment(store, resume=result.run_id, retry=(result.attempts[0].trial_id,))
+    resumed = run_experiment(
+        store,
+        resume=result.run_id,
+        retry=(result.attempts[0].trial_id,),
+        host=HOST,
+    )
     assert len(resumed.attempts) == 3
     assert resumed.unstarted_trials == ()
     assert resumed.attempts[0].capture_id == result.attempts[0].capture_id
@@ -400,7 +456,10 @@ def test_load_capture_batch_traversal_does_not_grow_per_file(store, benchmark, m
     )
     modified = benchmark.model_copy(update={"fixture": (*benchmark.fixture[:-1], turn)})
     summary = run_experiment(
-        store, create_experiment(store, modified), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, modified),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     identifier = summary.pending_assessment[0]
     original = store._manifest
@@ -436,7 +495,12 @@ def test_a_failed_simulator_call_is_retried_once(store, benchmark, tmp_path):
         command=CommandSpec(argv=(sys.executable, "-c", script)),
     )
     identifier = create_experiment(store, benchmark.model_copy(update={"simulator": recipe}))
-    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    result = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     captured = load_capture(store, result.pending_assessment[0])
     assert [call.status for call in captured.controller_calls] == ["failed", "completed"]
     assert captured.stop_reason == "simulator_stop"
@@ -486,7 +550,12 @@ def test_setup_spawning_many_processes_journals_a_bounded_number_of_ownership_ev
         references=(case.persona_id, case.repository_id),
     )
     identifier = create_experiment(store, benchmark.model_copy(update={"cases": (frozen,)}))
-    result = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    result = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     journal = RunStore(store.root).inspect(result.run_id)
     owned = ExecutionJournal(journal).attempts[result.attempts[0].attempt_id].owned
     batches = [event for event in journal.events if event.event == "owned-processes"]
@@ -559,7 +628,12 @@ def test_default_workflow_inspects_once_then_grading_runs_its_own_judge(
     from dryheave.integrity import load_assessment
 
     draft, inspector = workflow_benchmark(store, graded_benchmark, tmp_path)
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
     assert (capture.workflow.steps, capture.workflow.position) == (("inspect-required",), 1)
@@ -595,7 +669,10 @@ def test_failed_inspection_sends_a_fix_request_then_passes(store, graded_benchma
 
     draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path)
     result = run_experiment(
-        store, create_experiment(store, broken_then_fixed(draft)), options=workflow_options()
+        store,
+        create_experiment(store, broken_then_fixed(draft)),
+        options=workflow_options(),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
@@ -660,7 +737,12 @@ def test_a_simulator_that_keeps_stopping_on_findings_gets_a_corrected_retry_then
             ),
         }
     )
-    result = run_experiment(store, create_experiment(store, stubborn), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, stubborn),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
     assert workflow_events(capture) == [
@@ -693,6 +775,7 @@ def test_exhausted_simulator_budget_keeps_its_stop_reason_and_progress(
         store,
         create_experiment(store, broken_then_fixed(draft, max_calls=3)),
         options=workflow_options(),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "controller_budget"
@@ -739,7 +822,12 @@ def test_prompt_step_is_delivered_before_the_inspection(store, graded_benchmark,
             ),
         }
     )
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
     assert workflow_events(capture) == [("prompt", "sent"), ("inspect", "passed")]
@@ -764,7 +852,9 @@ def claude_profile(store) -> str:
     )
 
 
-def slash_draft(store, graded_benchmark, tmp_path, prompt="/code-review --quick"):
+def slash_draft(
+    store, graded_benchmark, tmp_path, prompt="/code-review --quick", typed="/code-review --quick"
+):
     from dryheave.cases import PromptStep
     from dryheave.controller_models import ScriptStep, SimulatorDecision
     from dryheave.experiment_models import FixtureTurn
@@ -779,7 +869,7 @@ def slash_draft(store, graded_benchmark, tmp_path, prompt="/code-review --quick"
         update={
             "fixture": (
                 *draft.fixture,
-                FixtureTurn(prompt="/code-review --quick", assistant="Review clean."),
+                FixtureTurn(prompt=typed, assistant="Review clean."),
             ),
             "simulator": draft.simulator.model_copy(
                 update={
@@ -806,9 +896,17 @@ def test_slash_prompt_step_is_delivered_as_a_curated_native_command(
     draft = slash_draft(store, graded_benchmark, tmp_path, prompt).model_copy(
         update={"variants": (VariantSpec(name="claude", profile=claude_profile(store)),)}
     )
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
+    assert [sorted(event.model_dump(mode="json")) for event in capture.workflow.events] == [
+        ["call_ids", "failed_criteria", "kind", "outcome", "seconds", "step_id", "turn"]
+    ]
     journal = RunStore(store.root).inspect(result.run_id)
     assert [
         event.data["policy"] for event in journal.events if event.event == "submission-intent"
@@ -820,9 +918,183 @@ def test_slash_prompt_steps_are_refused_before_launch_for_other_agents(
     store, graded_benchmark, tmp_path, prompt
 ):
     draft = slash_draft(store, graded_benchmark, tmp_path, prompt)
-    with pytest.raises(InputError, match="only delivered to Claude"):
-        run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    with pytest.raises(InputError, match="only delivered to Claude and to Codex on its live"):
+        run_experiment(
+            store,
+            create_experiment(store, draft),
+            options=workflow_options(),
+            host=HOST,
+        )
     assert RunStore(store.root).list_runs() == ()
+
+
+def codex_live_profile(store):
+    import sys
+
+    from dryheave.bench import parse_variant, variant_recipe
+    from dryheave.profile_models import CaptureSpec
+    from dryheave.profiles import capture_profile
+
+    return capture_profile(
+        store,
+        CaptureSpec(
+            recipe=variant_recipe(parse_variant("terra=codex:gpt-5.6-terra@high"), sys.executable)
+        ),
+    )
+
+
+def test_codex_workflow_skills_name_each_live_codex_variants_skills(
+    store, graded_benchmark, tmp_path
+):
+    from dryheave.experiment_models import VariantSpec
+    from dryheave.runner import codex_workflow_skills, require_workflow_support, workflow_plan
+
+    draft = slash_draft(store, graded_benchmark, tmp_path).model_copy(
+        update={
+            "variants": (
+                VariantSpec(name="terra", profile=codex_live_profile(store)),
+                VariantSpec(name="claude", profile=claude_profile(store)),
+            )
+        }
+    )
+    experiment = load_experiment(store, create_experiment(store, draft))
+    plan = workflow_plan(store, experiment)
+    require_workflow_support(plan)
+    assert sorted((trial.variant, trial.skill_names) for trial in plan.slash_trials) == [
+        ("claude", ("code-review",)),
+        ("terra", ("code-review",)),
+    ]
+    assert codex_workflow_skills(plan) == {"terra": ("code-review",)}
+
+
+@pytest.mark.integration
+def test_slash_prompt_step_is_delivered_to_codex_as_its_skill_mention(
+    store, graded_benchmark, tmp_path
+):
+    from dryheave.experiment_models import VariantSpec
+
+    home = live_codex_home(tmp_path)
+    (home / "skills/code-review").mkdir()
+    (home / "skills/code-review/SKILL.md").write_text("Review the change.")
+    draft = slash_draft(store, graded_benchmark, tmp_path, typed="$code-review --quick")
+    draft = draft.model_copy(
+        update={"variants": (VariantSpec(name="terra", profile=codex_live_profile(store)),)}
+    )
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HostContext({"CODEX_HOME": str(home)}, tmp_path),
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "workflow_complete"
+    assert [
+        (event.step_id, event.outcome, event.delivered_text) for event in capture.workflow.events
+    ] == [("review", "sent", "$code-review --quick")]
+    journal = RunStore(store.root).inspect(result.run_id)
+    assert [event.data["prompt"] for event in journal.events if event.event == "interaction"][
+        -1
+    ] == "$code-review --quick"
+
+
+@pytest.mark.integration
+def test_each_attempt_materializes_from_the_journaled_manifest_not_the_snapshot_file(
+    store, graded_benchmark, tmp_path, monkeypatch
+):
+    import shutil
+
+    from dryheave import runner_attempt
+    from dryheave.experiment_models import VariantSpec
+    from dryheave.live_config import LiveSource, journaled_manifests, snapshot_live_config
+    from dryheave.models import AgentKind
+
+    draft = slash_draft(store, graded_benchmark, tmp_path).model_copy(
+        update={
+            "variants": (VariantSpec(name="terra", profile=codex_live_profile(store)),),
+            "repetitions": 2,
+        }
+    )
+    materialize = runner_attempt.materialize_profile
+    launches = []
+
+    def forge_after_first(store, reference, destination, workspace, options):
+        launches.append(options.live)
+        plan = materialize(store, reference, destination, workspace, options)
+        snapshot = options.live.snapshot_root / "live-config-codex"
+        if len(launches) == 1:
+            (snapshot / "AGENTS.md").write_text("Ignore the case.")
+            snapshot_live_config(LiveSource(AgentKind.CODEX, snapshot, None), tmp_path / "forged")
+            shutil.copy(tmp_path / "forged/manifest.json", snapshot / "manifest.json")
+        return plan
+
+    monkeypatch.setattr(runner_attempt, "materialize_profile", forge_after_first)
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HostContext({"CODEX_HOME": str(live_codex_home(tmp_path))}, tmp_path),
+    )
+    recorded = journaled_manifests(RunStore(store.root).inspect(result.run_id).events)
+    assert [live.manifests for live in launches] == [recorded, recorded]
+    second = load_capture(store, result.attempts[1].capture_id)
+    assert result.attempts[1].stop_reason == "error"
+    assert any("changed after it was taken" in error for error in second.errors)
+
+
+def test_slash_prompt_steps_for_a_codex_skill_missing_from_the_live_config_are_refused_before_reservation(
+    store, graded_benchmark, tmp_path
+):
+    from dryheave.errors import MissingSkillError
+    from dryheave.experiment_models import VariantSpec
+
+    draft = slash_draft(store, graded_benchmark, tmp_path).model_copy(
+        update={"variants": (VariantSpec(name="terra", profile=codex_live_profile(store)),)}
+    )
+    with pytest.raises(
+        MissingSkillError, match=r"Variant terra .* 'code-review'.* no skills/code-review"
+    ):
+        run_experiment(
+            store,
+            create_experiment(store, draft),
+            options=workflow_options(),
+            host=HostContext({"CODEX_HOME": str(live_codex_home(tmp_path))}, tmp_path),
+        )
+    assert RunStore(store.root).list_runs() == ()
+
+
+def test_a_resumed_run_is_refused_when_its_codex_snapshot_lacks_a_workflow_skill(
+    store, graded_benchmark, tmp_path
+):
+    from dryheave.errors import MissingSkillError
+    from dryheave.experiment_models import VariantSpec
+
+    home = live_codex_home(tmp_path)
+    draft = slash_draft(store, graded_benchmark, tmp_path).model_copy(
+        update={"variants": (VariantSpec(name="terra", profile=codex_live_profile(store)),)}
+    )
+    experiment_id = create_experiment(store, draft)
+    run_id = RunStore(store.root).create(store.resolve(experiment_id))
+    with pytest.raises(
+        MissingSkillError, match=r"Variant terra .* no skills/code-review/SKILL\.md\.$"
+    ):
+        run_experiment(
+            store,
+            resume=run_id,
+            options=workflow_options(),
+            host=HostContext({"CODEX_HOME": str(home)}, tmp_path),
+        )
+    (home / "skills/code-review").mkdir()
+    (home / "skills/code-review/SKILL.md").write_text("Review the change.")
+    with pytest.raises(MissingSkillError, match="no skills/code-review"):
+        run_experiment(
+            store,
+            resume=run_id,
+            options=workflow_options(),
+            host=HostContext({"CODEX_HOME": str(home)}, tmp_path),
+        )
+    assert [event.event for event in RunStore(store.root).inspect(run_id).events][-1] == (
+        "live-config"
+    )
 
 
 def test_inspect_steps_without_an_inspector_are_refused_before_launch(store, graded_benchmark):
@@ -840,7 +1112,7 @@ def test_inspect_steps_without_an_inspector_are_refused_before_launch(store, gra
     )
     identifier = create_experiment(store, graded_benchmark.model_copy(update={"cases": (changed,)}))
     with pytest.raises(InputError, match="inspector"):
-        run_experiment(store, identifier, options=workflow_options())
+        run_experiment(store, identifier, options=workflow_options(), host=HOST)
     assert RunStore(store.root).list_runs() == ()
 
 
@@ -854,7 +1126,12 @@ def test_declined_stop_ends_the_run_without_an_inspection(store, graded_benchmar
     draft = draft.model_copy(
         update={"simulator": draft.simulator.model_copy(update={"script": (first, declined)})}
     )
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "simulator_stop"
     assert (capture.workflow.position, capture.workflow.events) == (0, ())
@@ -871,7 +1148,12 @@ def test_script_exhaustion_ends_the_run_without_running_the_workflow(
     draft = draft.model_copy(
         update={"simulator": draft.simulator.model_copy(update={"script": (first,)})}
     )
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "simulator_stop"
     assert (capture.workflow.position, capture.workflow.events) == (0, ())
@@ -885,7 +1167,12 @@ def test_script_divergence_ends_the_run_without_running_the_workflow(
     draft, inspector = workflow_benchmark(store, graded_benchmark, tmp_path)
     diverged = draft.fixture[1].model_copy(update={"assistant": "Something else happened."})
     draft = draft.model_copy(update={"fixture": (draft.fixture[0], diverged)})
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "simulator_stop"
     assert (capture.workflow.position, capture.workflow.events) == (0, ())
@@ -895,7 +1182,12 @@ def test_script_divergence_ends_the_run_without_running_the_workflow(
 @pytest.mark.integration
 def test_unavailable_inspection_stops_the_run(store, graded_benchmark, tmp_path):
     draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path, outcomes=("broken",))
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "inspection_unavailable"
     assert workflow_events(capture) == [("inspect", "unavailable")]
@@ -932,6 +1224,7 @@ def test_cancellation_outranks_an_unavailable_inspection(
         create_experiment(store, draft),
         options=workflow_options(),
         cancelled=threading.Event(),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "cancelled"
@@ -966,7 +1259,12 @@ def test_timeout_outranks_an_unavailable_inspection(store, graded_benchmark, tmp
     monkeypatch.setattr("dryheave.runner_attempt.inspect_workspace", unavailable)
     monkeypatch.setattr(time_module, "monotonic", fake_monotonic)
     draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path)
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "timeout"
     assert workflow_events(capture) == [("inspect", "unavailable")]
@@ -991,7 +1289,12 @@ def test_events_arriving_during_inspection_rerun_it_once_then_make_it_unavailabl
 
     monkeypatch.setattr(DriverSession, "reconcile", growing)
     draft, inspector = workflow_benchmark(store, graded_benchmark, tmp_path)
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "inspection_unavailable"
     assert len(list(inspector.glob("request-*.json"))) == 2
@@ -1029,7 +1332,12 @@ def test_an_inspection_rerun_shares_the_inspectors_call_budget(
             )
         }
     )
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "inspection_unavailable"
     assert len(list(inspector.glob("request-*.json"))) == 1
@@ -1039,7 +1347,10 @@ def test_an_inspection_rerun_shares_the_inspectors_call_budget(
 def test_workflow_off_keeps_todays_run_and_serialization(store, graded_benchmark, tmp_path):
     draft, inspector = workflow_benchmark(store, graded_benchmark, tmp_path)
     result = run_experiment(
-        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert (capture.stop_reason, capture.workflow) == ("simulator_stop", None)
@@ -1063,7 +1374,10 @@ def test_workflow_off_any_simulator_stop_ends_the_run_as_before(store, graded_be
         update={"simulator": draft.simulator.model_copy(update={"script": (first, declined)})}
     )
     result = run_experiment(
-        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert (capture.stop_reason, capture.workflow) == ("simulator_stop", None)
@@ -1107,7 +1421,12 @@ def test_unchanged_work_reuses_the_failed_verdict_until_the_turn_budget(
             ),
         }
     )
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "turn_budget"
     assert workflow_events(capture) == [
@@ -1133,7 +1452,12 @@ def test_the_inspections_cap_stops_a_workflow_of_passing_inspect_steps(
     draft, inspector = workflow_benchmark(
         store, graded_benchmark, tmp_path, outcomes=("pass",), workflow=steps
     )
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "turn_budget"
     assert workflow_events(capture) == [("inspect", "passed")] * 4
@@ -1273,7 +1597,12 @@ def test_a_prompt_step_dialog_is_answered_and_the_workflow_completes(
     )
     ui = ClaudeQuestionUI((SCOPE,))
     terminals = dialog_fixture(monkeypatch, {"Review the greeting.": ui})
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
     assert workflow_events(capture) == [
@@ -1318,7 +1647,10 @@ def test_dialogs_are_answered_and_counted_without_a_workflow(store, benchmark, m
     ui = ClaudeQuestionUI((AUTH,))
     terminals = dialog_fixture(monkeypatch, {prompt: ui})
     result = run_experiment(
-        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert (capture.stop_reason, capture.accepted_turns) == ("simulator_stop", 2)
@@ -1363,7 +1695,10 @@ def test_an_invalid_dialog_answer_is_retried_once_then_needs_input(store, benchm
     ui = ClaudeQuestionUI((AUTH,))
     terminals = dialog_fixture(monkeypatch, {benchmark.fixture[0].prompt.strip(): ui})
     result = run_experiment(
-        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "needs_input"
@@ -1407,7 +1742,10 @@ def test_a_dialog_shown_before_enter_is_accepted_is_not_answered(store, benchmar
 
     monkeypatch.setattr("dryheave.runner_attempt.FixtureTerminal", build)
     result = run_experiment(
-        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert (capture.stop_reason, capture.last_observation.state) == (
@@ -1424,7 +1762,10 @@ def test_a_claude_permission_dialog_still_stops_without_a_simulator_call(
     draft = claude_draft(store, benchmark, *benchmark.simulator.script)
     terminals = dialog_fixture(monkeypatch, {benchmark.fixture[0].prompt.strip(): PERMISSION})
     result = run_experiment(
-        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert (capture.stop_reason, capture.last_observation.state) == ("needs_input", "approval")
@@ -1436,7 +1777,10 @@ def test_a_startup_trust_prompt_never_reaches_the_simulator(store, benchmark, mo
     draft = claude_draft(store, benchmark, *benchmark.simulator.script)
     terminals = dialog_fixture(monkeypatch, {}, startup=TRUST)
     result = run_experiment(
-        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert (capture.stop_reason, capture.last_observation.state) == ("needs_input", "approval")
@@ -1519,7 +1863,10 @@ def scripted(draft, *script):
 def run_screen(store, draft, monkeypatch, ui):
     terminals = dialog_fixture(monkeypatch, {draft.fixture[0].prompt.strip(): ui})
     result = run_experiment(
-        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
     return capture, terminals[0], store.read_blobs(result.pending_assessment[0])
@@ -1620,7 +1967,12 @@ def test_a_screen_is_answered_one_key_at_a_time_guided_by_the_prompt_step_hint(
     )
     ui = ScreenUI(CHANNEL)
     terminals = dialog_fixture(monkeypatch, {"Pick a release channel.": ui})
-    result = run_experiment(store, create_experiment(store, draft), options=workflow_options())
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(),
+        host=HOST,
+    )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
     assert (terminals[0].keys, ui.answer) == (["Down", "Down", "Enter"], "Nightly")
@@ -1773,7 +2125,6 @@ class CodexFreeformUI:
 def test_a_codex_question_the_parser_cannot_answer_goes_through_the_screen_loop(
     store, benchmark, monkeypatch
 ):
-    from pathlib import Path
 
     template = json.loads(Path("tests/fixtures/codex-dialogs.json").read_text())["freeform"]
     text = "Use a comma after Hello."
@@ -1956,3 +2307,50 @@ def test_typed_text_starting_with_a_digit_is_retried_once_then_needs_input(
         ("failed", "invalid_screen_answer"),
     ]
     assert (terminal.keys, terminal.typed) == ([], [])
+
+
+def test_mixed_live_run_snapshots_each_agent_into_its_own_directory(store, benchmark, tmp_path):
+    from dryheave.experiment_models import VariantSpec
+    from dryheave.live_config import journaled_manifests
+    from dryheave.models import AgentKind, EnvironmentReference
+    from dryheave.profile_models import CaptureSpec, NativeRecipe
+    from dryheave.profiles import capture_profile
+    from dryheave.runner import _prepare_live_config
+
+    claude_home = tmp_path / "claude"
+    claude_home.mkdir()
+    (claude_home / "CLAUDE.md").write_text("Be terse.")
+    codex_home = live_codex_home(tmp_path)
+    profiles = {
+        "claude": NativeRecipe(
+            agent=AgentKind.CLAUDE,
+            executable="claude",
+            config_source="live",
+            environment=(EnvironmentReference(name="CLAUDE_CODE_OAUTH_TOKEN"),),
+        ),
+        "codex": NativeRecipe(
+            agent=AgentKind.CODEX,
+            executable="codex",
+            model="gpt-5.6-terra",
+            effort="high",
+            config_source="live",
+        ),
+    }
+    variants = tuple(
+        VariantSpec(name=name, profile=capture_profile(store, CaptureSpec(recipe=recipe)))
+        for name, recipe in profiles.items()
+    )
+    draft = benchmark.model_copy(update={"variants": variants, "repetitions": 1})
+    experiment = load_experiment(store, create_experiment(store, draft))
+    run_id = RunStore(store.root).create(store.resolve(variants[0].profile))
+    environment = {"CLAUDE_CONFIG_DIR": str(claude_home), "CODEX_HOME": str(codex_home)}
+    with RunStore(store.root).open(run_id) as journal:
+        execution = ExecutionJournal(journal)
+        _prepare_live_config(store, execution, experiment, HostContext(environment, tmp_path))
+        _prepare_live_config(store, execution, experiment, HostContext(environment, tmp_path))
+        events = [event for event in journal.events if event.event == "live-config"]
+        assert [event.data.get("agent") for event in events] == [None, "codex"]
+        assert sorted(journaled_manifests(events)) == [AgentKind.CLAUDE, AgentKind.CODEX]
+        assert events[1].data["source"] == str(codex_home)
+        assert (journal.path / "live-config/CLAUDE.md").read_text() == "Be terse."
+        assert (journal.path / "live-config-codex/AGENTS.md").read_text() == "Be brief."

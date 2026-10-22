@@ -8,6 +8,7 @@ from contextlib import suppress
 import psutil
 import pytest
 
+from conftest import HOST
 from dryheave.assessments import assess_run
 from dryheave.cases import load_frozen_case
 from dryheave.errors import InputError
@@ -76,6 +77,7 @@ def test_assessor_persists_descendants_and_recovers_after_parent_disappears(
         store,
         create_experiment(store, graded_benchmark.model_copy(update={"cases": (case_id,)})),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     process = subprocess.Popen(
         [
@@ -154,6 +156,7 @@ def test_resume_refuses_subject_launch_when_grading_cleanup_is_unresolved(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     if finished:
         assess_run(store, summary.run_id)
@@ -174,7 +177,12 @@ def test_resume_refuses_subject_launch_when_grading_cleanup_is_unresolved(
         lambda *_args: pytest.fail("Unresolved grader ownership must block another subject."),
     )
     with pytest.raises(InputError, match="recorded writers"):
-        run_experiment(store, resume=summary.run_id, retry=(summary.attempts[0].trial_id,))
+        run_experiment(
+            store,
+            resume=summary.run_id,
+            retry=(summary.attempts[0].trial_id,),
+            host=HOST,
+        )
     assert len(run_status(store, summary.run_id).attempts) == 1
 
 

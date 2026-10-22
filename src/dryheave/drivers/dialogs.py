@@ -14,6 +14,7 @@ CODEX_EMPTY_PLACEHOLDERS = {"Ask Codex to do anything", "Ask a follow-up questio
 
 CODEX_APPROVALS = (
     "Do you trust the contents of this directory?",
+    "Trust this folder?",
     "Would you like to run the following command?",
     "Would you like to make the following edits?",
     "Do you want to approve network access",
@@ -45,7 +46,8 @@ CLAUDE_STARTUP = (
     "Allow external CLAUDE.md file imports?",
 )
 CONFIRM_FOOTER = re.compile(
-    r"(?:press )?enter to (?:confirm|continue)(?:(?: or | \u00b7 )esc to (?:cancel|go back))?"
+    r"(?:press )?enter (?:to )?(?:confirm|continue)"
+    r"(?:(?: or | \u00b7 )esc (?:to )?(?:cancel|go back|skip))?"
     r"|esc to cancel"
 )
 QUESTION_FOOTER = re.compile(r"\S+ to select(?: \u00b7 .+)? \u00b7 \S+ to cancel", re.IGNORECASE)
@@ -590,6 +592,13 @@ def command_ready(screen: Screen, prompt: str) -> bool:
     if menu is None:
         return bool(arguments)
     return menu.highlighted == name
+
+
+def delivered_prompt(agent: AgentKind, prompt: str) -> str:
+    command = prompt.lstrip()
+    if agent != AgentKind.CODEX or not command.startswith("/"):
+        return prompt
+    return f"{prompt[: len(prompt) - len(command)]}${command[1:]}"
 
 
 def submittable(agent: AgentKind, screen: Screen, text: str) -> bool:

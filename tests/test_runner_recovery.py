@@ -5,7 +5,7 @@ import time
 import psutil
 import pytest
 
-from conftest import judged_case_benchmark
+from conftest import HOST, judged_case_benchmark
 from dryheave.cases import load_frozen_case
 from dryheave.drivers.models import ProcessIdentity
 from dryheave.experiments import create_experiment, load_experiment
@@ -56,7 +56,7 @@ def test_recovery_stops_only_recorded_process_identity_before_capture(store, ben
             writer.wait()
             raise
     try:
-        result = run_experiment(store, resume=run_id)
+        result = run_experiment(store, resume=run_id, host=HOST)
         writer.wait(timeout=3)
         capture = load_capture(store, result.pending_assessment[0])
         assert capture.cleanup.known_writers_stopped
@@ -104,7 +104,7 @@ def test_recovered_interrupted_attempt_carries_its_workflow_progress(
         execution.save(
             execution.attempts[state.attempt_id].model_copy(update={"workflow_position": 0})
         )
-    result = run_experiment(store, resume=run_id)
+    result = run_experiment(store, resume=run_id, host=HOST)
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "interrupted"
     assert capture.interaction_coverage == "partial"

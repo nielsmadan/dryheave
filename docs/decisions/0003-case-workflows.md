@@ -58,3 +58,18 @@ arrow keys and checks every keypress on screen before acting, and it never
 sends Escape. Both the plain and the side-by-side preview layouts are read.
 Startup trust and import prompts, and tool-permission approvals, are never
 answered.
+
+## Amendment 2026-10-17
+
+Codex on its live config also accepts slash commands. It receives `/name args`
+as the skill mention `$name args`, and only when its Codex config has
+`skills/name/SKILL.md`: a new run checks the live config before it is reserved,
+and every run checks its snapshot. Claude still gets slash commands verbatim,
+and other agents are still refused. This lets `bench` run the same workflow on
+Codex and Claude variants.
+
+The rule is lifted as an accepted risk. No recorded Codex 0.162.1 session shows
+yet that Codex accepts a `$name` mention as a user message with the typed text,
+and a skill-mention popup that takes Enter would go undetected. The launch check
+types and clears the mention without pressing Enter, since submitting would
+start a paid turn, so the first real trial is the first evidence.

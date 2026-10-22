@@ -480,12 +480,16 @@ A case is personal: it captures one person's real workflow, including the
 reviews, manual testing, QA and documentation habits they actually followed, not
 an idealized task stripped of those habits. `CaseContent.workflow` is an ordered
 tuple of `InspectStep` and `PromptStep` entries (`cases.WorkflowStep`), each with
-a unique `step_id`. A `PromptStep` sends its `prompt` text verbatim once — a
-skill invocation such as `/code-review --quick`, or a plain instruction such as
-"update the docs" — and may carry an `answer_hint` guiding how the simulated
-user answers any dialog that step triggers; a prompt cannot be one of the
-built-in commands that produce no model turn (`cases.NO_TURN_COMMANDS`: `/clear`,
-`/compact`, `/exit`, `/quit`, `/resume`, `/rewind`, `/login`, `/logout`). An
+a unique `step_id`. A `PromptStep` sends its `prompt` text once: a skill
+invocation such as `/code-review --quick`, or a plain instruction such as
+"update the docs". Claude gets it verbatim; a Codex variant on its live config
+gets a `/name args` prompt as the skill mention `$name args`, and the run is
+refused unless its Codex config has `skills/name/SKILL.md`. A `PromptStep` may
+carry an `answer_hint` guiding how the simulated user answers any dialog that step
+triggers; a prompt cannot be one of the built-in commands that produce no model
+turn (`cases.NO_TURN_COMMANDS`: `/clear`, `/compact`, `/exit`, `/quit`, `/resume`,
+`/rewind`, `/login`, `/logout`), and cannot start with `$` or `!`: a skill step is
+written `/name` for every agent, and Codex receives it as `$name`. An
 `InspectStep` names the criteria the user would check at that point — case
 criterion IDs or non-disabled default rubric IDs — and represents the user
 looking at the work and judging it against what they can observe.

@@ -14,6 +14,7 @@ from dryheave.drivers.dialogs import (
     composer,
     composer_matches,
     composer_ready,
+    delivered_prompt,
     dialog,
     escalation,
     permission_like,
@@ -28,7 +29,10 @@ from dryheave.models import AgentKind
 CODEX_DIALOGS = json.loads(Path("tests/fixtures/codex-dialogs.json").read_text())
 
 
-@pytest.mark.parametrize("name", ["trust", "exec", "patch", "network", "permissions", "hooks"])
+@pytest.mark.parametrize(
+    "name",
+    ["trust", "trust_folder", "exec", "patch", "network", "permissions", "hooks", "hooks_0_162"],
+)
 @pytest.mark.parametrize("history", ["", "\u203a Prior prompt\n• Prior answer\n\n"])
 def test_pinned_upstream_approval_layouts_require_operator_policy(name, history):
     text = history + CODEX_DIALOGS[name]
@@ -1064,3 +1068,18 @@ def test_a_bare_allow_option_is_never_pressed(key):
         text=CHROME_PERMISSION.format(marker="⏺ done"), exited=None, cursor={"x": 1, "y": 8}
     )
     assert escalation(AgentKind.CLAUDE, screen, key, None) == "Allow"
+
+
+@pytest.mark.parametrize(
+    ("prompt", "agent", "expected"),
+    [
+        ("/code-review --quick", AgentKind.CODEX, "$code-review --quick"),
+        ("/release-notes", AgentKind.CODEX, "$release-notes"),
+        (" \n/release-notes v2\nmore", AgentKind.CODEX, " \n$release-notes v2\nmore"),
+        ("Fix the /tmp path.", AgentKind.CODEX, "Fix the /tmp path."),
+        ("/code-review --quick", AgentKind.CLAUDE, "/code-review --quick"),
+        ("/code-review --quick", AgentKind.DROID, "/code-review --quick"),
+    ],
+)
+def test_delivered_prompt_turns_slash_commands_into_codex_skill_mentions(prompt, agent, expected):
+    assert delivered_prompt(agent, prompt) == expected

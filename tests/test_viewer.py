@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from conftest import HOSTILE, judged_case_benchmark
+from conftest import HOST, HOSTILE, judged_case_benchmark
 from dryheave import journals, storage, viewer
 from dryheave.assessments import assess_run
 from dryheave.bundles import export_bundle, import_bundle
@@ -46,11 +46,13 @@ def test_listing_paginates_and_corrupt_rows_degrade(store, graded_benchmark):
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     second = run_experiment(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     (store.root / "runs" / second.run_id / "metadata.json").write_bytes(b"tampered")
     service = ViewerService(store)
@@ -285,6 +287,7 @@ def test_calibrations_match_exact_case_identity(store, graded_benchmark):
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     service = ViewerService(store)
     result = service.calibrations(summary.run_id)
@@ -314,6 +317,7 @@ def test_calibration_rows_report_verification_state(store, graded_benchmark):
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     unverified = ViewerService(store, max_verified_calibrations=0).calibrations(summary.run_id)
     entry = unverified.calibrations[case_id][0]
@@ -340,6 +344,7 @@ def test_calibration_scan_is_incomplete_when_case_inputs_are_unreadable(store, g
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     journal = store.root / "runs" / summary.run_id
     experiment_id = summary.experiment_id
@@ -571,8 +576,18 @@ def test_listing_charges_every_row_for_the_prefix_bytes_it_read(
     store, graded_benchmark, monkeypatch
 ):
     experiment = create_experiment(store, graded_benchmark)
-    first = run_experiment(store, experiment, options=RunOptions(mode="offline-fixture"))
-    second = run_experiment(store, experiment, options=RunOptions(mode="offline-fixture"))
+    first = run_experiment(
+        store,
+        experiment,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
+    second = run_experiment(
+        store,
+        experiment,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     assert first.run_id != second.run_id
     original = journals.read_prefix
     read = []
@@ -598,8 +613,18 @@ def test_listing_never_reads_with_a_negative_allowance_once_the_budget_is_spent(
     store, graded_benchmark, monkeypatch
 ):
     experiment = create_experiment(store, graded_benchmark)
-    first = run_experiment(store, experiment, options=RunOptions(mode="offline-fixture"))
-    second = run_experiment(store, experiment, options=RunOptions(mode="offline-fixture"))
+    first = run_experiment(
+        store,
+        experiment,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
+    second = run_experiment(
+        store,
+        experiment,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     original = journals.read_prefix
     limits = []
 
@@ -775,7 +800,10 @@ def test_case_route_serves_the_frozen_case_as_data(store, graded_benchmark, tmp_
 def test_judge_reasoning_is_served_for_the_current_assessment(store, graded_benchmark, tmp_path):
     benchmark, _ = judged_case_benchmark(store, graded_benchmark, tmp_path)
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     (assessment_id,) = assess_run(store, summary.run_id)
     attempt_id = summary.attempts[0].attempt_id
@@ -817,7 +845,10 @@ def test_regraded_judge_reasoning_ignores_the_superseded_assessment(
 
     benchmark, case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     (first_assessment_id,) = assess_run(store, summary.run_id)
     attempt_id = summary.attempts[0].attempt_id

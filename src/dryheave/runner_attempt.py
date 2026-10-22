@@ -42,7 +42,7 @@ from dryheave.controllers import (
 )
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.auth import RuntimeBindings
-from dryheave.drivers.dialogs import awaits_screen, screen_identity
+from dryheave.drivers.dialogs import awaits_screen, delivered_prompt, screen_identity
 from dryheave.drivers.fake import FakeEventSource
 from dryheave.drivers.log_source import NativeLogSource, native_log_root
 from dryheave.drivers.models import (
@@ -75,12 +75,17 @@ from dryheave.final_capture import CaptureBuilder, capture_workspace
 from dryheave.fixture_subject import FixtureTerminal
 from dryheave.inspection import InspectionRequest, InspectionResult, inspect_workspace
 from dryheave.judges import TranscriptEntry, judge_transcript_from_events
-from dryheave.live_config import LIVE_CONFIG_DIRECTORY
-from dryheave.models import JournalEvent, ObjectKind, StrictModel, TrialStage
+from dryheave.models import AgentKind, JournalEvent, ObjectKind, StrictModel, TrialStage
 from dryheave.personas import load_frozen_persona
 from dryheave.process_ownership import ProcessOwner
 from dryheave.processes import CommandControl, run_command
-from dryheave.profile_launch import LaunchOptions, launch_environment, materialize_profile
+from dryheave.profile_launch import (
+    LaunchOptions,
+    LiveSnapshots,
+    launch_environment,
+    materialize_profile,
+)
+from dryheave.profile_models import LiveConfigManifest
 from dryheave.repositories import materialize_repository
 from dryheave.runner_models import (
     AttemptState,
@@ -357,7 +362,9 @@ class TrialExecution:
             cancelled=self.cancelled,
         )
 
-    def execute(self, inherited: Mapping[str, str]) -> None:
+    def execute(
+        self, inherited: Mapping[str, str], manifests: Mapping[AgentKind, LiveConfigManifest]
+    ) -> None:
         try:
             self.update(stage=TrialStage.PREPARING)
             ensure_directory(self.root)
@@ -371,7 +378,7 @@ class TrialExecution:
                 LaunchOptions(
                     strict=self.options.strict,
                     probe_version=True,
-                    live_config=self.journal.journal.path / LIVE_CONFIG_DIRECTORY,
+                    live=LiveSnapshots(self.journal.journal.path, manifests),
                 ),
             )
             self.update(launch_plan=plan)
@@ -671,10 +678,15 @@ class TrialExecution:
                 return None
             step = self.steps[self.position]
             if isinstance(step, PromptStep):
+                delivered = delivered_prompt(self._agent(), step.prompt)
                 self.pending = WorkflowEvent(
-                    step_id=step.step_id, kind="prompt", outcome="sent", turn=self.accepted
+                    step_id=step.step_id,
+                    kind="prompt",
+                    outcome="sent",
+                    turn=self.accepted,
+                    delivered_text=None if delivered == step.prompt else delivered,
                 )
-                return step.prompt, ("curated-native-command" if step.slash else "conversation")
+                return delivered, ("curated-native-command" if step.slash else "conversation")
             if self.inspections >= self.case.budgets.max_turns:
                 self.update(stop_reason="turn_budget")
                 return None
@@ -683,6 +695,11 @@ class TrialExecution:
             if self.last_inspection is None or self.last_inspection.status == "passed":
                 continue
             return self._request_fix(step, self.last_inspection.findings, inherited)
+
+    def _agent(self) -> AgentKind:
+        if self.state.launch_plan is None:
+            raise InputError("Workflow prompt delivery needs a saved launch plan.")
+        return self.state.launch_plan.agent
 
     def _inspect_step(self, step: InspectStep, inherited: Mapping[str, str]) -> bool:
         previous = self.last_inspection

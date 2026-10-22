@@ -34,8 +34,9 @@ files does not imply the subject can start successfully.
 ## Capture specification
 
 `profile create NAME --agent codex|claude --model MODEL` provides selected-file
-capture without a JSON spec. Codex defaults to 0.154.0, Terra low and an explicit
-disabled-plugin/bundled-skill policy. Claude requires an explicit model, pins
+capture without a JSON spec. Codex defaults to 0.154.0 (0.162.1 is also
+accepted; `codex_policy.CODEX_PROFILE_VERSIONS` lists both), Terra low and an
+explicit disabled-plugin/bundled-skill policy. Claude requires an explicit model, pins
 2.1.278, uses settings.json/CLAUDE.md targets and adds only the named OAuth token
 reference. New Claude recipes reject Codex flags, alternate billing references,
 print/bare/bypass native arguments and unsupported effort. Only `--verbose` is
@@ -49,11 +50,16 @@ an error. New discovery fields serialize only when explicitly set, preserving
 historical payloads and object IDs. The old spec commands and recipe defaults
 retain their previous behavior.
 
-Codex 0.154.0 disabled-plugin mode emits `--disable plugins` and
-`skills.bundled.enabled=false`, without `--ignore-user-config` on subjects.
+Codex disabled-plugin mode emits `--disable plugins` and
+`skills.bundled.enabled=false`, without `--ignore-user-config` on subjects. Both
+flags were checked against the 0.154.0 source only; a 0.162.1 recipe uses them
+unverified, and its launch plan's discovery mechanisms say so.
 Selected-plugin mode preserves selected bytes but cannot freeze local plugin
 discovery, startup sync or upgrades. HOME, project, managed and system influences
-remain unverified.
+remain unverified. Its `codex-discovery-policy` issue says "Codex 0.154.0" even
+for a 0.162.1 recipe. Keep that text: `load_profile` recomputes the issues and
+compares them with the stored ones, so rewording it would stop stored profiles
+from loading.
 
 Paths in `include_roots` resolve relative to the specification file. Individual
 asset paths are relative to their named root, and targets are relative to their
@@ -139,8 +145,30 @@ blob and previous hash. An explicit `"replace"` records and applies replacement.
 Matching bytes and executable state record an `identical` action. Replacement
 applies the captured executable state in both directions; preserve keeps the
 historical bytes and executable state. Global instructions always remain a
-separate global layer. Runtime permissions and approval settings are selected
-native configuration; Dryheave adds no permission or sandbox bypass flags.
+separate global layer. Runtime permissions and approval settings come from the
+selected native configuration and the recipe's native arguments; Dryheave
+generates no permission or sandbox bypass flags of its own. A recipe can still
+carry one: `bench` records `--sandbox danger-full-access` as every Codex
+variant's native `arguments` and keeps the live approval settings. It does not
+use `workspace-write`, which silently blocks writes outside the repository, such
+as Xcode's DerivedData, and would break those cases. A Codex launch plan whose
+arguments contain `danger-full-access`, `--dangerously-bypass-approvals-and-sandbox`
+or `--yolo` reports launch issue `codex-sandbox-disabled`; the bypass flags,
+`-a never`/`--ask-for-approval never` and an `approval_policy="never"` override
+report `codex-approvals-disabled` (`codex_policy.argument_bypasses`). A live
+Codex launch also reads the per-attempt copy of the snapshot's `config.toml`
+(never the operator's live directory) and adds either issue when its effective
+`sandbox_mode` is `danger-full-access` or `approval_policy` is `never`, taking a
+selected `profile` table's value over the top level
+(`codex_policy.config_bypasses`). Those issues appear in the materialized
+`launch-plan.json`, not in a plain preflight, which has no snapshot. When the
+recipe also trusts the workspace, as every bench variant does, the sandbox issue
+adds that the case repository's own Codex config, hooks and exec policies load
+without a sandbox, so a case repository must be trusted like your own code. A live Codex profile that disables skills gets a
+generated `--config skills.config=[...]` override, which replaces rather than
+merges into the live `config.toml`'s own `[[skills.config]]` array and
+re-enables any skill the operator disabled there; this is reported as launch
+issue `codex-skills-config-override`.
 
 A simple derivation spec is:
 
@@ -211,6 +239,10 @@ fail by name only. `TMPDIR` is private to the runtime directory. Optional isolat
 HOME also generates private XDG roots and reports the changed tool/auth behavior.
 `launch_environment` selects values by name without enumerating or serializing
 the supplied mapping. Treat its returned values as sensitive process input.
+A live-config profile's plan instead uses the `inherited` environment policy:
+the subject gets the operator's environment minus Claude's nested-session
+markers, with the generated roots and variables on top, and a Codex plan also
+drops `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`.
 
 ## Fidelity and supported discovery controls
 
@@ -257,6 +289,44 @@ or argv position without printing values. Config is never silently redacted and
 then described as faithful. These checks are deliberately conservative and are
 not an exhaustive secret detector; transcripts, arbitrary argv and final output
 can still be sensitive. All checks complete before publishing profile objects.
+`profile_security` holds the shared detector, which `load_profile` reruns and
+the live Codex snapshot also uses. A config file is judged on its parsed structure: token-shaped material
+anywhere, a non-empty string or number under a recognized credential field, or a
+credential-named URL query parameter refuses it, while env-reference keys
+(`env_http_headers`, `env_vars`, `env_key`, `*_env_var`) are skipped. Other files
+are scanned for token material and literal credential-field assignments; a
+`$VAR` value is not a literal. Recognized fields are a fixed list
+(`_credential_field`), so a literal under another secret-sounding name, such as
+`GITHUB_TOKEN`, is refused by the shared detector only when the value looks like
+a token. `load_profile` reruns this detector on stored profiles, so it must never
+become stricter than what earlier profiles passed. Capture of a Codex profile,
+and the assets a derivation adds, additionally run the live snapshot's Codex
+check (`reject_codex_config_secrets`, described below) on each selected config;
+`load_profile` does not rerun it, so it may grow stricter.
+
+The live Codex snapshot screens by file kind with functions that
+`load_profile` never runs, so they may differ from the shared detector.
+`config.toml` and `hooks.json` use `credential_in_live_config`: the shared
+config check, except that token material inside a TOML table or key name is
+ignored, plus the Codex check: literal Codex token fields
+(`experimental_bearer_token`, `bearer_token`, token-named `http_headers`
+entries), a literal under a key whose last word is secret-like (`TOKEN`,
+`SECRET`, `PASSWORD`, `KEY`, `AUTH`, `PAT`, …) in any `env` table or
+`shell_environment_policy.set` unless it starts with `$`, and any string that
+is a URL with a password. Files under `hooks` and `rules` use the shared text
+check and `sensitive_path`. Prose under `skills`, `prompts` and `AGENTS.md`
+uses `credential_in_prose`, which matches only realistic key lengths
+(`PROSE_KEY_PATTERN`), and `credential_file` for file names; a directory with a
+credential file name refuses the snapshot. `.git` directories in every entry,
+and dependency and cache directories (`node_modules`, `.venv`, `venv`,
+`__pycache__`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `.tox`) under
+`skills` and `prompts`, are skipped by the walk, so they are neither copied nor
+hashed. A nested link is checked again at its resolved target: a target, or
+anything inside a linked directory, under `SECRET_DIRECTORIES` (`.ssh`, `.aws`,
+`.gnupg`, `.config/gcloud`, `.docker`, `.kube`), with a credential file name or
+named exactly like a `SENSITIVE_PARTS` entry refuses the snapshot. The walk
+itself lives in `tree_copy`, which takes the screen, admission and link-target
+checks as a policy; `live_config` keeps the layouts and policies.
 
 Environment credentials are explicit name references, never values. Codex may
 also declare an opaque deferred file recipe:
@@ -271,13 +341,24 @@ also declare an opaque deferred file recipe:
 }
 ```
 
+An optional `"default_source": "codex-home"` gives the reference a default; it
+is omitted from the payload when absent, so older references keep their IDs.
+
 Put this entry in `recipe.runtime_files`. Neither capture, preflight nor
 materialization reads that variable or its file, copies credentials, creates the
 link, or validates login availability. A later driver must explicitly bind it
-immediately before launch. The source-path variable is not implicitly exposed to
-the subject. Codex token refresh can write through the link to its source; this
-is not a read-only credential mount. The caller must preserve that acknowledgement
-and record binding/cleanup ownership.
+immediately before launch. The binding does not expose the source-path variable
+to the subject, though a live profile's inherited environment carries it when
+the operator set it. A reference with `default_source: "codex-home"`
+(`profile_models.codex_auth_reference`, which `bench` uses) has a default
+whatever its variable is named: when the variable is unset, the binding uses
+`auth.json` under the Codex home that `live_config.live_source` resolves
+(`$CODEX_HOME`, else `~/.codex`), and a `~/` value expands against the inherited
+`HOME`. A relative or `~user/` value and a missing file are refused at binding
+time, before the subject starts. References without it, including every one
+from `--auth-file-env`, have no default and their files are not checked. Codex token refresh can write through the link to its
+source; this is not a read-only credential mount. The caller must preserve that
+acknowledgement and record binding/cleanup ownership.
 
 A changed CODEX_HOME changes both file auth lookup and keyring identity.
 `CODEX_API_KEY` is for exec/review, not ordinary TUI authentication.

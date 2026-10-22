@@ -18,6 +18,10 @@ lock and persist attempt/launch identity before constructing a native session.
   new native events; `cursor()` is a persisted submission boundary. Codex logs
   normally appear beneath the owned `CODEX_HOME/sessions`; Claude logs beneath
   the owned `CLAUDE_CONFIG_DIR/projects`. Supply only the owned native log root.
+  Parent history copied into a forked Codex subagent rollout (records before
+  `subagent_history_start_ordinal`) is retained as raw evidence and still counts
+  toward the byte limit, but it is not parsed and does not count toward the
+  record or event limits.
 - `drivers.artifacts.ArtifactWriter(new_directory, max_bytes)` retains bounded
   JSON observations and raw native JSONL bytes with private file modes. Use a
   separate directory from the transport runtime. Artifacts are potentially
@@ -50,9 +54,10 @@ reaction; these bounds are not a native host security sandbox.
 `launch_environment(plan, inherited)` remains the profile-owned environment
 projection. Pass its result directly to `terminal.start`; the transport adds only
 its explicitly owned `TUI_TEST_HOME`. It preserves the exact `LaunchPlan.argv`
-and cwd, including an explicit shell launcher. No permission bypasses or silent
-HOME relocation are added. Materialization and driver readiness do not establish
-model authentication, full profile fidelity or successful task completion.
+and cwd, including an explicit shell launcher. It adds no permission bypass
+beyond what the plan's argv already holds, and no silent HOME relocation.
+Materialization and driver readiness do not establish model authentication, full
+profile fidelity or successful task completion.
 
 ## Delivery and native completion
 
@@ -101,7 +106,11 @@ event with matching normalized text and a started/completed lifecycle pair for
 the same root turn. Queued user events may precede their own `task_started`.
 Cancellation is distinct from completion. A completed assistant turn ending in
 `?` is surfaced as an ordinary question heuristic for the controller; semantic
-task completion belongs to the runner.
+task completion belongs to the runner. Codex has no background-task tracking:
+the driver takes `task_complete` as the end of the turn and does not wait for
+subagents the turn started, so a Codex `$code-review` step that spawns subagents
+can be observed as done early. The 0.162.1 rollouts seen so far keep compaction
+inside the turn.
 
 Claude is fixture-tested only. Human acceptance needs a UUID and excludes
 tool-result, meta and sidechain user records. Assistant events retain parent UUID
@@ -166,6 +175,17 @@ assistant text, rather than starting a new human turn. The bench launch check
 probes slash steps only when the caller says workflows are enabled, and types each
 offered workflow command name and full text, then clears it unsent.
 
+Codex receives a workflow slash step as the skill mention `$name args`
+(`dialogs.delivered_prompt` rewrites it), under the same `curated-native-command` policy (the conversation policy still rejects `$`).
+Codex has no command-menu check: Enter is sent only once the composer shows exactly
+the typed text, and acceptance expects a `UserMessage` whose text is the typed text.
+No recorded 0.162.1 `$` turn confirms that yet, and a skill-mention popup that takes
+Enter without changing the composer text would not be detected.
+The launch check types the `$name` form for Codex variants and clears it unsent,
+since submitting would start a paid review turn. It therefore cannot show that
+Enter submits the mention; the first real trial's review step is the first
+evidence.
+
 Native Codex logs omit approval, request-user-input and MCP elicitation dialogs.
 Pinned terminal anchors therefore distinguish `approval`, `structured_input` and
 `unsupported` observations; auth/trust/hooks/permission dialogs never become
@@ -174,6 +194,11 @@ policy; Codex `structured_input` and unrecognized dialogs can instead be answere
 through the screen seam below. Unknown UI or missing completion
 reaches a bounded visible blocker/timeout. Terminal exit code `0` means exited,
 never still running. Terminal readiness/silence is not model completion.
+
+Codex's startup trust screen is pinned to both its older anchor ("Do you trust
+the contents of this directory?") and 0.162.1's ("Trust this folder?", with
+"Trust and continue" / "Open restricted" options); both are `approval`
+observations the simulated user never answers.
 
 Claude 2.1.296 startup prompts ("Accessing workspace:" folder trust and "Allow
 external CLAUDE.md file imports?") render unnumbered `❯` option lists with an
@@ -361,14 +386,29 @@ cleanup and must be reconciled as interrupted by the runner.
 around the driver context. It binds only frozen runtime-file references, looks up
 only their named path variables, and creates the acknowledged `auth.json` symlink
 inside the owned config root. It never reads, copies, inventories or logs credential
-bytes. Source existence/login validity are intentionally unverified. The source
-path variable is not automatically exposed to the subject.
+bytes. Login validity is intentionally unverified. A missing variable is refused
+with its name. The binding does not add the source path variable to the
+subject's environment, though a live profile's inherited environment still
+carries it when the operator set it. A reference with `default_source: "codex-home"`, whatever its variable is
+named, resolves through `runtime_file_source(reference, inherited)`: the
+variable's value, or `auth.json` under the Codex home when it is unset. The
+Codex home comes from `filesystem.configured_directory`, the same rule
+`live_config.live_source` uses (`$CODEX_HOME`, else `~/.codex`). A leading `~/`
+expands against `HOME` from `inherited`, as Codex itself does; without `HOME`, a
+path that needs it is refused. A relative or `~user/` value and a path that does
+not exist are refused. `profile_models.codex_auth_reference()` builds bench's
+`CODEX_AUTH_FILE` (`codex_policy.CODEX_AUTH_VARIABLE`) reference with this
+default; setup's `--auth-file-env` references have none. `check_codex_auth`
+runs the same resolution as a pre-run check. Neither writes the default into
+`inherited` or `os.environ`.
 
 Exit removes only the symlink with the recorded filesystem identity. A replaced
 binding is preserved and reported as `runtime_binding_replaced`; do not delete
-unknown replacement content as cleanup. Codex may write through a binding during
-token refresh, as acknowledged in the frozen profile. Tests use only nonexistent
-or synthetic fixture paths. This task never bound the user's actual credentials.
+unknown replacement content as cleanup. `store compact` later removes every
+`auth.json` and `.credentials.json` left in the profile, replaced or not. Codex
+may write through a binding during token refresh, as acknowledged in the frozen
+profile. Tests use only nonexistent or synthetic fixture paths. This task never
+bound the user's actual credentials.
 
 ## Non-model transport smoke
 

@@ -13,6 +13,7 @@ from dryheave.controllers import CallContext, invoke_controller
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.errors import InputError
 from dryheave.models import CommandSpec
+from dryheave.profile_models import codex_auth_reference
 from dryheave.setup_helpers import runtime_references
 from test_controllers import request_for
 
@@ -45,6 +46,24 @@ def test_modern_codex_runtime_keeps_auth_links_out_of_evidence(tmp_path):
     assert bindings.close() == ()
     reconcile_runtimes(root.parent)
     assert not reference.exists()
+
+
+def test_codex_controller_binds_the_default_codex_auth_file(tmp_path):
+    recipe = codex_recipe(("codex",)).model_copy(
+        update={"runtime": ControllerRuntime(runtime_files=(codex_auth_reference(),))}
+    )
+    auth = tmp_path / "user/.codex/auth.json"
+    auth.parent.mkdir(parents=True)
+    auth.write_text("{}")
+    root = tmp_path / "role-runtime/call"
+    bindings = prepare_runtime(
+        recipe,
+        root,
+        {"HOME": str(tmp_path / "user")},
+        ArtifactWriter(tmp_path / "evidence", 100000),
+    )
+    assert (root / "config/auth.json").readlink() == auth
+    assert bindings.close() == ()
 
 
 def test_recovery_preserves_replaced_binding(tmp_path):

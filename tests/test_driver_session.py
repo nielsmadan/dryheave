@@ -315,6 +315,30 @@ def test_generated_reply_cannot_invoke_native_controls(tmp_path, driver_plan, te
     assert terminal.pastes == []
 
 
+def test_codex_skill_mention_is_typed_and_accepted_only_as_a_curated_native_command(
+    tmp_path, driver_plan
+):
+    session, terminal, source = build(tmp_path, driver_plan)
+    with session:
+        with pytest.raises(InputError, match="cannot invoke native commands or skills"):
+            session.prepare("$code-review --quick")
+        intent = session.prepare("$code-review --quick", policy="curated-native-command")
+        source.batches.extend(
+            [[], [metadata(driver_plan), *turn_events("$code-review --quick", final="Reviewed.")]]
+        )
+        result = session.deliver(intent)
+        assert (result.state, result.text, result.accepted_id) == (
+            "completed",
+            "Reviewed.",
+            "turn-user",
+        )
+        assert (terminal.pastes, terminal.enters, session.accepted_count) == (
+            ["$code-review --quick"],
+            1,
+            1,
+        )
+
+
 def test_subject_exit_zero_without_completion_is_not_success(tmp_path, driver_plan):
     terminal = FakeTerminal([Screen(text="Goodbye", exited=0)])
     session = DriverSession(

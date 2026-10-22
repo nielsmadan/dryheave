@@ -1,7 +1,7 @@
 import re
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, get_args
 
 from pydantic import (
     AfterValidator,
@@ -76,6 +76,10 @@ class AgentKind(StrEnum):
     CLAUDE = "claude"
     CODEX = "codex"
     DROID = "droid"
+
+
+Effort = Literal["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+EFFORTS: tuple[str, ...] = get_args(Effort)
 
 
 class TrialStage(StrEnum):

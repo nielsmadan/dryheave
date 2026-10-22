@@ -52,6 +52,14 @@ class WorkflowEvent(StrictModel):
     failed_criteria: tuple[Name, ...] = ()
     call_ids: tuple[Name, ...] = ()
     seconds: float | None = Field(default=None, ge=0)
+    delivered_text: str | None = Field(default=None, min_length=1, max_length=32000)
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.delivered_text is None:
+            value.pop("delivered_text", None)
+        return value
 
 
 class WorkflowProgress(StrictModel):

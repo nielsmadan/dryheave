@@ -1,3 +1,4 @@
+import os
 import re
 import shutil
 import sys
@@ -9,11 +10,20 @@ import pytest
 
 from dryheave.drivers.models import Screen
 from dryheave.experiment_models import ExperimentDraft
+from dryheave.host import HostContext
 from dryheave.models import AgentKind, StrictModel
-from dryheave.profile_models import AssetSelection, CaptureLimits, CaptureSpec, NativeRecipe
+from dryheave.profile_models import (
+    AssetSelection,
+    CaptureLimits,
+    CaptureSpec,
+    LiveConfigManifest,
+    NativeRecipe,
+)
 from dryheave.profiles import capture_profile
 from dryheave.runner_models import RunSummary
 from dryheave.storage import ObjectStore
+
+HOST = HostContext(os.environ, Path.home())
 
 
 class ExamplePayload(StrictModel):
@@ -66,6 +76,84 @@ def capture_profile_fixture(
             assets=assets,
             limits=limits or CaptureLimits(),
         ),
+    )
+
+
+CODEX_CONFIG = """
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+approvals_reviewer = "auto_review"
+
+[plugins."nono@nolabs-ai"]
+enabled = true
+
+[plugins."off@nolabs-ai"]
+enabled = false
+
+[mcp_servers.jina]
+url = "https://example.invalid/mcp"
+
+[mcp_servers.context7]
+command = "npx"
+
+[marketplaces.local]
+source = "/opt/marketplace"
+
+[projects."/elsewhere"]
+trust_level = "trusted"
+"""
+CODEX_EXCLUDED = (
+    "auth.json",
+    "sessions/2026/10/16/rollout.jsonl",
+    "archived_sessions/rollout.jsonl",
+    "memories/note.md",
+    "history.jsonl",
+    "state_5.sqlite",
+    "state_5.sqlite-wal",
+    "log/codex-tui.log",
+    "cache/models.json",
+    "tmp/scratch",
+    ".tmp/scratch",
+    "shell_snapshots/zsh.sh",
+    "generated_images/image.png",
+    "plugins/cache/nono/plugin.json",
+    "version.json",
+)
+
+
+def live_codex_home(root: Path) -> Path:
+    home = root / "codex"
+    files = {
+        "config.toml": CODEX_CONFIG,
+        "AGENTS.md": "Be brief.",
+        "skills/review/SKILL.md": "Review carefully.",
+        "rules/default.rules": "prefix_rule()",
+        "prompts/plan.md": "Plan first.",
+        "hooks/stop.sh": "exit 0",
+        "hooks.json": '{"hooks": {"Stop": [], "SessionStart": []}}',
+    } | dict.fromkeys(CODEX_EXCLUDED, "synthetic")
+    for name, content in files.items():
+        (home / name).parent.mkdir(parents=True, exist_ok=True)
+        (home / name).write_text(content)
+    return home
+
+
+def codex_manifest(*skills: str) -> LiveConfigManifest:
+    return LiveConfigManifest(
+        source="/codex",
+        entries=("skills",),
+        files=len(skills),
+        bytes=len(skills),
+        tree_sha256="a" * 64,
+        settings_sha256=None,
+        instructions_sha256=None,
+        skills=skills,
+        enabled_plugins=(),
+        mcp_servers=(),
+        hook_events=(),
+        agent=AgentKind.CODEX,
     )
 
 
@@ -337,6 +425,7 @@ def build_assessed(store, graded_benchmark) -> RunSummary:
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     assess_run(store, summary.run_id)
     return summary
@@ -387,7 +476,10 @@ def build_hostile_run(store, graded_benchmark) -> tuple[str, str]:
         }
     )
     summary = run_experiment(
-        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     assess_run(store, summary.run_id)
     return summary.run_id, summary.attempts[0].attempt_id

@@ -7,6 +7,7 @@ from contextlib import contextmanager, suppress
 import psutil
 import pytest
 
+from conftest import HOST
 from dryheave.assessments import assess_run
 from dryheave.cases import load_frozen_case
 from dryheave.drivers.models import CleanupReport, LaunchObservation, ProcessIdentity
@@ -119,7 +120,7 @@ def test_corrupt_inputs_do_not_prevent_recorded_writer_cleanup(
         )
         if operation == "resume":
             with pytest.raises(DryheaveError):
-                run_experiment(store, resume=run_id)
+                run_experiment(store, resume=run_id, host=HOST)
             writer.wait(timeout=3)
             assert not _alive(identity)
             status = run_status(store, run_id)
@@ -153,14 +154,19 @@ def test_new_run_reconciles_older_recorded_writer_before_execution(
             execution = ExecutionJournal(journal)
             _record_subject(execution, attempt_id, identity)
 
-        def verify_stopped(execution, inherited):
+        def verify_stopped(execution, inherited, manifests):
             assert not _alive(identity)
             old = RunStore(store.root).inspect(old_run)
             assert any(event.event == "ownership-reconciled" for event in old.events)
-            return execute(execution, inherited)
+            return execute(execution, inherited, manifests)
 
         monkeypatch.setattr(TrialExecution, "execute", verify_stopped)
-        result = run_experiment(store, experiment_id, options=RunOptions(mode="offline-fixture"))
+        result = run_experiment(
+            store,
+            experiment_id,
+            options=RunOptions(mode="offline-fixture"),
+            host=HOST,
+        )
         writer.wait(timeout=3)
         assert len(result.attempts) == 1
         assert result.attempts[0].capture_id
@@ -176,7 +182,12 @@ def test_other_run_lock_contention_refuses_launch_without_deadlock(store, benchm
     )
     started = time.monotonic()
     with RunStore(store.root).open(older), pytest.raises(LockBusyError):
-        run_experiment(store, experiment_id, options=RunOptions(mode="offline-fixture"))
+        run_experiment(
+            store,
+            experiment_id,
+            options=RunOptions(mode="offline-fixture"),
+            host=HOST,
+        )
     assert time.monotonic() - started < 2
     assert run_status(store, older).attempts[0].stage == TrialStage.PREPARING
 
@@ -195,7 +206,12 @@ def test_other_unknown_native_launch_remains_a_blocker(store, benchmark, monkeyp
         lambda *_args: pytest.fail("Unknown launch ownership must remain blocked."),
     )
     with pytest.raises(InputError, match="reconciliation before another subject launch"):
-        run_experiment(store, experiment_id, options=RunOptions(mode="offline-fixture"))
+        run_experiment(
+            store,
+            experiment_id,
+            options=RunOptions(mode="offline-fixture"),
+            host=HOST,
+        )
     journal = RunStore(store.root).inspect(older)
     cleanup = ExecutionJournal(journal).cleanup_reports[attempt_id]
     assert cleanup.errors == ("launch_ownership_unobserved",)
@@ -309,7 +325,7 @@ def test_setup_descendant_is_durable_before_cleanup_and_survives_parent_exit(
         process.send_signal(signal.SIGKILL)
         process.communicate(timeout=3)
         assert process.returncode == -signal.SIGKILL
-        result = run_experiment(store, resume=run_id)
+        result = run_experiment(store, resume=run_id, host=HOST)
         assert result.attempts[0].capture_id
         assert not _alive(child_identity)
         assert result.attempts[0].stop_reason == "interrupted"

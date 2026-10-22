@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from conftest import HOST
 from dryheave.assessments import assess_run, review_assessment
 from dryheave.drivers.models import NativeEvent
 from dryheave.errors import IntegrityError
@@ -75,6 +76,7 @@ def test_suspicion_review_retains_original_finding_and_cannot_override_corruptio
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     original_id = assess_run(store, summary.run_id)[0]
     original = load_assessment(store, original_id)

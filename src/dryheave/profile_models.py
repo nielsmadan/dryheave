@@ -13,6 +13,12 @@ from pydantic import (
 )
 
 from dryheave.claude_policy import validate_effort
+from dryheave.codex_policy import (
+    CODEX_AUTH_VARIABLE,
+    CODEX_PROFILE_VERSION_TEXT,
+    CODEX_PROFILE_VERSIONS,
+    validate_codex_effort,
+)
 from dryheave.models import (
     AgentKind,
     EnvironmentReference,
@@ -63,6 +69,27 @@ class RuntimeFileReference(StrictModel):
     target: Literal["auth.json"] = "auth.json"
     binding: Literal["symlink"] = "symlink"
     acknowledge_source_writes: Literal[True]
+    default_source: Literal["codex-home"] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.default_source is None:
+            value.pop("default_source", None)
+        return value
+
+
+def codex_auth_reference(
+    variable: str = CODEX_AUTH_VARIABLE,
+    *,
+    default_source: Literal["codex-home"] | None = "codex-home",
+) -> RuntimeFileReference:
+    return RuntimeFileReference(
+        name="codex-auth",
+        source_path_environment=EnvironmentReference(name=variable),
+        acknowledge_source_writes=True,
+        default_source=default_source,
+    )
 
 
 class NativeRecipe(StrictModel):
@@ -89,6 +116,10 @@ class NativeRecipe(StrictModel):
     config_source: Literal["selected", "live"] = "selected"
     removed_mcp_servers: tuple[Text, ...] = ()
 
+    @property
+    def live_codex(self) -> bool:
+        return self.agent == AgentKind.CODEX and self.config_source == "live"
+
     @model_serializer(mode="wrap")
     def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         value: dict[str, object] = handler(self)
@@ -104,9 +135,16 @@ class NativeRecipe(StrictModel):
     @model_validator(mode="after")
     def live_contract(self) -> Self:
         if self.config_source == "live":
-            if self.agent != AgentKind.CLAUDE or self.claude_discovery is not None:
-                raise ValueError("Live config snapshots are supported only for Claude")
-            validate_effort(self.model, self.effort)
+            if self.claude_discovery is not None or self.codex_discovery is not None:
+                raise ValueError("Live config snapshots exclude selected discovery policies")
+            if self.agent == AgentKind.CODEX:
+                validate_codex_effort(self.effort)
+                if self.removed_mcp_servers:
+                    raise ValueError("MCP server removal applies only to live Claude configs")
+            elif self.agent == AgentKind.CLAUDE:
+                validate_effort(self.model, self.effort)
+            else:
+                raise ValueError("Live config snapshots are supported only for Claude and Codex")
         elif self.removed_mcp_servers:
             raise ValueError("MCP server removal applies only to live config snapshots")
         if len(set(self.removed_mcp_servers)) != len(self.removed_mcp_servers):
@@ -132,9 +170,11 @@ class NativeRecipe(StrictModel):
                     "Claude selected policy requires the OAuth token reference without alternate provider or API-billing references"
                 )
         if self.codex_discovery is not None and (
-            self.agent != AgentKind.CODEX or self.version != "0.154.0"
+            self.agent != AgentKind.CODEX or self.version not in CODEX_PROFILE_VERSIONS
         ):
-            raise ValueError("explicit Codex discovery policy requires version 0.154.0")
+            raise ValueError(
+                "explicit Codex discovery policy requires version " + CODEX_PROFILE_VERSION_TEXT
+            )
         if (
             self.agent != AgentKind.CODEX
             and self.config_source != "live"
@@ -245,6 +285,17 @@ class LiveConfigManifest(StrictModel):
     enabled_plugins: tuple[Text, ...]
     mcp_servers: tuple[Text, ...]
     hook_events: tuple[Text, ...]
+    agent: AgentKind = AgentKind.CLAUDE
+    state_sha256: ObjectId | None = None
+
+    @model_serializer(mode="wrap")
+    def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.agent == AgentKind.CLAUDE:
+            value.pop("agent", None)
+        if self.state_sha256 is None:
+            value.pop("state_sha256", None)
+        return value
 
 
 class DiscoveryRoot(StrictModel):

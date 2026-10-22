@@ -1,14 +1,26 @@
 import json
 import os
 import shutil
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from dryheave.codex_policy import (
+    CODEX_VERIFIED_VERSION,
+    Bypass,
+    argument_bypasses,
+    config_bypasses,
+)
 from dryheave.errors import InputError, PathError
 from dryheave.filesystem import atomic_write, ensure_directory, read_bytes
-from dryheave.live_config import materialize_live_config
+from dryheave.live_config import (
+    MAX_JSON_BYTES,
+    live_layout,
+    materialize_live_config,
+    snapshot_directory,
+)
 from dryheave.models import AgentKind, CommandSpec, EnvironmentReference
 from dryheave.native_version import parse_version
 from dryheave.processes import run_command
@@ -17,6 +29,7 @@ from dryheave.profile_models import (
     ExecutableResolution,
     FrozenProfile,
     LaunchPlan,
+    LiveConfigManifest,
     NativeRecipe,
     OverlayMapping,
     ProfileIssue,
@@ -32,6 +45,7 @@ NESTED_SESSION = {
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_SSE_PORT",
 }
+CLAUDE_CREDENTIALS = {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
 
 
 def _issue(code: str, message: str) -> ProfileIssue:
@@ -52,7 +66,7 @@ def _environment(
 ) -> tuple[dict[str, str], tuple[EnvironmentReference, ...]]:
     runtime = Path(roots["runtime"])
     generated = {
-        "CODEX_HOME" if recipe.agent == AgentKind.CODEX else "CLAUDE_CONFIG_DIR": roots["config"],
+        live_layout(recipe.agent).variable: roots["config"],
         "TMPDIR": str(runtime / "tmp"),
     }
     names = set(BASE_ENVIRONMENT) | {item.name for item in recipe.environment}
@@ -109,17 +123,23 @@ def _codex_args(profile: FrozenProfile, roots: dict[str, str]) -> list[str]:
         arguments.extend(
             ("--config", "model_reasoning_effort=" + json.dumps(recipe.effort, ensure_ascii=False))
         )
-    rules = [
-        "{name=" + json.dumps(name, ensure_ascii=False) + ",enabled=false}"
-        for name in recipe.disabled_skill_names
-    ]
-    for path in _disabled_paths(profile, roots):
-        if not Path(path).is_absolute():
-            raise InputError("Disabled skill paths must name absolute SKILL.md paths.")
-        rules.append("{path=" + json.dumps(path, ensure_ascii=False) + ",enabled=false}")
+    rules = _codex_skill_rules(profile, roots)
     if rules:
         arguments.extend(("--config", "skills.config=[" + ",".join(rules) + "]"))
     return arguments
+
+
+def _codex_skill_rules(profile: FrozenProfile, roots: dict[str, str]) -> list[str]:
+    paths = _disabled_paths(profile, roots)
+    if any(not Path(path).is_absolute() for path in paths):
+        raise InputError("Disabled skill paths must name absolute SKILL.md paths.")
+    return [
+        *(
+            "{name=" + json.dumps(name, ensure_ascii=False) + ",enabled=false}"
+            for name in profile.recipe.disabled_skill_names
+        ),
+        *("{path=" + json.dumps(path, ensure_ascii=False) + ",enabled=false}" for path in paths),
+    ]
 
 
 def _claude_args(profile: FrozenProfile, roots: dict[str, str]) -> tuple[list[str], dict[str, str]]:
@@ -221,8 +241,19 @@ def _overlays(profile: FrozenProfile, roots: dict[str, str]) -> tuple[OverlayMap
 def _discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[DiscoveryRoot]:
     recipe = profile.recipe
     config, home, project = (Path(roots[name]) for name in ("config", "home", "project"))
-    native = ".codex" if recipe.agent == AgentKind.CODEX else ".claude"
-    instruction = "AGENTS.md" if recipe.agent == AgentKind.CODEX else "CLAUDE.md"
+    layout = live_layout(recipe.agent)
+    if recipe.codex_discovery == "disabled-plugins":
+        plugin_mechanism = (
+            "Codex --disable plugins disables configured plugins and startup sync; "
+            f"verified against the {CODEX_VERIFIED_VERSION} source only."
+        )
+    elif recipe.live_codex:
+        plugin_mechanism = (
+            "Live snapshot does not copy plugins/; Codex resolves and syncs them from "
+            "config.toml at startup, unverified."
+        )
+    else:
+        plugin_mechanism = "Selected plugin bytes are frozen; activation, fetched components and integration availability require native verification."
     found = [
         DiscoveryRoot(
             kind="config",
@@ -232,7 +263,7 @@ def _discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[DiscoveryR
         ),
         DiscoveryRoot(
             kind="instruction",
-            path=str(config / instruction),
+            path=str(config / layout.instructions),
             status="frozen",
             mechanism="Separate global instruction layer in fresh native config root.",
         ),
@@ -250,7 +281,7 @@ def _discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[DiscoveryR
         ),
         DiscoveryRoot(
             kind="skill",
-            path=str(project / native / "skills"),
+            path=str(project / layout.directory / "skills"),
             status="historical",
             mechanism="Native project skill discovery uses the materialized repository.",
         ),
@@ -258,9 +289,7 @@ def _discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[DiscoveryR
             kind="plugin",
             path=str(config / "plugins"),
             status="disabled" if recipe.codex_discovery == "disabled-plugins" else "unverified",
-            mechanism="Codex 0.154.0 --disable plugins disables configured plugins and startup sync."
-            if recipe.codex_discovery == "disabled-plugins"
-            else "Selected plugin bytes are frozen; activation, fetched components and integration availability require native verification.",
+            mechanism=plugin_mechanism,
         ),
     ]
     if recipe.agent == AgentKind.CODEX:
@@ -276,7 +305,7 @@ def _discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[DiscoveryR
                 ),
                 DiscoveryRoot(
                     kind="skill",
-                    path=str(home / ".claude" / "skills"),
+                    path=str(home / layout.directory / "skills"),
                     status="unverified" if recipe.home_policy == "native" else "disabled",
                     mechanism="CLAUDE_CONFIG_DIR redirects documented user resources to the fresh root; alternate home and managed sources require native-version validation.",
                 ),
@@ -294,17 +323,21 @@ def _discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[DiscoveryR
                 ),
             ]
         )
-    return _live_discovery(found) if recipe.config_source == "live" else found
+    return _live_discovery(found, recipe.agent) if recipe.config_source == "live" else found
 
 
-def _live_discovery(found: list[DiscoveryRoot]) -> list[DiscoveryRoot]:
+def _live_discovery(found: list[DiscoveryRoot], agent: AgentKind) -> list[DiscoveryRoot]:
+    generated = (
+        "; workspace trust is a session override."
+        if agent == AgentKind.CODEX
+        else ", with generated workspace trust and MCP removals."
+    )
+    mechanism = (
+        "Per-attempt copy of the run's snapshot of the operator's live "
+        f"{live_layout(agent).label} config{generated}"
+    )
     return [
-        root.model_copy(
-            update={
-                "status": "generated",
-                "mechanism": "Per-attempt copy of the run's snapshot of the operator's live Claude config, with generated workspace trust and MCP removals.",
-            }
-        )
+        root.model_copy(update={"status": "generated", "mechanism": mechanism})
         if root.status == "frozen"
         else root
         for root in found
@@ -331,7 +364,8 @@ def _codex_discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[Disc
             kind="skill",
             path=str(config / "skills/.system"),
             status="disabled" if recipe.codex_discovery is not None else "unverified",
-            mechanism="Codex 0.154.0 skills.bundled.enabled=false disables bundled skills."
+            mechanism="Codex skills.bundled.enabled=false disables bundled skills; verified "
+            f"against the {CODEX_VERIFIED_VERSION} source only."
             if recipe.codex_discovery is not None
             else "Bundled system skills depend on the native executable and can be installed by the harness.",
         ),
@@ -369,8 +403,80 @@ def _codex_discovery(profile: FrozenProfile, roots: dict[str, str]) -> list[Disc
     return found
 
 
+def _live_issues(profile: FrozenProfile, roots: dict[str, str]) -> list[ProfileIssue]:
+    if profile.recipe.config_source != "live":
+        return []
+    label = live_layout(profile.recipe.agent).label
+    issues = [
+        _issue(
+            "live-config",
+            f"Subject runs with a snapshot of the operator's live {label} config and inherited environment; its hooks, plugins and MCP servers act on the host.",
+        )
+    ]
+    if profile.recipe.live_codex and _codex_skill_rules(profile, roots):
+        issues.append(
+            _issue(
+                "codex-skills-config-override",
+                "The generated --config skills.config=[...] override replaces the live "
+                "config.toml [[skills.config]] array rather than merging into it; any skills "
+                "the operator disabled there are re-enabled for this subject.",
+            )
+        )
+    return issues
+
+
+def _bypass_issues(
+    recipe: NativeRecipe, found: frozenset[Bypass], source: str
+) -> list[ProfileIssue]:
+    trusted = (
+        " The workspace is trusted, so the case repository's own Codex config, hooks and exec policies also load without a sandbox."
+        if recipe.workspace_trust == "trusted"
+        else ""
+    )
+    issues = {
+        "sandbox": _issue(
+            "codex-sandbox-disabled",
+            f"{source} run Codex with the danger-full-access sandbox; the subject can read and write anywhere the operator can, including the run directory and the bound auth.json source."
+            + trusted,
+        ),
+        "approvals": _issue(
+            "codex-approvals-disabled",
+            f"{source} run Codex without approval prompts; the subject runs commands without asking first.",
+        ),
+    }
+    return [issue for name, issue in issues.items() if name in found]
+
+
+def _codex_config(path: Path) -> dict[str, object]:
+    try:
+        content = read_bytes(path, limit=MAX_JSON_BYTES)
+    except FileNotFoundError:
+        return {}
+    try:
+        return tomllib.loads(content.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise InputError(f"Live Codex config file is not valid TOML: {path}") from error
+
+
+def _with_config_bypasses(
+    plan: LaunchPlan, recipe: NativeRecipe, config: dict[str, object]
+) -> LaunchPlan:
+    present = {item.code for item in plan.issues}
+    added = [
+        issue
+        for issue in _bypass_issues(
+            recipe, config_bypasses(config), "The live config snapshot's config.toml settings"
+        )
+        if issue.code not in present
+    ]
+    return plan.model_copy(update={"issues": (*plan.issues, *added)}) if added else plan
+
+
 def _launch_issues(
-    profile: FrozenProfile, resolution: ExecutableResolution, discovery: list[DiscoveryRoot]
+    profile: FrozenProfile,
+    resolution: ExecutableResolution,
+    discovery: list[DiscoveryRoot],
+    roots: dict[str, str],
 ) -> list[ProfileIssue]:
     issues = list(profile.issues)
     if resolution.resolved is None:
@@ -397,13 +503,7 @@ def _launch_issues(
                     f"Unverified discovery source: {root.path}. {root.mechanism}",
                 )
             )
-    if profile.recipe.config_source == "live":
-        issues.append(
-            _issue(
-                "live-config",
-                "Subject runs with a snapshot of the operator's live Claude config and inherited environment; its hooks, plugins and MCP servers act on the host.",
-            )
-        )
+    issues.extend(_live_issues(profile, roots))
     issues.extend(
         [
             _issue(
@@ -422,10 +522,20 @@ def _launch_issues(
             ),
             _issue(
                 "permissions-unverified",
-                "Native trust, sandbox and approval prompts remain controlled by the selected configuration and host; no bypass flags are generated.",
+                "Sandbox and approval prompts follow the "
+                + ("live snapshot's" if profile.recipe.config_source == "live" else "selected")
+                + " configuration, the recipe's native arguments and the host; the launch adds no sandbox or approval flags of its own and generates workspace trust only when the recipe sets it.",
             ),
         ]
     )
+    if profile.recipe.agent == AgentKind.CODEX:
+        issues.extend(
+            _bypass_issues(
+                profile.recipe,
+                argument_bypasses(profile.recipe.arguments),
+                "The recipe's native arguments",
+            )
+        )
     if profile.recipe.home_policy == "isolated":
         issues.append(
             _issue(
@@ -476,7 +586,7 @@ def preflight_profile(
     generated, references = _environment(profile.recipe, roots)
     resolution = _resolution(profile.recipe, workspace, probe_version=probe_version)
     discovery = _discovery(profile, roots)
-    issues = _launch_issues(profile, resolution, discovery)
+    issues = _launch_issues(profile, resolution, discovery, roots)
     launcher = _resolve_executable(profile.recipe.launcher[0]) if profile.recipe.launcher else None
     if profile.recipe.launcher and launcher is None:
         issues.append(_issue("launcher-missing", "Explicit launcher executable is unavailable."))
@@ -523,10 +633,16 @@ def preflight_profile(
 
 
 @dataclass(frozen=True)
+class LiveSnapshots:
+    snapshot_root: Path
+    manifests: Mapping[AgentKind, LiveConfigManifest]
+
+
+@dataclass(frozen=True)
 class LaunchOptions:
     strict: bool = False
     probe_version: bool = False
-    live_config: Path | None = None
+    live: LiveSnapshots | None = None
 
 
 DEFAULT_LAUNCH = LaunchOptions()
@@ -557,15 +673,26 @@ def materialize_profile(
     if profile.recipe.home_policy == "isolated":
         ensure_directory(root / "home")
     if profile.recipe.config_source == "live":
-        if options.live_config is None:
-            raise InputError("Live config profiles launch only from a run's config snapshot.")
+        manifest = (
+            None if options.live is None else options.live.manifests.get(profile.recipe.agent)
+        )
+        if options.live is None or manifest is None:
+            raise InputError(
+                "Live config profiles launch only from a run's recorded config snapshot."
+            )
         materialize_live_config(
-            options.live_config,
+            options.live.snapshot_root / snapshot_directory(profile.recipe.agent),
             root / "config",
             Path(plan.cwd),
-            removed_mcp_servers=profile.recipe.removed_mcp_servers,
-            trusted=profile.recipe.workspace_trust == "trusted",
+            profile.recipe,
+            manifest,
         )
+        if profile.recipe.agent == AgentKind.CODEX:
+            plan = _with_config_bypasses(
+                plan,
+                profile.recipe,
+                _codex_config(root / "config" / live_layout(profile.recipe.agent).settings),
+            )
     for overlay in plan.overlays:
         if overlay.action in {"preserve", "identical"}:
             continue
@@ -595,8 +722,9 @@ def launch_environment(plan: LaunchPlan, inherited: Mapping[str, str]) -> dict[s
         raise InputError(
             "Required runtime environment references are unavailable: " + ", ".join(missing)
         )
+    excluded = NESTED_SESSION | (CLAUDE_CREDENTIALS if plan.agent == AgentKind.CODEX else set())
     values = (
-        {name: value for name, value in inherited.items() if name not in NESTED_SESSION}
+        {name: value for name, value in inherited.items() if name not in excluded}
         if plan.environment_policy == "inherited"
         else {
             item.name: inherited[item.name]

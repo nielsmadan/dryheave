@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import HOST
 from dryheave.assessments import assess_run
 from dryheave.controller_models import ControllerRecipe, RoleBudget
 from dryheave.errors import DryheaveError
@@ -49,6 +50,7 @@ def test_partial_judge_spend_across_attempts_uses_one_defensive_snapshot(
         store,
         create_experiment(store, benchmark.model_copy(update={"repetitions": 4})),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     with RunStore(store.root).open(summary.run_id) as journal:
         execution = ExecutionJournal(journal)
@@ -121,6 +123,7 @@ def test_currencyless_proven_zero_is_neutral_and_pending_spend_is_visible(
             store, graded_benchmark.model_copy(update={"simulator": recipe, "scoring": scoring})
         ),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     pending = report_run(store, summary.run_id)
     assert pending.groups[0].known_spend_by_currency == {"USD": 0.0002}
@@ -139,7 +142,12 @@ def test_compatible_comparison_retains_partial_attempt_attrition(
     from dryheave.fixture_subject import FixtureTerminal
 
     identifier = create_experiment(store, graded_benchmark.model_copy(update={"repetitions": 2}))
-    before = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    before = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     assess_run(store, before.run_id)
     cancelled = threading.Event()
     close = FixtureTerminal.close
@@ -151,7 +159,11 @@ def test_compatible_comparison_retains_partial_attempt_attrition(
 
     monkeypatch.setattr(FixtureTerminal, "close", stop_after_first)
     after = run_experiment(
-        store, identifier, options=RunOptions(mode="offline-fixture"), cancelled=cancelled
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        cancelled=cancelled,
+        host=HOST,
     )
     assert len(after.unstarted_trials) == 1
     assess_run(store, after.run_id)
@@ -169,6 +181,7 @@ def test_unstarted_variant_scheduling_remains_visible(store, graded_benchmark):
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
         cancelled=cancelled,
+        host=HOST,
     )
     report = report_run(store, summary.run_id)
     assert report.groups[0].scheduled_trials == 1
@@ -189,6 +202,7 @@ def test_latest_unassessed_retry_is_attrition_and_retains_earlier_spend(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     with RunStore(store.root).open(summary.run_id) as journal:
         execution = ExecutionJournal(journal)
@@ -206,7 +220,12 @@ def test_latest_unassessed_retry_is_attrition_and_retains_earlier_spend(
     assess_run(store, summary.run_id)
     earlier = export_bundle(store, summary.run_id, tmp_path / "before.tar").roots[0]
     store.set_alias("earlier-report", earlier)
-    retry = run_experiment(store, resume=summary.run_id, retry=(state.trial_id,))
+    retry = run_experiment(
+        store,
+        resume=summary.run_id,
+        retry=(state.trial_id,),
+        host=HOST,
+    )
     comparison = compare_runs(store, "earlier-report", summary.run_id)
     assert (comparison.before_input, comparison.after_input) == ("earlier-report", summary.run_id)
     assert (comparison.before_reference, comparison.after_reference) == (earlier, summary.run_id)
@@ -231,9 +250,19 @@ def test_latest_unassessed_retry_is_attrition_and_retains_earlier_spend(
 @pytest.mark.integration
 def test_completely_unassessed_matching_run_is_reported_as_attrition(store, graded_benchmark):
     identifier = create_experiment(store, graded_benchmark)
-    before = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    before = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     assess_run(store, before.run_id)
-    after = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    after = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     comparison = compare_runs(store, before.run_id, after.run_id)
     assert comparison.paired_count == 0
     assert (comparison.excluded_before, comparison.excluded_after) == (0, 1)
@@ -271,7 +300,10 @@ def test_saved_variant_comparison_records_real_failure_improvement_and_selected_
         }
     )
     summary = run_experiment(
-        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     variants = {item.trial_id: item.variant for item in report_run(store, summary.run_id).attempts}
     with RunStore(store.root).open(summary.run_id) as journal:

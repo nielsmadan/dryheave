@@ -98,6 +98,13 @@ reads auth files or inventories environment/config state. Choose an existing
 supported launcher, named inherited environment references, or an explicitly
 acknowledged opaque Codex auth-file symlink. Its source-path environment variable
 is looked up only at execution; Dryheave does not read/copy credential bytes.
+Only a reference with `default_source: "codex-home"` has a default; `bench`
+gives its `CODEX_AUTH_FILE` reference one. It binds `auth.json` under
+`$CODEX_HOME` or `~/.codex` (your own Codex login) when its variable is unset,
+and accepts a `~/` value. A relative or `~user/` value, or a file that does not
+exist, is refused at launch. References from `--auth-file-env` and
+`--simulator-auth-file-env` carry no default, whatever the variable is called:
+the variable must hold an absolute path, so they never fall back to your login.
 Normal token refresh can write through the link to its original source, so
 `acknowledge_source_writes: true` is mandatory in the frozen recipe. Cleanup
 removes only a binding whose recorded identity is still owned.

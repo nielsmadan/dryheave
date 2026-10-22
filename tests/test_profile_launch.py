@@ -425,6 +425,34 @@ def test_explicit_owned_workspace_trust_is_separate_from_native_permissions(stor
     assert plan.fidelity == "captured"
 
 
+def test_codex_discovery_mechanisms_name_the_version_they_were_verified_on(store, tmp_path):
+    identifier = capture_profile(
+        store,
+        CaptureSpec(
+            recipe=NativeRecipe(
+                agent=AgentKind.CODEX,
+                executable="codex",
+                version="0.162.1",
+                codex_discovery="disabled-plugins",
+            )
+        ),
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    plan = materialize_profile(store, identifier, tmp_path / "runtime", workspace)
+    mechanisms = {
+        Path(root.path).name: root.mechanism
+        for root in plan.discovery_roots
+        if Path(root.path).name in {"plugins", ".system"}
+    }
+    assert mechanisms == {
+        "plugins": "Codex --disable plugins disables configured plugins and startup sync; "
+        "verified against the 0.154.0 source only.",
+        ".system": "Codex skills.bundled.enabled=false disables bundled skills; verified "
+        "against the 0.154.0 source only.",
+    }
+
+
 @pytest.mark.parametrize("operation", ["replace", "remove"])
 def test_derived_skill_keeps_original_source_disabled_across_lineage(store, tmp_path, operation):
     from dryheave.profile_models import DeriveSpec
@@ -473,3 +501,188 @@ def test_derived_skill_keeps_original_source_disabled_across_lineage(store, tmp_
         assert str(frozen) not in disabled
     else:
         assert load_profile(store, later).assets == ()
+
+
+def test_live_codex_profile_launches_from_its_snapshot_with_bound_auth(store, tmp_path):
+    from conftest import live_codex_home
+    from dryheave.drivers.auth import RuntimeBindings
+    from dryheave.live_config import LiveSource, snapshot_live_config
+    from dryheave.profile_launch import LaunchOptions, LiveSnapshots
+    from dryheave.profile_models import RuntimeFileReference
+
+    snapshot = tmp_path / "live-config-codex"
+    manifest = snapshot_live_config(
+        LiveSource(AgentKind.CODEX, live_codex_home(tmp_path), None), snapshot
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    native = recipe(
+        model="gpt-5.6-terra",
+        effort="high",
+        config_source="live",
+        workspace_trust="trusted",
+        arguments=("--sandbox", "danger-full-access"),
+        runtime_files=(
+            RuntimeFileReference(
+                name="codex-auth",
+                source_path_environment=EnvironmentReference(name="CODEX_AUTH_FILE"),
+                acknowledge_source_writes=True,
+            ),
+        ),
+    )
+    identifier = capture_profile(store, CaptureSpec(recipe=native))
+    plan = materialize_profile(
+        store,
+        identifier,
+        tmp_path / "runtime",
+        workspace,
+        LaunchOptions(live=LiveSnapshots(tmp_path, {AgentKind.CODEX: manifest})),
+    )
+    assert plan.argv[1:-1] == (
+        "--sandbox",
+        "danger-full-access",
+        "--config",
+        "projects={" + json.dumps(str(workspace)) + '={trust_level="trusted"}}',
+        "--model",
+        "gpt-5.6-terra",
+        "--config",
+        'model_reasoning_effort="high"',
+        "--config",
+    )
+    assert plan.argv[-1].startswith('skills.config=[{name="dryheave-collect",enabled=false}')
+    assert plan.environment_policy == "inherited"
+    issues = {item.code: item.message for item in plan.issues}
+    assert {"live-config", "codex-skills-config-override", "codex-sandbox-disabled"} <= set(issues)
+    assert issues["codex-sandbox-disabled"].startswith(
+        "The recipe's native arguments run Codex with the danger-full-access sandbox;"
+    )
+    assert issues["codex-sandbox-disabled"].endswith(
+        "The workspace is trusted, so the case repository's own Codex config, hooks and exec "
+        "policies also load without a sandbox."
+    )
+    assert issues["permissions-unverified"] == (
+        "Sandbox and approval prompts follow the live snapshot's configuration, the recipe's "
+        "native arguments and the host; the launch adds no sandbox or approval flags of its "
+        "own and generates workspace trust only when the recipe sets it."
+    )
+    plugins = next(root for root in plan.discovery_roots if root.path.endswith("config/plugins"))
+    assert plugins.status == "unverified"
+    assert "Live snapshot does not copy plugins/" in plugins.mechanism
+    config = tmp_path / "runtime/config"
+    assert plan.generated_environment["CODEX_HOME"] == str(config)
+    assert (config / "AGENTS.md").read_text() == "Be brief."
+    auth = tmp_path / "auth.json"
+    auth.write_text("{}")
+    with RuntimeBindings(plan, {"CODEX_AUTH_FILE": str(auth)}):
+        assert (config / "auth.json").readlink() == auth
+    environment = launch_environment(
+        plan,
+        {
+            "CLAUDE_CODE_OAUTH_TOKEN": "t",
+            "ANTHROPIC_API_KEY": "k",
+            "ANTHROPIC_AUTH_TOKEN": "a",
+            "OPENAI_BASE_URL": "https://example.invalid",
+        },
+    )
+    assert environment == {
+        "OPENAI_BASE_URL": "https://example.invalid",
+        **plan.generated_environment,
+    }
+
+
+BYPASS_CODES = {"codex-sandbox-disabled", "codex-approvals-disabled"}
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (("--dangerously-bypass-approvals-and-sandbox",), BYPASS_CODES),
+        (("--yolo",), BYPASS_CODES),
+        (("-s", "danger-full-access"), {"codex-sandbox-disabled"}),
+        (("-a", "never"), {"codex-approvals-disabled"}),
+        (("--ask-for-approval=never",), {"codex-approvals-disabled"}),
+        (("-c", 'approval_policy="never"'), {"codex-approvals-disabled"}),
+        (("-a", "on-request", "--sandbox", "workspace-write"), set()),
+    ],
+)
+def test_codex_bypass_arguments_raise_sandbox_and_approval_issues(
+    store, tmp_path, arguments, expected
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    identifier = capture_profile(store, CaptureSpec(recipe=recipe(arguments=arguments)))
+    plan = preflight_profile(store, identifier, tmp_path / "runtime", workspace)
+    issues = {item.code: item.message for item in plan.issues}
+    assert set(issues) & BYPASS_CODES == expected
+    if "codex-approvals-disabled" in expected:
+        assert issues["codex-approvals-disabled"] == (
+            "The recipe's native arguments run Codex without approval prompts; the subject "
+            "runs commands without asking first."
+        )
+
+
+def test_live_codex_config_that_disables_the_sandbox_and_approvals_is_flagged(store, tmp_path):
+    from conftest import live_codex_home
+    from dryheave.live_config import LiveSource, snapshot_live_config
+    from dryheave.profile_launch import LaunchOptions, LiveSnapshots
+
+    home = live_codex_home(tmp_path)
+    config = home / "config.toml"
+    config.write_text(
+        config.read_text()
+        .replace('approval_policy = "on-request"', 'approval_policy = "never"')
+        .replace('sandbox_mode = "workspace-write"', 'sandbox_mode = "danger-full-access"')
+    )
+    manifest = snapshot_live_config(
+        LiveSource(AgentKind.CODEX, home, None), tmp_path / "live-config-codex"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    identifier = capture_profile(
+        store, CaptureSpec(recipe=recipe(config_source="live", workspace_trust="trusted"))
+    )
+    plan = materialize_profile(
+        store,
+        identifier,
+        tmp_path / "runtime",
+        workspace,
+        LaunchOptions(live=LiveSnapshots(tmp_path, {AgentKind.CODEX: manifest})),
+    )
+    issues = {item.code: item.message for item in plan.issues}
+    assert issues["codex-sandbox-disabled"].startswith(
+        "The live config snapshot's config.toml settings run Codex with the "
+        "danger-full-access sandbox;"
+    )
+    assert issues["codex-approvals-disabled"].startswith(
+        "The live config snapshot's config.toml settings run Codex without approval prompts;"
+    )
+    recorded = json.loads((tmp_path / "runtime/launch-plan.json").read_text())
+    assert {item["code"] for item in recorded["issues"]} >= BYPASS_CODES
+
+
+def test_live_profile_refuses_a_snapshot_of_another_agent(store, tmp_path):
+    from conftest import live_codex_home
+    from dryheave.live_config import LiveSource, snapshot_live_config
+    from dryheave.profile_launch import LaunchOptions, LiveSnapshots
+
+    snapshot = tmp_path / "live-config"
+    manifest = snapshot_live_config(
+        LiveSource(AgentKind.CODEX, live_codex_home(tmp_path), None), snapshot
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    native = NativeRecipe(
+        agent=AgentKind.CLAUDE,
+        executable=sys.executable,
+        config_source="live",
+        environment=(EnvironmentReference(name="CLAUDE_CODE_OAUTH_TOKEN"),),
+    )
+    identifier = capture_profile(store, CaptureSpec(recipe=native))
+    with pytest.raises(InputError, match="snapshot is for codex"):
+        materialize_profile(
+            store,
+            identifier,
+            tmp_path / "runtime",
+            workspace,
+            LaunchOptions(live=LiveSnapshots(tmp_path, {AgentKind.CLAUDE: manifest})),
+        )

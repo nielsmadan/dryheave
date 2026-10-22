@@ -1,9 +1,11 @@
 import json
 import os
+import shutil
 import time
 
 import pytest
 
+from conftest import HOST
 from dryheave.assessments import assess_run, regrade_run
 from dryheave.cli import main
 from dryheave.compaction import WORKING_DIRECTORIES, compact_run, prune_checks
@@ -18,7 +20,10 @@ from dryheave.viewer import ViewerService
 
 def offline_run(store, benchmark):
     return run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     ).run_id
 
 
@@ -35,13 +40,37 @@ def test_compaction_removes_working_copies_and_keeps_results_viewable_and_regrad
     before = report_run(store, run_id)
     (root,) = attempt_roots(store, run_id)
     assert (root / "workspace").is_dir()
+    session_log = root / "profile" / "config" / "projects" / "a-project" / "session.jsonl"
+    session_log.parent.mkdir(parents=True)
+    session_log.write_text("{}\n")
+    pruned = [
+        root / "profile" / "config" / "plugins",
+        root / "profile" / "config" / "skills",
+        root / "profile" / "home" / "x" / "cache",
+    ]
+    for path in (pruned[0] / "demo" / "plugin.json", pruned[1] / "review" / "SKILL.md"):
+        path.parent.mkdir(parents=True)
+        path.write_text("{}")
+    pruned[2].mkdir(parents=True)
+    (pruned[2] / "blob").write_text("{}")
+    working = [name for name in WORKING_DIRECTORIES if (root / name).is_dir()]
 
     compaction = compact_run(store, run_id)
 
     assert compaction.attempts == 1
     assert compaction.bytes_freed > 0
-    assert f"attempts/{root.name}/workspace" in compaction.removed
-    assert not any((root / name).exists() for name in WORKING_DIRECTORIES)
+    assert "workspace" in working
+    assert compaction.removed == (
+        *(f"attempts/{root.name}/{name}" for name in working),
+        f"attempts/{root.name}/profile/config/plugins",
+        f"attempts/{root.name}/profile/config/skills",
+        f"attempts/{root.name}/profile/home/x/cache",
+    )
+    assert [(root / name).exists() for name in WORKING_DIRECTORIES] == [False] * len(
+        WORKING_DIRECTORIES
+    )
+    assert session_log.is_file()
+    assert [path.exists() for path in pruned] == [False, False, False]
     after = report_run(store, run_id)
     assert [attempt.result for attempt in after.attempts] == [
         attempt.result for attempt in before.attempts
@@ -53,6 +82,99 @@ def test_compaction_removes_working_copies_and_keeps_results_viewable_and_regrad
     assert event.data["bytes_freed"] == compaction.bytes_freed
     _, regraded = regrade_run(store, run_id)
     assert len(regraded) == 1
+
+
+@pytest.mark.integration
+def test_compaction_removes_credential_files_and_never_follows_profile_links(
+    store, graded_benchmark, tmp_path
+):
+    run_id = offline_run(store, graded_benchmark)
+    assess_run(store, run_id)
+    (root,) = attempt_roots(store, run_id)
+    outside = tmp_path / "outside"
+    outside_files = [outside / "cache" / "keep.txt", outside / "plugins" / "keep.txt"]
+    for path in outside_files:
+        path.parent.mkdir(parents=True)
+        path.write_text("keep")
+    live_auth = tmp_path / "live-auth.json"
+    live_auth.write_text("{}")
+    config = root / "profile" / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "linked").symlink_to(outside, target_is_directory=True)
+    (config / "cache").symlink_to(outside, target_is_directory=True)
+    (config / "auth.json").symlink_to(live_auth)
+    (config / ".credentials.json").write_text('{"token": "x"}')
+    credential_directory = config / "nested" / "auth.json"
+    credential_directory.mkdir(parents=True)
+    (credential_directory / "keep.txt").write_text("keep")
+    replaced = root / "profile" / "home" / ".codex" / "auth.json"
+    replaced.parent.mkdir(parents=True)
+    replaced.write_text('{"tokens": {}}')
+    session_log = config / "sessions" / "rollout.jsonl"
+    session_log.parent.mkdir(parents=True)
+    session_log.write_text("{}\n")
+
+    compaction = compact_run(store, run_id)
+
+    prefix = f"attempts/{root.name}/profile"
+    assert [path for path in compaction.removed if path.startswith(prefix)] == [
+        f"{prefix}/config/.credentials.json",
+        f"{prefix}/config/auth.json",
+        f"{prefix}/home/.codex/auth.json",
+    ]
+    assert [path.read_text() for path in outside_files] == ["keep", "keep"]
+    assert live_auth.read_text() == "{}"
+    assert (config / "linked").is_symlink()
+    assert (config / "cache").is_symlink()
+    assert [os.path.lexists(config / name) for name in ("auth.json", ".credentials.json")] == [
+        False,
+        False,
+    ]
+    assert [path.name for path in replaced.parent.iterdir()] == []
+    assert session_log.is_file()
+    assert (credential_directory / "keep.txt").read_text() == "keep"
+
+
+@pytest.mark.integration
+def test_compaction_leaves_a_symlinked_profile_and_its_target_alone(
+    store, graded_benchmark, tmp_path
+):
+    run_id = offline_run(store, graded_benchmark)
+    assess_run(store, run_id)
+    (root,) = attempt_roots(store, run_id)
+    outside = tmp_path / "outside-profile"
+    kept = [outside / "config" / "plugins" / "keep.txt", outside / "config" / "auth.json"]
+    for path in kept:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("keep")
+    shutil.rmtree(root / "profile")
+    (root / "profile").symlink_to(outside, target_is_directory=True)
+    working = [name for name in WORKING_DIRECTORIES if (root / name).is_dir()]
+
+    compaction = compact_run(store, run_id)
+
+    assert compaction.removed == tuple(f"attempts/{root.name}/{name}" for name in working)
+    assert (root / "profile").is_symlink()
+    assert [path.read_text() for path in kept] == ["keep", "keep"]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("linked", ["attempt", "attempts"])
+def test_compaction_refuses_a_symlinked_attempt_directory(
+    store, graded_benchmark, tmp_path, linked
+):
+    run_id = offline_run(store, graded_benchmark)
+    assess_run(store, run_id)
+    (root,) = attempt_roots(store, run_id)
+    moved = root if linked == "attempt" else root.parent
+    outside = tmp_path / "outside"
+    shutil.move(moved, outside)
+    moved.symlink_to(outside, target_is_directory=True)
+    relative = moved.relative_to(store.root / "runs" / run_id)
+    with pytest.raises(InputError, match=f"Attempt path {relative} is a symlink"):
+        compact_run(store, run_id)
+    inside = outside / root.name if linked == "attempts" else outside
+    assert (inside / "workspace").is_dir()
 
 
 @pytest.mark.integration

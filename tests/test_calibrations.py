@@ -9,6 +9,7 @@ import threading
 import psutil
 import pytest
 
+from conftest import HOST
 from dryheave.bundles import export_bundle, import_bundle
 from dryheave.calibration_models import CaseCalibration
 from dryheave.calibration_recovery import (
@@ -184,6 +185,7 @@ def test_one_byte_verifier_output_calibrates_and_assesses_with_retained_metadata
         store,
         create_experiment(store, graded_benchmark.model_copy(update={"cases": (case_id,)})),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.completion == "pass"
@@ -455,7 +457,12 @@ def test_hard_interrupted_initial_publication_allows_later_native_progress(
     case_id = graded_benchmark.cases[0]
     experiment = create_experiment(store, graded_benchmark)
     summary = (
-        run_experiment(store, experiment, options=RunOptions(mode="offline-fixture"))
+        run_experiment(
+            store,
+            experiment,
+            options=RunOptions(mode="offline-fixture"),
+            host=HOST,
+        )
         if action == "assess"
         else None
     )
@@ -487,7 +494,12 @@ def test_hard_interrupted_initial_publication_allows_later_native_progress(
     if action == "calibrate":
         assert load_calibration(store, calibrate_case(store, case_id)).status == "demonstrated"
     elif action == "run":
-        result = run_experiment(store, experiment, options=RunOptions(mode="offline-fixture"))
+        result = run_experiment(
+            store,
+            experiment,
+            options=RunOptions(mode="offline-fixture"),
+            host=HOST,
+        )
         assert len(result.pending_assessment) == 1
     else:
         result = load_assessment(store, assess_run(store, summary.run_id)[0])
@@ -624,7 +636,12 @@ def test_unresolved_calibration_recovery_guards_all_native_entrypoints(
 
     experiment = create_experiment(store, graded_benchmark)
     summary = (
-        run_experiment(store, experiment, options=RunOptions(mode="offline-fixture"))
+        run_experiment(
+            store,
+            experiment,
+            options=RunOptions(mode="offline-fixture"),
+            host=HOST,
+        )
         if action == "assess"
         else None
     )
@@ -645,7 +662,12 @@ def test_unresolved_calibration_recovery_guards_all_native_entrypoints(
         if action == "calibrate":
             calibrate_case(store, graded_benchmark.cases[0])
         elif action == "run":
-            run_experiment(store, experiment, options=RunOptions(mode="offline-fixture"))
+            run_experiment(
+                store,
+                experiment,
+                options=RunOptions(mode="offline-fixture"),
+                host=HOST,
+            )
         else:
             assess_run(store, summary.run_id)
     state = parse_model((ownership.root / "operation.json").read_bytes(), CalibrationOperation)
@@ -679,6 +701,7 @@ def test_run_export_discloses_unlinked_calibration_evidence(store, graded_benchm
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     manifest = export_bundle(
         store, summary.run_id, tmp_path / "run.tar", include_sensitive=("calibration-evidence",)

@@ -124,11 +124,17 @@ before parsing it; `report_run(..., journal_limit=...)` passes the same ceiling
 down.
 
 `compaction.compact_run` holds the run lock, requires every attempt to be finished
-and assessed with its capture (or quarantine) and assessment verifying, then deletes
-each attempt's `workspace`, `assessment`, `regrades` and `profile` directories and
-appends a `compacted` event listing them with the bytes freed. Nothing it deletes is
-read after assessment: reports and the viewer use the journal and stored objects,
-and a regrade rematerializes its grading workspace from the stored capture.
+and assessed with its capture (or quarantine) and assessment verifying, refuses
+before deleting anything when `attempts/` or an attempt directory is a symlink,
+then deletes each attempt's `workspace`, `assessment` and `regrades` directories
+plus every `plugins`, `skills` and `cache` directory found at any depth inside
+`profile` (never following symlinks) and every `auth.json` and `.credentials.json` there,
+whether a regular file or a link (a link is unlinked and its target left alone),
+and appends a `compacted` event listing them with the bytes freed. The rest of
+`profile` — session logs, file history and backups — is kept. Nothing it deletes
+is read after assessment: reports and the viewer use the journal and stored
+objects, and a regrade rematerializes its grading workspace from the stored
+capture.
 `compaction.prune_checks` deletes `checks/<id>` directories (the evidence a failed
 `bench` launch check leaves) whose modification time is older than the cutoff, so a
 check still in progress is never touched.
@@ -209,6 +215,42 @@ a security sandbox: a native process with filesystem access can still alter data
 reach source repositories or access other host resources. Journal hashes are not
 signatures. Immutable input checks and native audit remain separate concerns.
 
+### Live config snapshots
+
+A run with a live-config profile keeps one snapshot per agent beside its journal:
+`runs/<run-id>/live-config/` for Claude and `runs/<run-id>/live-config-codex/` for
+Codex. A `bench` launch check writes the same layout under `checks/<id>/`. Each
+snapshot holds the copied entries, a `manifest.json` (`LiveConfigManifest`) and,
+for Claude only, `state.json` with the shareable part of `.claude.json`. The
+snapshot is staged as a `.partial` sibling and renamed into place once complete;
+nothing rewrites it afterwards, including `manifest.json`.
+
+When a run first takes a snapshot, it appends a run-level `live-config` event
+whose data is the manifest's own serialization, the same form as `manifest.json`:
+a Codex manifest carries `"agent": "codex"`, a Claude manifest omits `agent`, and
+both omit `state_sha256` when it is unset. A manifest without `agent` parses as
+Claude.
+The fields are `schema_version: 1`, `source`, `entries`, `files`, `bytes`,
+`tree_sha256`, `settings_sha256`, `instructions_sha256`, `skills`,
+`enabled_plugins`, `mcp_servers`, `hook_events` and the optional `state_sha256`
+(the hash of Claude's `state.json`). The first `live-config` event per agent is
+the authoritative manifest: resume, every attempt's materialization and the
+`bench` summary read it, never `manifest.json`. A snapshot directory found with
+no event (a crash after the copy) is verified against its own `manifest.json`
+before that manifest is journaled. Verification recomputes `tree_sha256` over the
+entries, where each file contributes its content hash and each link its link
+text, never its target's bytes (only Claude snapshots keep links). It also
+checks `state.json` against `state_sha256`; a manifest written before
+`state_sha256` existed is checked by its MCP server names only. Any mismatch,
+missing file or swapped link is `snapshot_changed`.
+
+Codex keys hook trust by the absolute path of the hooks file, so after copying a
+Codex snapshot into an attempt, materialization moves each
+`[hooks.state."<source>/…"]` table in the copied `config.toml` to the copy's path
+with its `trusted_hash` unchanged. Hooks trusted live stay trusted and the rest stay
+untrusted. Trust written as anything other than one table per entry is refused,
+since the subject would otherwise stop at Codex's "Hooks need review" dialog.
+
 ## CLI registration and errors
 
 Domain CLI modules import `CommandRegistry` from the low-level `commands.py`
@@ -224,7 +266,11 @@ Global `--store PATH` and `--json` options can appear anywhere before `--`. The
 separator preserves following literal arguments. A successful response is
 `{"ok": true, "data": ...}` on stdout. Failure is `{"ok": false, "error":
 {"code": ..., "message": ...}}` on stderr. Input/argparse failures exit 2; integrity,
-not-found, conflict and I/O errors exit 1. Pydantic diagnostics expose field
+not-found, conflict and I/O errors exit 1. Subclasses keep their parent's exit
+code with their own `code`: `snapshot_changed` (a live config snapshot no longer
+matches its journaled manifest) is an integrity error and exits 1, while
+`missing_skill` (a Codex workflow skill absent from the config), `unsafe_path`
+and `limit_exceeded` are input errors and exit 2. Pydantic diagnostics expose field
 locations and validation codes, excluding supplied values. Help and version use
 argparse's text output.
 

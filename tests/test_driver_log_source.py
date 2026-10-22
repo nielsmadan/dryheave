@@ -157,3 +157,22 @@ def test_failed_poll_and_session_cleanup_retain_raw_bytes_once(
     with pytest.raises(InputError, match="cannot resume"):
         reader.poll()
     assert next(reader.artifacts.root.glob("raw-*")).read_bytes() == content
+
+
+def test_copied_fork_history_does_not_count_against_record_limit(tmp_path):
+    reader = source(tmp_path, max_events=4)
+    copied = b"{not parsed}\n" * 10
+    (reader.root / "child.jsonl").write_bytes(
+        record(id="child", subagent_history_start_ordinal=11)
+        + copied
+        + record("turn_context", model="gpt")
+        + record("turn_context", model="gpt")
+    )
+    events = reader.poll()
+    assert [(event.kind, event.line) for event in events] == [
+        ("metadata", 1),
+        ("metadata", 12),
+        ("metadata", 13),
+    ]
+    assert reader.records_read == 3
+    assert reader.cursor().files["child.jsonl"].line == 13

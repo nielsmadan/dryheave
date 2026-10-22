@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from conftest import HOSTILE, judged_case_benchmark
+from conftest import HOST, HOSTILE, judged_case_benchmark
 from dryheave import journals, viewer_http
 from dryheave.calibrations import calibrate_case
 from dryheave.constants import VERSION
@@ -516,6 +516,7 @@ def test_calibration_routes_serve_run_and_case_scopes(store, graded_benchmark):
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     server = ViewerServer(ViewerService(store))
     server.start()

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import HOST
 from dryheave.assessments import assess_run
 from dryheave.cases import DeterministicCriterion, load_frozen_case
 from dryheave.errors import IntegrityError
@@ -143,6 +144,7 @@ def test_real_hidden_check_calibrates_and_resume_never_relaunches(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     original = load_capture(store, summary.pending_assessment[0])
     identifiers = assess_run(store, summary.run_id)
@@ -167,7 +169,7 @@ def test_real_hidden_check_calibrates_and_resume_never_relaunches(
         lambda *_args: pytest.fail("Finished checks must not rerun."),
     )
     assert assess_run(store, summary.run_id) == identifiers
-    assert run_experiment(store, resume=summary.run_id).pending_assessment == ()
+    assert run_experiment(store, resume=summary.run_id, host=HOST).pending_assessment == ()
 
 
 @pytest.mark.integration
@@ -178,6 +180,7 @@ def test_verifier_blob_mutation_retains_invalid_report_without_loading_corrupt_i
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     case_id = store.resolve(graded_benchmark.cases[0])
     manifest = store.get(case_id)
@@ -224,6 +227,7 @@ def test_mutation_before_capture_publication_quarantines_and_blocks_next_subject
         store,
         create_experiment(store, graded_benchmark.model_copy(update={"repetitions": 2})),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     assert len(summary.attempts) == len(summary.unstarted_trials) == 1
     state = summary.attempts[0]
@@ -237,7 +241,7 @@ def test_mutation_before_capture_publication_quarantines_and_blocks_next_subject
         state.quarantine_id,
     )
     with pytest.raises(IntegrityError):
-        run_experiment(store, resume=summary.run_id)
+        run_experiment(store, resume=summary.run_id, host=HOST)
 
 
 @pytest.mark.integration
@@ -260,6 +264,7 @@ def test_zero_checks_and_failure_are_not_success(store, graded_benchmark, progra
         store,
         create_experiment(store, graded_benchmark.model_copy(update={"cases": (changed,)})),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.criteria[0].outcome == "error"
@@ -293,6 +298,7 @@ def test_known_future_git_object_is_retained_but_excluded(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.completion == "pass"
@@ -323,6 +329,7 @@ def test_relative_verifier_executable_requires_an_explicit_trusted_path(store, g
         store,
         create_experiment(store, graded_benchmark.model_copy(update={"cases": (changed,)})),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.criteria[0].outcome == "error"
@@ -353,6 +360,7 @@ def test_interrupted_grading_resume_retains_error_without_reexecuting_command(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
 
     def interrupt(context, criterion):
@@ -423,6 +431,7 @@ def test_independent_checks_and_explicit_ordered_suites(store, graded_benchmark,
         store,
         create_experiment(store, graded_benchmark.model_copy(update={"cases": (changed,)})),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert [item.outcome for item in result.criteria] == ["pass", "pass"]
@@ -455,6 +464,7 @@ def test_interrupted_shared_suite_keeps_remaining_members_indeterminate(
         store,
         create_experiment(store, graded_benchmark.model_copy(update={"cases": (changed,)})),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     with RunStore(store.root).open(summary.run_id) as journal:
         execution = ExecutionJournal(journal)
@@ -555,6 +565,7 @@ def test_case_metrics_command_measures_final_against_baseline(store, graded_benc
         store,
         create_experiment(store, measured_benchmark(store, graded_benchmark, MEASURE)),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     (metrics,) = result.metrics
@@ -588,6 +599,7 @@ def test_failing_metrics_command_is_an_error_that_leaves_completion_alone(store,
             measured_benchmark(store, graded_benchmark, b'print("boom")\nraise SystemExit(4)\n'),
         ),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert [(item.outcome, item.error) for item in result.metrics] == [
@@ -619,6 +631,7 @@ def test_metrics_baseline_is_writable_again_after_the_run(
         store,
         create_experiment(store, measured_benchmark(store, graded_benchmark, program)),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     assess_run(store, summary.run_id)
     baseline = captured["baseline"]
@@ -658,6 +671,7 @@ raise SystemExit(1)
         store,
         create_experiment(store, measured_benchmark(store, graded_benchmark, program)),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     try:
         assess_run(store, summary.run_id)
@@ -683,6 +697,7 @@ def test_interrupted_metrics_command_becomes_an_error_on_resume_without_rerunnin
         store,
         create_experiment(store, measured_benchmark(store, graded_benchmark, MEASURE)),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
 
     def interrupt(context, command, inherited):
@@ -745,7 +760,10 @@ def test_help_needed_separates_disclosed_facts_by_kind(store, graded_benchmark):
         }
     )
     summary = run_experiment(
-        store, create_experiment(store, draft), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.help_needed is not None
@@ -781,6 +799,7 @@ def test_help_needed_follows_the_captures_own_case_id_not_a_substitute_case(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, summary.pending_assessment[0])
     assert capture.case_id == case_id
@@ -806,6 +825,7 @@ def test_help_needed_excludes_fix_it_and_dialog_answer_simulator_calls(store, gr
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, summary.pending_assessment[0])
     case = load_frozen_case(store, capture.case_id)
@@ -871,6 +891,7 @@ def test_help_needed_excludes_screen_steps_of_an_unanswered_screen(store, graded
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, summary.pending_assessment[0])
     case = load_frozen_case(store, capture.case_id)
@@ -1128,7 +1149,10 @@ def test_regrade_judges_finished_attempts_again_as_new_chained_assessments(
 
     benchmark = judged_regrade_benchmark(store, graded_benchmark, tmp_path)
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     (original_id,) = assess_run(store, summary.run_id)
     original = load_assessment(store, original_id)
@@ -1180,6 +1204,7 @@ def test_regrade_against_a_replacement_case_runs_its_hidden_metrics_script(store
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     (original_id,) = assess_run(store, summary.run_id)
     original = load_assessment(store, original_id)
@@ -1228,6 +1253,7 @@ def test_regrade_refuses_an_incompatible_case_or_a_missing_judge(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     (original_id,) = assess_run(store, summary.run_id)
     case_id = graded_benchmark.cases[0]
@@ -1268,7 +1294,10 @@ def test_interrupted_regrade_resumes_under_the_same_regrade_id(
 
     benchmark = judged_regrade_benchmark(store, graded_benchmark, tmp_path)
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     (original_id,) = assess_run(store, summary.run_id)
 
@@ -1319,7 +1348,10 @@ def test_regrade_resume_treats_a_crash_before_the_regrade_assessed_marker_as_don
 
     benchmark = judged_regrade_benchmark(store, graded_benchmark, tmp_path)
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     (original_id,) = assess_run(store, summary.run_id)
 
@@ -1383,6 +1415,7 @@ def test_regrade_resume_skips_a_finished_attempt_and_reconciles_one_left_grading
         store,
         create_experiment(store, benchmark.model_copy(update={"repetitions": 2})),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
 
     calls = {"n": 0}
@@ -1461,6 +1494,7 @@ def test_regrade_keeps_reviews_of_findings_its_audit_still_reports(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     original = load_assessment(store, assess_run(store, summary.run_id)[0])
     review = AuditReview(

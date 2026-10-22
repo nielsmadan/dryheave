@@ -13,8 +13,8 @@ description: Prepare named Dryheave Codex or Claude subject profiles and control
    never scan environment inventories, shell startup or authentication contents.
 2. Use `profile create NAME --agent codex|claude --model FULL_MODEL_ID`, adding
    only selected `--config FILE`, `--instruction FILE`, `--skill DIRECTORY`
-   and `--plugin DIRECTORY` inputs. Friendly setup pins Codex 0.154.0 or Claude
-   2.1.278. Claude maps config/instructions to settings.json/CLAUDE.md; Codex
+   and `--plugin DIRECTORY` inputs. Friendly setup pins Codex 0.154.0 (the
+   default) or 0.162.1, or Claude 2.1.278. Claude maps config/instructions to settings.json/CLAUDE.md; Codex
    uses config.toml/AGENTS.md. Legacy `capture --spec` and `derive --spec` remain
    supported for other recipes; write any internal JSON yourself.
    Claude uses only the named `CLAUDE_CODE_OAUTH_TOKEN` runtime credential

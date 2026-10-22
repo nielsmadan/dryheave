@@ -466,6 +466,26 @@ def test_legacy_case_without_workflow_keeps_its_object_id(store: ObjectStore) ->
     assert identifier == "0e6bc5d8d7c84486d392c055305d09b2fe5238faa2335e5044261a83df4667b7"
 
 
+@pytest.mark.parametrize(
+    ("prompt", "slash", "skill_name"),
+    [
+        ("  /code-review --quick", True, "code-review"),
+        ("/simplify", True, "simplify"),
+        (" \n/release-notes", True, "release-notes"),
+        ("/code-review\nfocus on auth", True, "code-review"),
+        ("/code-review\tfocus on auth", True, "code-review"),
+        ("fix the findings", False, None),
+    ],
+)
+def test_prompt_step_names_its_slash_skill(
+    prompt: str, slash: bool, skill_name: str | None
+) -> None:
+    from dryheave.cases import PromptStep, is_slash
+
+    step = PromptStep(step_id="review", prompt=prompt)
+    assert (step.slash, is_slash(prompt), step.skill_name) == (slash, slash, skill_name)
+
+
 def test_workflow_round_trips_prompt_and_inspect_steps() -> None:
     from dryheave.cases import CaseContent, InspectStep, PromptStep
     from dryheave.serialization import canonical_json, parse_model
@@ -519,6 +539,17 @@ def test_workflow_round_trips_prompt_and_inspect_steps() -> None:
         (
             [{"kind": "prompt", "step_id": "no-turn", "prompt": "/compact please"}],
             "command with no model turn",
+        ),
+        (
+            [{"kind": "prompt", "step_id": "mention", "prompt": " $code-review --quick"}],
+            (
+                r"step mention starts with '\$': write skill steps as /name; "
+                r"Codex receives them as \$name"
+            ),
+        ),
+        (
+            [{"kind": "prompt", "step_id": "shell", "prompt": "!git status"}],
+            "step shell starts with '!': write skill steps as /name",
         ),
     ],
 )

@@ -32,6 +32,14 @@ class LimitError(InputError):
     code = "limit_exceeded"
 
 
+class MissingSkillError(InputError):
+    code = "missing_skill"
+
+
+class SnapshotChangedError(IntegrityError):
+    code = "snapshot_changed"
+
+
 class CancelledError(DryheaveError):
     code = "cancelled"
     exit_code = 130

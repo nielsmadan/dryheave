@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import HOST
 from dryheave.assessments import assess_run
 from dryheave.bundles import export_bundle, import_bundle
 from dryheave.cases import load_frozen_case
@@ -206,6 +207,7 @@ def test_individual_sensitive_classes_disclose_their_actual_boundaries(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     assess_run(store, summary.run_id)
     path = tmp_path / "selected.tar"
@@ -292,6 +294,7 @@ def test_capture_selection_exports_durable_output_before_assessment(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     path = tmp_path / "captured.tar"
     manifest = export_bundle(
@@ -356,6 +359,7 @@ def test_quarantine_capture_can_be_selected_before_assessment(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     quarantine_id = summary.attempts[0].quarantine_id
     assert quarantine_id

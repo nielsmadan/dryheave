@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
+from conftest import HOST
 from dryheave.case_metrics import (
     MetricsPaths,
     execute_metrics,
@@ -298,6 +299,7 @@ def test_metrics_script_that_changes_its_hidden_input_reports_no_values(store, g
         store,
         create_experiment(store, measured_benchmark(store, graded_benchmark, program)),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert [(item.outcome, item.values, item.error) for item in result.metrics] == [

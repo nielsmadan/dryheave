@@ -9,6 +9,7 @@ from dryheave.models import AgentKind
 from dryheave.profile_launch import materialize_profile
 from dryheave.profile_models import NativeRecipe
 from dryheave.profiles import diff_profiles, load_profile
+from dryheave.setup_helpers import runtime_references
 from dryheave.skills import SKILL_NAMES
 
 
@@ -169,6 +170,21 @@ def test_friendly_claude_records_any_native_version(store, capsys, flags, record
     assert load_profile(store, "haiku").recipe.version == recorded
 
 
+@pytest.mark.parametrize("version", ["0.154.0", "0.162.1"])
+def test_friendly_codex_accepts_supported_versions(store, capsys, version):
+    common = ["--store", str(store.root), "--json", "profile", "create", "terra"]
+    assert main([*common, "--native-version", version]) == 0
+    capsys.readouterr()
+    assert load_profile(store, "terra").recipe.version == version
+
+
+def test_friendly_codex_rejects_unsupported_version(store, capsys):
+    common = ["--store", str(store.root), "--json", "profile", "create", "terra"]
+    assert main([*common, "--native-version", "0.160.0"]) == 2
+    assert json.loads(capsys.readouterr().err)["error"]["code"] == "invalid_input"
+    assert not store.root.exists()
+
+
 def test_codex_capture_and_effort_only_variant_preserve_selected_config(store, tmp_path, capsys):
     config = tmp_path / "config.toml"
     config.write_text('model = "gpt-5.6-terra"\n')
@@ -195,6 +211,13 @@ def test_codex_capture_and_effort_only_variant_preserve_selected_config(store, t
     assert plan.argv[plan.argv.index("--disable") + 1] == "plugins"
     assert "skills.bundled.enabled=false" in plan.argv
     assert (tmp_path / "profile/config/config.toml").read_bytes() == config.read_bytes()
+
+
+def test_codex_profile_creation_accepts_the_minimal_codex_effort(store, capsys):
+    common = ["--store", str(store.root), "--json"]
+    assert main([*common, "profile", "create", "terra-minimal", "--effort", "minimal"]) == 0
+    capsys.readouterr()
+    assert load_profile(store, "terra-minimal").recipe.effort == "minimal"
 
 
 def test_legacy_serialization_does_not_add_implicit_policy_fields():
@@ -241,3 +264,11 @@ def test_derive_options_require_a_change_and_reject_spec_mixing(store, benchmark
     ):
         assert main([*common, *flags]) == 2
         capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    ("variable", "default"), [("CODEX_AUTH_FILE", "codex-home"), ("MY_AUTH", None)]
+)
+def test_setup_auth_reference_defaults_to_codex_home_only_for_the_codex_variable(variable, default):
+    (reference,) = runtime_references(variable, acknowledge=True)
+    assert (reference.source_path_environment.name, reference.default_source) == (variable, default)

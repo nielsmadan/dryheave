@@ -4,9 +4,11 @@ from pathlib import Path
 
 from pydantic import JsonValue
 
+from dryheave.claude_policy import CLAUDE_EFFORT_TEXT
 from dryheave.commands import CommandRegistry
 from dryheave.errors import InputError
 from dryheave.filesystem import read_bytes
+from dryheave.models import EFFORTS
 from dryheave.profile_launch import LaunchOptions, materialize_profile, preflight_profile
 from dryheave.profile_models import CaptureSpec, DeriveSpec
 from dryheave.profiles import capture_profile, derive_profile, diff_profiles, load_profile
@@ -141,8 +143,9 @@ def register_profiles(registry: CommandRegistry) -> None:
     changes = derive.add_mutually_exclusive_group()
     changes.add_argument(
         "--effort",
-        choices=["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
-        help="Change effort only, preserving every other frozen input.",
+        choices=EFFORTS,
+        help="Change effort only, preserving every other frozen input; Claude accepts "
+        f"{CLAUDE_EFFORT_TEXT}.",
     )
     changes.add_argument(
         "--clear-effort",

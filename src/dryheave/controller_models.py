@@ -4,8 +4,9 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from dryheave.claude_policy import validate_effort
+from dryheave.codex_policy import CODEX_CONTROLLER_VERSION, CODEX_CONTROLLER_VERSIONS
 from dryheave.drivers.models import CleanupReport, ScreenAction
-from dryheave.models import CommandSpec, Name, StrictModel, TokenUsage
+from dryheave.models import CommandSpec, Effort, Name, StrictModel, TokenUsage
 from dryheave.profile_models import RuntimeFileReference
 
 
@@ -84,7 +85,7 @@ class ControllerRecipe(StrictModel):
     command: CommandSpec | None = None
     version: str | None = None
     model: str | None = None
-    effort: Literal["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] | None = None
+    effort: Effort | None = None
     isolation: Literal["fixture", "trusted-native"] = "fixture"
     runtime: ControllerRuntime | ClaudeControllerRuntime | None = None
     conversation_policy: Literal["facts-only", "design-approval"] | None = None
@@ -99,7 +100,9 @@ class ControllerRecipe(StrictModel):
 
     @model_validator(mode="after")
     def runtime_contract(self) -> Self:
-        modern = self.kind == "claude" or (self.kind == "codex" and self.version == "0.154.0")
+        modern = self.kind == "claude" or (
+            self.kind == "codex" and self.version == CODEX_CONTROLLER_VERSION
+        )
         if modern != (self.runtime is not None):
             raise ValueError(
                 "Modern native controllers require an explicit owned runtime policy; older adapters retain their frozen runtime"
@@ -162,10 +165,14 @@ class ControllerRecipe(StrictModel):
             if self.isolation != "trusted-native":
                 raise ValueError("native controllers must acknowledge trusted-native isolation")
             if self.kind == "codex" and (
-                self.version not in {"0.153.4", "0.154.0"} or not self.model or self.effort is None
+                self.version not in CODEX_CONTROLLER_VERSIONS
+                or not self.model
+                or self.effort is None
             ):
                 raise ValueError(
-                    "Codex controller requires verified version 0.153.4 or 0.154.0, model and effort"
+                    "Codex controller requires verified version "
+                    + " or ".join(CODEX_CONTROLLER_VERSIONS)
+                    + ", model and effort"
                 )
         return self
 

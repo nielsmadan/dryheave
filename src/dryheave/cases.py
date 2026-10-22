@@ -141,6 +141,10 @@ class InspectStep(StrictModel):
     criteria: tuple[Name, ...] = Field(min_length=1)
 
 
+def is_slash(prompt: str) -> bool:
+    return prompt.lstrip().startswith("/")
+
+
 class PromptStep(StrictModel):
     kind: Literal["prompt"] = "prompt"
     step_id: Name
@@ -149,7 +153,11 @@ class PromptStep(StrictModel):
 
     @property
     def slash(self) -> bool:
-        return self.prompt.lstrip().startswith("/")
+        return is_slash(self.prompt)
+
+    @property
+    def skill_name(self) -> str | None:
+        return self.prompt.split(maxsplit=1)[0].removeprefix("/") if self.slash else None
 
     @model_serializer(mode="wrap")
     def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
@@ -201,6 +209,11 @@ class CaseContent(StrictModel):
                     )
             else:
                 words = step.prompt.strip().split(maxsplit=1)
+                if words and words[0].startswith(("$", "!")):
+                    raise ValueError(
+                        f"workflow step {step.step_id} starts with {words[0][0]!r}: "
+                        "write skill steps as /name; Codex receives them as $name"
+                    )
                 if words and words[0] in NO_TURN_COMMANDS:
                     raise ValueError(
                         f"workflow step {step.step_id} uses a command with no model turn: "

@@ -12,6 +12,7 @@ from pydantic import JsonValue
 
 from dryheave.cases import FrozenCase, subject_context
 from dryheave.claude_controller import claude_observation, claude_payload
+from dryheave.codex_policy import CODEX_CONTROLLER_VERSION, CODEX_LEGACY_CONTROLLER_VERSION
 from dryheave.controller_models import (
     DIALOG_INSTRUCTION,
     FIX_IT_INSTRUCTION,
@@ -367,7 +368,9 @@ def _scripted(recipe: ControllerRecipe, request: SimulatorInput, index: int) -> 
     return ControllerResponse(decision=decision)
 
 
-def _codex_usage(content: bytes, version: str = "0.153.4") -> TokenUsage | None:
+def _codex_usage(
+    content: bytes, version: str = CODEX_LEGACY_CONTROLLER_VERSION
+) -> TokenUsage | None:
     latest = None
     for line in content.splitlines():
         try:
@@ -380,7 +383,7 @@ def _codex_usage(content: bytes, version: str = "0.153.4") -> TokenUsage | None:
         return None
     return codex_usage(
         latest,
-        protocol="exec-0.154.0" if version == "0.154.0" else "exec-0.153.4",
+        protocol="exec-0.154.0" if version == CODEX_CONTROLLER_VERSION else "exec-0.153.4",
         provenance=f"codex-exec-{version}-thread-cumulative; all-zero fallback is unknown",
     )
 
@@ -469,9 +472,9 @@ def failure_observation(recipe: ControllerRecipe, artifacts: ArtifactWriter) -> 
         with suppress(OSError, DryheaveError):
             usage = _codex_usage(
                 read_bytes(artifacts.root / "stdout.bin", limit=recipe.budget.max_output_bytes),
-                recipe.version or "0.153.4",
+                recipe.version or CODEX_LEGACY_CONTROLLER_VERSION,
             )
-        if recipe.version == "0.154.0":
+        if recipe.version == CODEX_CONTROLLER_VERSION:
             return RoleObservation(usage=usage)
     try:
         raw = parse_json(read_bytes(artifacts.root / source, limit=recipe.budget.max_output_bytes))
@@ -527,7 +530,8 @@ def _native(
             read_bytes(root / "response.json", limit=recipe.budget.max_output_bytes)
         )
         return ControllerResponse(
-            decision=response, usage=_codex_usage(result.stdout, recipe.version or "0.153.4")
+            decision=response,
+            usage=_codex_usage(result.stdout, recipe.version or CODEX_LEGACY_CONTROLLER_VERSION),
         )
     return parse_model(result.stdout, ControllerResponse)
 

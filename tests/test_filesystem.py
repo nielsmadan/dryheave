@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from dryheave.errors import LimitError, LockBusyError, PathError
+from dryheave.errors import InputError, LimitError, LockBusyError, PathError
 from dryheave.filesystem import (
     atomic_write,
+    configured_directory,
     directory_fd,
+    expand_home,
     file_lock,
     publish_directory,
     read_bytes,
@@ -235,3 +237,25 @@ def test_directory_paths_and_publication_collision(tmp_path: Path) -> None:
         publish_directory(staged, destination)
     with pytest.raises(PathError):
         publish_directory(staged, destination / "nested")
+
+
+def test_expand_home_resolves_tilde_paths_against_the_given_home(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    home = tmp_path / "user"
+    assert expand_home("~", home) == home
+    assert expand_home("~/codex", home) == home / "codex"
+    assert expand_home("relative", home) == tmp_path / "relative"
+    assert expand_home("/absolute/codex", home) == Path("/absolute/codex")
+
+
+def test_expand_home_refuses_another_users_home(tmp_path):
+    with pytest.raises(InputError, match="Only ~/ paths expand against the home directory"):
+        expand_home("~root/.codex", tmp_path)
+
+
+def test_configured_directory_falls_back_under_home(tmp_path):
+    home = tmp_path / "user"
+    assert configured_directory({}, "CODEX_HOME", home, ".codex") == home / ".codex"
+    assert configured_directory({"CODEX_HOME": "~/alt"}, "CODEX_HOME", home, ".codex") == (
+        home / "alt"
+    )

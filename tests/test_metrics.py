@@ -1,5 +1,6 @@
 import pytest
 
+from conftest import HOST
 from dryheave.controller_models import ControllerRecipe, RoleCall
 from dryheave.drivers.models import NativeEvent, NativeUsage, UsageObservation
 from dryheave.experiment_models import LongPromptRates, PriceRate, PriceTable
@@ -53,7 +54,10 @@ def native(identity, number, *, accounting="cumulative", session="root", line=1)
 @pytest.mark.integration
 def test_cumulative_deltas_resets_and_descendant_model_attribution(store, benchmark):
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, summary.pending_assessment[0])
     launch = capture.launch.model_copy(
@@ -95,7 +99,10 @@ def test_cumulative_deltas_resets_and_descendant_model_attribution(store, benchm
 @pytest.mark.integration
 def test_response_dedupe_supersedes_cumulative_and_does_not_invent_unknown_cost(store, benchmark):
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, summary.pending_assessment[0])
     record = native("response", 10, accounting="response")
@@ -369,7 +376,10 @@ def test_role_calls_of_a_tiered_model_stay_unpriced():
 )
 def test_subject_metrics_tiers_only_single_response_records(store, benchmark, accounting, expected):
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, summary.pending_assessment[0])
     capture = capture.model_copy(
@@ -395,7 +405,10 @@ def test_subject_metrics_derives_the_1h_split_from_raw_usage_evidence_when_missi
     store, benchmark
 ):
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture = load_capture(store, summary.pending_assessment[0])
     launch = capture.launch.model_copy(

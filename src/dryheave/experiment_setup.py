@@ -3,6 +3,8 @@ from pathlib import Path
 
 from pydantic import JsonValue
 
+from dryheave.claude_policy import CLAUDE_EFFORT_TEXT
+from dryheave.codex_policy import CODEX_CONTROLLER_VERSION
 from dryheave.commands import CommandRegistry
 from dryheave.controller_models import (
     ClaudeControllerRuntime,
@@ -13,7 +15,7 @@ from dryheave.controller_models import (
 from dryheave.errors import InputError
 from dryheave.experiment_models import ExperimentDraft, VariantSpec
 from dryheave.experiments import create_experiment, load_experiment
-from dryheave.models import CommandSpec, EnvironmentReference
+from dryheave.models import EFFORTS, CommandSpec, EnvironmentReference
 from dryheave.setup_helpers import runtime_references
 from dryheave.storage import ObjectStore
 
@@ -52,7 +54,7 @@ def _simulator(args: argparse.Namespace) -> ControllerRecipe:
         executable = str(Path(executable).absolute())
     return ControllerRecipe(
         kind=args.simulator,
-        version=None if claude else "0.154.0",
+        version=None if claude else CODEX_CONTROLLER_VERSION,
         model=args.simulator_model or "gpt-5.6-terra",
         effort=args.simulator_effort if claude else args.simulator_effort or "low",
         isolation="trusted-native",
@@ -125,12 +127,14 @@ def register_experiment_setup(
         "--simulator",
         choices=["none", "codex", "claude"],
         required=True,
-        help="Explicitly select no replies, Codex 0.154.0 or tool-disabled Claude.",
+        help=f"Explicitly select no replies, Codex {CODEX_CONTROLLER_VERSION} or tool-disabled Claude.",
     )
     parser.add_argument("--simulator-executable")
     parser.add_argument("--simulator-model")
     parser.add_argument(
-        "--simulator-effort", choices=["low", "medium", "high", "xhigh", "max", "ultra"]
+        "--simulator-effort",
+        choices=EFFORTS,
+        help=f"Simulator effort; Claude accepts {CLAUDE_EFFORT_TEXT}.",
     )
     parser.add_argument("--simulator-max-calls", type=int)
     parser.add_argument("--simulator-call-seconds", type=int)

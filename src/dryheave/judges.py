@@ -10,6 +10,7 @@ from pydantic import Field
 from dryheave.capture_models import CapturedFile
 from dryheave.cases import CaseCheck, FrozenCase, RubricCriterion
 from dryheave.claude_controller import claude_payload
+from dryheave.codex_policy import CODEX_CONTROLLER_VERSION
 from dryheave.controller_models import (
     ControllerRecipe,
     DialogueMessage,
@@ -335,7 +336,9 @@ def invoke_judge(
                 "A model-quality rubric requires an explicit JSON-command, Codex or Claude judge."
             )
         artifacts.record("request", request)
-        modern = recipe.kind == "claude" or (recipe.kind == "codex" and recipe.version == "0.154.0")
+        modern = recipe.kind == "claude" or (
+            recipe.kind == "codex" and recipe.version == CODEX_CONTROLLER_VERSION
+        )
         schema = controller_schema(StructuredJudgments if modern else JudgeResponse)
         atomic_write(artifacts.root / "schema.json", canonical_json(schema), replace=False)
         command = controller_command(recipe, artifacts.root)

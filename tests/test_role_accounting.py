@@ -3,6 +3,7 @@ import sys
 
 import pytest
 
+from conftest import HOST
 from dryheave.assessment_inputs import saved_judge_calls
 from dryheave.assessments import assess_run
 from dryheave.cases import RubricCriterion, load_frozen_case
@@ -102,7 +103,10 @@ def test_failed_roles_retain_observed_metadata_through_durable_report_pricing(
         update={"scoring": scoring, **({"simulator": recipe} if invalid != "judge-ids" else {})}
     )
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     assess_run(store, summary.run_id)
     if invalid == "judge-ids":
@@ -275,6 +279,7 @@ def test_codex_judge_failure_retains_response_settings_and_prices_native_usage(
             store, benchmark.model_copy(update={"cases": (changed,), "scoring": scoring})
         ),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     assess_run(store, summary.run_id)
     with RunStore(store.root).open(summary.run_id) as journal:

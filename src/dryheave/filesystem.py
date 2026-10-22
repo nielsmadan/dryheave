@@ -2,12 +2,12 @@ import errno
 import fcntl
 import os
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from uuid import uuid4
 
-from dryheave.errors import LimitError, LockBusyError, PathError
+from dryheave.errors import InputError, LimitError, LockBusyError, PathError
 
 
 @contextmanager
@@ -184,3 +184,19 @@ def publish_directory(staged: Path, destination: Path) -> None:
 def directory_names(path: Path) -> set[str]:
     with directory_fd(path) as descriptor:
         return set(os.listdir(descriptor))
+
+
+def expand_home(configured: str, home: Path | None) -> Path:
+    if configured == "~" or configured.startswith("~/"):
+        if home is None:
+            raise InputError(f"HOME is not set, so {configured} cannot be resolved.")
+        return (home / configured[2:]).absolute()
+    if configured.startswith("~"):
+        raise InputError(f"Only ~/ paths expand against the home directory, not {configured}.")
+    return Path(configured).absolute()
+
+
+def configured_directory(
+    environment: Mapping[str, str], variable: str, home: Path | None, default: str
+) -> Path:
+    return expand_home(environment.get(variable) or "~/" + default, home)

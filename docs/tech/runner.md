@@ -162,10 +162,13 @@ is left to the selected executable. Credentials are never inspected or logged.
 Codex 0.154.0 requires `runtime.discovery: "codex-clean-0.154.0"`. Its owned
 CODEX_HOME and TMPDIR are separate from evidence; plugins/startup sync and bundled
 skills are disabled. Optional opaque auth.json links require the frozen
-source-write acknowledgement. The adapter verifies the exact executable version.
-New calls retain cumulative usage even on invalid output or process failure;
-model/effort are not inferred from the prompt. Historical 0.153.4 serialization
-and launch behavior are preserved.
+source-write acknowledgement. Setup records `default_source: "codex-home"` on a
+link whose variable is `CODEX_AUTH_FILE`, which gives it the same `auth.json`
+default and existence check as a subject's (drivers.md); other names must be set. The
+adapter verifies the exact executable version. New calls retain cumulative
+usage even on invalid output or process failure; model/effort are not inferred
+from the prompt. Historical 0.153.4 serialization and launch behavior are
+preserved.
 
 Claude uses `kind: "claude"`, `version: "2.1.278"`, one executable in
 `command.argv`, an explicit model and
@@ -240,7 +243,26 @@ reports only an earlier run of the same experiment whose frozen
 without it, inspection falls back to the judge. A run with workflows on is
 refused before launch when a case has an inspect
 step but the scoring config has no inspector or judge with `max_calls` above zero,
-or when a slash prompt step targets an agent other than Claude. With workflows off,
+or when a slash prompt step targets an agent other than Claude or Codex on its live
+config. A new run is also refused, before it is reserved, when a Codex variant's
+slash step names a skill with no `skills/<name>/SKILL.md` (or bundled
+`skills/.system/<name>/SKILL.md`) in the live Codex config. Once
+`_prepare_live_config` returns the run's manifests, `run_experiment` repeats that
+check against the Codex snapshot manifest's `skills` (`require_snapshot_skills`);
+this check is authoritative and also covers resumed runs. Every one of these checks,
+and `bench`'s launch check against its check snapshot, takes each variant's
+required skills from `codex_workflow_skills(workflow_plan(...))`. Both refusals name every blocked variant and every
+missing skill. `_prepare_live_config` takes a resumed run's manifests from the
+journal's first `live-config` event per agent, not from the snapshot's
+`manifest.json`, and raises `SnapshotChangedError` (`snapshot_changed`, exit 1)
+when the snapshot's tree or Claude `state.json` no longer matches them. A
+snapshot directory left without an event is verified against its own
+`manifest.json` before that manifest is journaled. The returned manifests reach
+every attempt through `LaunchOptions.live` (`LiveSnapshots`), and each attempt
+materializes from its agent's journaled manifest and checks again; a live
+profile with no recorded manifest is refused. A missing skill raises
+`MissingSkillError` (`missing_skill`, exit 2); `bench` adds `--new-run` advice
+to either error when it was resuming a run. With workflows off,
 or a case with no effective workflow, the loop below never runs.
 
 A decision may carry `stop_kind` (`"done"`, the default, or `"declined"` when the
@@ -251,8 +273,12 @@ scripts and recorded calls keep their bytes. A simulator `stop` with `stop_kind:
 carry `stop_kind: "declined"` and end the run with `stop_reason: "simulator_stop"`
 as today. At a done point the runner asks `next_workflow_action` what to do:
 
-- `deliver_prompt`: send the prompt step verbatim; it advances once the subject
-  accepts it. Prompts starting with `/` use the `curated-native-command` submission policy; the rest use `conversation`.
+- `deliver_prompt`: send the prompt step; it advances once the subject accepts it.
+  Prompts starting with `/` use the `curated-native-command` submission policy; the
+  rest use `conversation`. Claude gets the prompt verbatim. A Codex subject gets
+  `/name args` as the skill mention `$name args` (`drivers.dialogs.delivered_prompt`); that text
+  is typed, matched against the accepted `UserMessage` and kept as the prompt
+  event's `delivered_text` field, which is dropped when the prompt went out verbatim.
 - `inspect`: inspect the live workspace against the step's criteria (inspection.py).
   A pass advances and the loop continues at the same done point. A failure stays on
   the step and asks the simulator for a fix-it reply: `SimulatorInput.inspection`

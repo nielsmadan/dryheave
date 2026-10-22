@@ -1,9 +1,22 @@
 import argparse
 from pathlib import Path
 
+from dryheave.claude_policy import CLAUDE_EFFORT_TEXT
+from dryheave.codex_policy import (
+    CODEX_AUTH_VARIABLE,
+    CODEX_DEFAULT_VERSION,
+    CODEX_PROFILE_VERSION_TEXT,
+    CODEX_PROFILE_VERSIONS,
+)
 from dryheave.errors import InputError
-from dryheave.models import AgentKind, EnvironmentReference
-from dryheave.profile_models import AssetSelection, CaptureSpec, NativeRecipe, RuntimeFileReference
+from dryheave.models import EFFORTS, AgentKind, EnvironmentReference
+from dryheave.profile_models import (
+    AssetSelection,
+    CaptureSpec,
+    NativeRecipe,
+    RuntimeFileReference,
+    codex_auth_reference,
+)
 from dryheave.skills import SKILL_NAMES
 
 
@@ -16,13 +29,9 @@ def runtime_references(
         )
     if source_environment is None:
         return ()
-    return (
-        RuntimeFileReference(
-            name="codex-auth",
-            source_path_environment=EnvironmentReference(name=source_environment),
-            acknowledge_source_writes=True,
-        ),
-    )
+    if source_environment == CODEX_AUTH_VARIABLE:
+        return (codex_auth_reference(source_environment),)
+    return (codex_auth_reference(source_environment, default_source=None),)
 
 
 def selected_capture(args: argparse.Namespace) -> CaptureSpec:
@@ -38,10 +47,11 @@ def selected_capture(args: argparse.Namespace) -> CaptureSpec:
         raise InputError(
             "Claude profile creation requires an explicit --model; Haiku must omit --effort."
         )
-    version = args.native_version if claude else args.native_version or "0.154.0"
-    if not claude and version != "0.154.0":
+    version = args.native_version if claude else args.native_version or CODEX_DEFAULT_VERSION
+    if not claude and version not in CODEX_PROFILE_VERSIONS:
         raise InputError(
-            "Friendly setup supports the Codex 0.154.0 protocol; use profile capture for legacy recipes."
+            f"Friendly setup supports the Codex {CODEX_PROFILE_VERSION_TEXT} protocol; "
+            "use profile capture for legacy recipes."
         )
     environment = list(args.environment)
     if claude and "CLAUDE_CODE_OAUTH_TOKEN" not in environment:
@@ -97,13 +107,18 @@ def capture_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--executable")
     parser.add_argument(
         "--native-version",
-        help="Version to record for Claude (observed at launch when omitted); Codex supports 0.154.0.",
+        help="Version to record for Claude (observed at launch when omitted); Codex supports "
+        f"{CODEX_PROFILE_VERSION_TEXT}.",
     )
     parser.add_argument(
         "--model",
         help="Explicit provider model; required for Claude, defaults to gpt-5.6-terra for Codex.",
     )
-    parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max", "ultra"])
+    parser.add_argument(
+        "--effort",
+        choices=EFFORTS,
+        help=f"Native effort; Claude accepts {CLAUDE_EFFORT_TEXT}.",
+    )
     parser.add_argument(
         "--config",
         type=Path,

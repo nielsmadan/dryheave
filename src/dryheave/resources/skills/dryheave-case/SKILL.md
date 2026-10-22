@@ -35,8 +35,11 @@ description: Curate Dryheave case and persona JSON, freeze historical repositori
    reported back (what they actually observed running the result), docs
    requests, re-reviews, and how they answered any skill's dialogs — and
    encode them in order as `workflow`. A `PromptStep` sends a follow-up's
-   prompt verbatim, with an `answer_hint` guiding how the simulated user
-   answers a dialog it triggers; an `InspectStep` names the criteria the
+   prompt, with an `answer_hint` guiding how the simulated user answers a
+   dialog it triggers. Claude gets the prompt verbatim; a Codex variant gets
+   `/name args` as `$name args` and needs `skills/name/SKILL.md` in its live
+   Codex config. Write skill steps as `/name` even for Codex; a prompt starting
+   with `$` or `!` is refused. An `InspectStep` names the criteria the
    author was actually checking at that point. Write a dedicated, observable
    inspect criterion for this — what the user would see using the result,
    never a file, type or symbol the subject has not mentioned — kept separate

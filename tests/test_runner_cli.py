@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import HOST
 from dryheave.cli import main
 from dryheave.errors import InputError
 from dryheave.experiments import create_experiment
@@ -37,7 +38,10 @@ def test_run_workflow_flag_reaches_run_options(store, benchmark, capsys):
 @pytest.mark.integration
 def test_status_rejects_assessment(store, benchmark, capsys):
     result = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     assert capsys.readouterr().err == f"dryheave run reserved: {result.run_id}\n"
     assert (
@@ -109,7 +113,12 @@ def test_assess_guard_reserves_an_executed_run_before_refusing_it(
     store, benchmark, capsys, monkeypatch
 ):
     identifier = create_experiment(store, benchmark)
-    summary = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    summary = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     assert capsys.readouterr().err == f"dryheave run reserved: {summary.run_id}\n"
     capture = load_capture(store, summary.attempts[0].capture_id)
     guarded = summary.model_copy(update={"unstarted_trials": ("pending-trial",)})
@@ -146,7 +155,12 @@ def test_assessment_failure_keeps_run_id_and_recovery_command(
     store, benchmark, capsys, monkeypatch, error
 ):
     identifier = create_experiment(store, benchmark)
-    summary = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    summary = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     assert capsys.readouterr().err == f"dryheave run reserved: {summary.run_id}\n"
     monkeypatch.setattr("dryheave.runner_cli.run_experiment", lambda *_args, **_kwargs: summary)
 
@@ -190,7 +204,12 @@ def test_new_cli_run_freezes_transport_and_resume_does_not_resolve_defaults(
     store, benchmark, tmp_path, monkeypatch, capsys
 ):
     identifier = create_experiment(store, benchmark)
-    summary = run_experiment(store, identifier, options=RunOptions(mode="offline-fixture"))
+    summary = run_experiment(
+        store,
+        identifier,
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
     runtime = (Path(".cache") / "rt").absolute()
     (tmp_path / "dryheave.toml").write_text(
         f"store = {json.dumps(str(store.root))}\nruntime = {json.dumps(str(runtime))}\ntui_test = 'tools/tui-test'\n"

@@ -1,8 +1,13 @@
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
-from conftest import judged_case_benchmark
+from conftest import codex_manifest, judged_case_benchmark, live_codex_home
 from dryheave.bench import (
+    CODEX_SANDBOX_ARGUMENTS,
     JUDGE_BUDGET,
     RoleChoice,
     VariantChoice,
@@ -17,16 +22,21 @@ from dryheave.bench import (
     resumable_run,
     simulator_budget,
     summarize,
+    summary_live_config,
     variant_recipe,
 )
+from dryheave.cases import PromptStep
 from dryheave.cli import main
 from dryheave.drivers.base import DeliveryUncertain
 from dryheave.errors import InputError
 from dryheave.experiment_models import ScoringConfig
 from dryheave.experiments import create_experiment, load_experiment, load_role
 from dryheave.journals import RunStore
-from dryheave.models import ObjectKind
+from dryheave.live_config import live_source, snapshot_directory, snapshot_live_config
+from dryheave.models import AgentKind, EnvironmentReference, JournalEvent, ObjectKind
 from dryheave.pricing import builtin_price_table
+from dryheave.profile_launch import LiveSnapshots
+from dryheave.profile_models import LiveConfigManifest, RuntimeFileReference
 from dryheave.profiles import load_profile
 from dryheave.report_models import (
     AttemptReport,
@@ -44,39 +54,314 @@ from dryheave.result_models import (
     RoleMetrics,
     UsageCharge,
 )
+from dryheave.serialization import canonical_json
 
 
 def test_roles_and_variants_parse_model_effort_and_changes():
     assert parse_role("claude-opus-5-5@high") == RoleChoice("claude-opus-5-5", "high")
     assert parse_role("claude-haiku-4-5") == RoleChoice("claude-haiku-4-5", None)
     assert parse_variant("no-jina=claude-sonnet-4-6@low,-mcp:jina,-mcp:context7") == VariantChoice(
-        "no-jina", RoleChoice("claude-sonnet-4-6", "low"), ("jina", "context7")
+        "no-jina", AgentKind.CLAUDE, RoleChoice("claude-sonnet-4-6", "low"), ("jina", "context7")
+    )
+
+
+def test_variants_take_an_optional_agent_prefix():
+    assert parse_variant("luna-high=codex:gpt-5.6-luna@high") == VariantChoice(
+        "luna-high", AgentKind.CODEX, RoleChoice("gpt-5.6-luna", "high"), ()
+    )
+    assert parse_variant("sonnet=claude:claude-sonnet-4-6@low") == VariantChoice(
+        "sonnet", AgentKind.CLAUDE, RoleChoice("claude-sonnet-4-6", "low"), ()
+    )
+
+
+def test_codex_variants_refuse_mcp_removal():
+    with pytest.raises(InputError) as raised:
+        parse_variant("terra=codex:gpt-5.6-terra@high,-mcp:jina")
+    assert str(raised.value) == (
+        "Variant terra: MCP server removal applies only to live Claude configs."
+    )
+
+
+def test_a_colon_in_the_model_name_is_not_mistaken_for_an_agent_prefix():
+    assert parse_variant("oss=codex:gpt-oss:20b") == VariantChoice(
+        "oss", AgentKind.CODEX, RoleChoice("gpt-oss:20b", None), ()
+    )
+    bedrock = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    assert parse_variant(f"br={bedrock}") == VariantChoice(
+        "br", AgentKind.CLAUDE, RoleChoice(bedrock, None), ()
     )
 
 
 @pytest.mark.parametrize(
-    "text", ["sonnet", "=claude-sonnet-4-6", "a=b@c@d", "a=claude-sonnet-4-6,+skill:x", "a=m,-mcp:"]
+    ("text", "agent"),
+    [
+        ("luna=codx:gpt-5.6-luna", "codx"),
+        ("luna=Codex:gpt-5.6-luna", "Codex"),
+        ("a=droid:m", "droid"),
+    ],
+)
+def test_an_unknown_agent_prefix_is_refused_rather_than_read_as_a_claude_model(text, agent):
+    with pytest.raises(InputError) as raised:
+        parse_variant(text)
+    assert str(raised.value) == (
+        f"Variant {text.split('=')[0]}: unknown agent {agent!r}; AGENT is claude or codex."
+    )
+
+
+def test_variants_are_refused_with_their_name_when_the_profile_contract_rejects_them():
+    with pytest.raises(InputError) as raised:
+        parse_variant("haiku=claude-haiku-4-5@low")
+    assert str(raised.value).startswith(
+        "Variant haiku: Explicit Claude effort requires a supported Sonnet or Opus model"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "sonnet",
+        "=claude-sonnet-4-6",
+        "a=b@c@d",
+        "a=claude-sonnet-4-6,+skill:x",
+        "a=m,-mcp:",
+        "a=codex:",
+    ],
 )
 def test_malformed_variants_are_rejected(text):
     with pytest.raises(InputError):
         parse_variant(text)
 
 
+EXECUTABLES = {AgentKind.CLAUDE: "claude", AgentKind.CODEX: "codex"}
+
+
 def test_variant_profiles_are_live_trusted_and_validate_effort(store):
-    haiku = VariantChoice("haiku", RoleChoice("claude-haiku-4-5", None), ())
-    sonnet = VariantChoice("sonnet", RoleChoice("claude-sonnet-4-6", "low"), ("jina",))
-    profiles = capture_variants(store, (haiku, sonnet), "claude")
+    haiku = VariantChoice("haiku", AgentKind.CLAUDE, RoleChoice("claude-haiku-4-5", None), ())
+    sonnet = VariantChoice(
+        "sonnet", AgentKind.CLAUDE, RoleChoice("claude-sonnet-4-6", "low"), ("jina",)
+    )
+    profiles = capture_variants(store, (haiku, sonnet), EXECUTABLES)
     recipe = load_profile(store, profiles["sonnet"]).recipe
     assert (recipe.config_source, recipe.workspace_trust, recipe.removed_mcp_servers) == (
         "live",
         "trusted",
         ("jina",),
     )
-    assert capture_variants(store, (haiku,), "claude")["haiku"] == profiles["haiku"]
+    assert capture_variants(store, (haiku,), EXECUTABLES)["haiku"] == profiles["haiku"]
     with pytest.raises(ValidationError):
-        variant_recipe(VariantChoice("bad", RoleChoice("claude-haiku-4-5", "low"), ()), "claude")
+        variant_recipe(
+            VariantChoice("bad", AgentKind.CLAUDE, RoleChoice("claude-haiku-4-5", "low"), ()),
+            "claude",
+        )
     with pytest.raises(InputError, match="unique"):
-        capture_variants(store, (haiku, haiku), "claude")
+        capture_variants(store, (haiku, haiku), EXECUTABLES)
+
+
+def test_codex_variant_profiles_run_live_codex_with_full_access_and_bound_auth(store):
+    terra = parse_variant("terra-high=codex:gpt-5.6-terra@high")
+    sonnet = parse_variant("sonnet=claude-sonnet-4-6@low")
+    profiles = capture_variants(
+        store, (terra, sonnet), {AgentKind.CLAUDE: "claude", AgentKind.CODEX: "/opt/codex"}
+    )
+    recipe = load_profile(store, profiles["terra-high"]).recipe
+    assert (
+        recipe.agent,
+        recipe.executable,
+        recipe.model,
+        recipe.effort,
+        recipe.config_source,
+        recipe.workspace_trust,
+        recipe.arguments,
+        recipe.environment,
+    ) == (
+        AgentKind.CODEX,
+        "/opt/codex",
+        "gpt-5.6-terra",
+        "high",
+        "live",
+        "trusted",
+        CODEX_SANDBOX_ARGUMENTS,
+        (),
+    )
+    assert recipe.runtime_files == (
+        RuntimeFileReference(
+            name="codex-auth",
+            source_path_environment=EnvironmentReference(name="CODEX_AUTH_FILE"),
+            acknowledge_source_writes=True,
+            default_source="codex-home",
+        ),
+    )
+    assert load_profile(store, profiles["sonnet"]).recipe.environment == (
+        EnvironmentReference(name="CLAUDE_CODE_OAUTH_TOKEN"),
+    )
+    with pytest.raises(ValidationError):
+        variant_recipe(
+            VariantChoice("bad", AgentKind.CODEX, RoleChoice("gpt-5.6-luna", "extreme"), ()),
+            "codex",
+        )
+
+
+def _live_config_event(sequence: int, manifest: LiveConfigManifest) -> JournalEvent:
+    return JournalEvent(
+        sequence=sequence,
+        previous_hash=None,
+        timestamp=datetime.now(UTC),
+        event="live-config",
+        data=manifest.model_dump(mode="json"),
+    )
+
+
+MANIFEST_KEYS = {
+    "schema_version",
+    "source",
+    "entries",
+    "files",
+    "bytes",
+    "tree_sha256",
+    "settings_sha256",
+    "instructions_sha256",
+    "skills",
+    "enabled_plugins",
+    "mcp_servers",
+    "hook_events",
+}
+
+
+@pytest.mark.parametrize("agents", [("codex",), ("claude",), ("claude", "codex")])
+def test_summary_live_config_keys_each_journaled_manifest_by_its_agent(tmp_path, agents):
+    run = tmp_path / "run"
+    run.mkdir()
+    claude_home = tmp_path / "claude"
+    claude_home.mkdir()
+    (claude_home / "CLAUDE.md").write_text("Be terse.")
+    environment = {
+        "CLAUDE_CONFIG_DIR": str(claude_home),
+        "CODEX_HOME": str(live_codex_home(tmp_path)),
+    }
+    events = [
+        _live_config_event(
+            sequence,
+            snapshot_live_config(
+                live_source(agent, environment, tmp_path), run / snapshot_directory(agent)
+            ),
+        )
+        for sequence, agent in enumerate(map(AgentKind, agents), start=1)
+    ]
+    summary = summary_live_config(events)
+    assert list(summary) == list(agents)
+    keys = {"claude": MANIFEST_KEYS | {"state_sha256"}, "codex": MANIFEST_KEYS}
+    sources = {"claude": str(claude_home), "codex": environment["CODEX_HOME"]}
+    assert {agent: set(manifest) for agent, manifest in summary.items()} == {
+        agent: keys[agent] for agent in agents
+    }
+    assert {agent: manifest["source"] for agent, manifest in summary.items()} == {
+        agent: sources[agent] for agent in agents
+    }
+
+
+def test_summary_live_config_reports_the_journal_not_the_snapshot_manifest_file(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    snapshot = run / snapshot_directory(AgentKind.CODEX)
+    source = live_source(AgentKind.CODEX, {"CODEX_HOME": str(live_codex_home(tmp_path))}, tmp_path)
+    recorded = snapshot_live_config(source, snapshot)
+    forged = recorded.model_copy(update={"skills": ("forged",)})
+    (snapshot / "manifest.json").write_bytes(canonical_json(forged))
+    summary = summary_live_config([_live_config_event(1, recorded), _live_config_event(2, forged)])
+    assert summary["codex"]["skills"] == ["review"]
+
+
+def test_snapshot_for_check_writes_each_agent_to_its_own_snapshot_directory(tmp_path):
+    from dryheave.bench import snapshot_for_check
+
+    codex_home = live_codex_home(tmp_path)
+    claude_home = tmp_path / "claude"
+    claude_home.mkdir()
+    (claude_home / "CLAUDE.md").write_text("Be terse.")
+    environment = {"CODEX_HOME": str(codex_home), "CLAUDE_CONFIG_DIR": str(claude_home)}
+    root = tmp_path / "check"
+    codex = snapshot_for_check(AgentKind.CODEX, root, environment=environment, home=tmp_path)
+    claude = snapshot_for_check(AgentKind.CLAUDE, root, environment=environment, home=tmp_path)
+    assert (codex.agent, codex.source) == (AgentKind.CODEX, str(codex_home))
+    assert (claude.agent, claude.source) == (AgentKind.CLAUDE, str(claude_home))
+    assert (root / "live-config-codex/AGENTS.md").read_text() == "Be brief."
+    assert (root / "live-config/CLAUDE.md").read_text() == "Be terse."
+
+
+def _skill_plan(variants, skills):
+    from dryheave.runner import SlashTrial, WorkflowPlan
+
+    return WorkflowPlan(
+        True,
+        {},
+        tuple(
+            SlashTrial(variant.name, variant_recipe(variant, variant.agent.value), skills)
+            for variant in variants
+            if skills
+        ),
+    )
+
+
+def _check_snapshots(tmp_path, variants, *, skills=()):
+    from dryheave import bench
+
+    claude_home = tmp_path / "claude"
+    claude_home.mkdir(exist_ok=True)
+    (claude_home / ".claude.json").write_text('{"mcpServers": {"jina": {}}}')
+    chosen = tuple(map(parse_variant, variants))
+    return bench.check_snapshots(
+        tmp_path / "check",
+        chosen,
+        _skill_plan(chosen, skills),
+        environment={
+            "CODEX_HOME": str(live_codex_home(tmp_path)),
+            "CLAUDE_CONFIG_DIR": str(claude_home),
+        },
+        home=tmp_path,
+    )
+
+
+def test_check_snapshots_snapshot_each_agent_its_variants_use(tmp_path):
+    manifests = _check_snapshots(
+        tmp_path,
+        ("terra=codex:gpt-5.6-terra@low", "no-jina=claude-sonnet-4-6@low,-mcp:jina"),
+        skills=("review",),
+    )
+    assert {agent: manifest.source for agent, manifest in manifests.items()} == {
+        AgentKind.CLAUDE: str(tmp_path / "claude"),
+        AgentKind.CODEX: str(tmp_path / "codex"),
+    }
+    assert manifests[AgentKind.CLAUDE].mcp_servers == ("jina",)
+    assert manifests[AgentKind.CODEX].skills == ("review",)
+
+
+def test_check_snapshots_refuse_a_codex_variant_missing_a_workflow_skill(tmp_path):
+    from dryheave.errors import MissingSkillError
+
+    with pytest.raises(MissingSkillError) as raised:
+        _check_snapshots(
+            tmp_path,
+            ("terra=codex:gpt-5.6-terra@low", "luna=codex:gpt-5.6-luna@high"),
+            skills=("review", "release-notes"),
+        )
+    assert str(raised.value) == (
+        "Variants terra, luna cannot run workflow skill 'release-notes': "
+        "the Codex config has no skills/release-notes/SKILL.md."
+    )
+
+
+def test_check_snapshots_refuse_a_claude_variant_removing_an_unknown_mcp_server(tmp_path):
+    with pytest.raises(InputError, match="not user-scoped in the live config: context7"):
+        _check_snapshots(tmp_path, ("no-c7=claude-sonnet-4-6@low,-mcp:context7",))
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["claude", "codex"]
+
+
+def test_a_refused_snapshot_check_removes_its_config_copy(tmp_path):
+    from dryheave.errors import MissingSkillError
+
+    with pytest.raises(MissingSkillError, match="no skills/code-review"):
+        _check_snapshots(tmp_path, ("terra=codex:gpt-5.6-terra@low",), skills=("code-review",))
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["claude", "codex"]
 
 
 def test_role_command_timeout_follows_the_per_call_budget():
@@ -147,7 +432,7 @@ def test_check_case_refuses_a_checks_only_or_judge_criterion_only_case_without_j
 def test_bench_experiment_is_content_addressed_and_resumable(store, benchmark):
     case_id = check_case(store, benchmark.cases[0], judged=False)
     profiles = capture_variants(
-        store, (VariantChoice("sonnet", RoleChoice("claude-sonnet-4-6", "low"), ()),), "claude"
+        store, (parse_variant("sonnet=claude-sonnet-4-6@low"),), EXECUTABLES
     )
 
     def draft():
@@ -183,7 +468,7 @@ def test_bench_resumes_only_a_run_with_the_same_workflow_setting(store, benchmar
 
     case_id = check_case(store, benchmark.cases[0], judged=False)
     profiles = capture_variants(
-        store, (VariantChoice("sonnet", RoleChoice("claude-sonnet-4-6", "low"), ()),), "claude"
+        store, (parse_variant("sonnet=claude-sonnet-4-6@low"),), EXECUTABLES
     )
     identifier = create_experiment(
         store,
@@ -430,7 +715,31 @@ class _MenuTerminal:
         )
 
 
-def _launch_check(store, tmp_path, monkeypatch, terminal, commands=(), workflow=True):
+class _CodexTerminal(_MenuTerminal):
+    def state(self):
+        from dryheave.drivers.models import Screen
+
+        shown = self.typed or "Ask Codex to do anything"
+        return Screen(
+            text=f"\u203a {shown}\n\n  gpt-5.6-terra high",
+            exited=None,
+            cursor={"x": 2 + len(self.typed), "y": 0},
+        )
+
+
+def _launch_check(  # noqa: PLR0913
+    store,
+    tmp_path,
+    monkeypatch,
+    terminal,
+    *,
+    commands=(),
+    workflow=True,
+    agent=None,
+    environment=None,
+    runtime_files=(),
+    linked=None,
+):
     from contextlib import nullcontext
     from types import SimpleNamespace
 
@@ -438,6 +747,7 @@ def _launch_check(store, tmp_path, monkeypatch, terminal, commands=(), workflow=
     from dryheave.drivers.models import Observation
     from dryheave.models import AgentKind
 
+    agent = agent or AgentKind.CLAUDE
     terminals = []
 
     def build(*args, **kwargs):
@@ -455,13 +765,26 @@ def _launch_check(store, tmp_path, monkeypatch, terminal, commands=(), workflow=
             return False
 
         def start(self, plan, environment):
+            if linked is not None:
+                linked.append(os.readlink(Path(plan.config_roots["config"]) / "auth.json"))
             return Observation(state="ready", reason="Composer is empty.", text="> ")
 
     plan = SimpleNamespace(
-        launchable=True, issues=(), config_roots={"config": str(tmp_path)}, agent=AgentKind.CLAUDE
+        launchable=True,
+        issues=(),
+        config_roots={"config": str(tmp_path)},
+        agent=agent,
+        runtime_files=runtime_files,
     )
-    monkeypatch.setattr(bench, "materialize_profile", lambda *args, **kwargs: plan)
-    monkeypatch.setattr(bench, "RuntimeBindings", lambda *args: nullcontext())
+    options = []
+
+    def materialize(*args):
+        options.append(args[-1])
+        return plan
+
+    monkeypatch.setattr(bench, "materialize_profile", materialize)
+    if not runtime_files:
+        monkeypatch.setattr(bench, "RuntimeBindings", lambda *args: nullcontext())
     monkeypatch.setattr(bench, "launch_environment", lambda *args: {})
     monkeypatch.setattr(bench, "NativeLogSource", lambda *args, **kwargs: None)
     monkeypatch.setattr(bench, "DriverSession", Session)
@@ -472,11 +795,78 @@ def _launch_check(store, tmp_path, monkeypatch, terminal, commands=(), workflow=
         "a" * 64,
         tmp_path / "checks",
         paths=(tmp_path / "rt", tmp_path / "tui-test"),
-        environment={},
+        environment=environment or {},
+        manifests={AgentKind.CODEX: codex_manifest("code-review")},
         workflow=workflow,
         commands=commands,
     )
+    assert options[0].live == LiveSnapshots(
+        tmp_path / "checks", {AgentKind.CODEX: codex_manifest("code-review")}
+    )
     return observation, terminals[0]
+
+
+def test_launch_check_binds_the_default_codex_auth_file_under_the_inherited_home(
+    store, tmp_path, monkeypatch
+):
+    from functools import partial
+
+    from dryheave.profile_models import codex_auth_reference
+
+    auth = tmp_path / "user/.codex/auth.json"
+    auth.parent.mkdir(parents=True)
+    auth.write_text("{}")
+    environment = {"HOME": str(tmp_path / "user")}
+    linked: list[str] = []
+    observation, _terminal = _launch_check(
+        store,
+        tmp_path,
+        monkeypatch,
+        partial(_CodexTerminal, commands=()),
+        agent=AgentKind.CODEX,
+        environment=environment,
+        runtime_files=(codex_auth_reference("CODEX_AUTH_FILE"),),
+        linked=linked,
+    )
+    assert observation.state == "ready"
+    assert linked == [str(auth)]
+    assert environment == {"HOME": str(tmp_path / "user")}
+
+
+class _CodexPopupTerminal(_CodexTerminal):
+    def state(self):
+        from dryheave.drivers.models import Screen
+
+        if not self.typed.startswith("$"):
+            return super().state()
+        return Screen(
+            text="\u203a $\n\n  code-review  Review the change.",
+            exited=None,
+            cursor={"x": 3, "y": 0},
+        )
+
+
+def test_launch_check_fails_a_codex_skill_mention_the_input_box_changes(
+    store, tmp_path, monkeypatch
+):
+    from functools import partial
+
+    observation, terminal = _launch_check(
+        store,
+        tmp_path,
+        monkeypatch,
+        partial(_CodexPopupTerminal, commands=()),
+        commands=("/code-review --quick",),
+        agent=AgentKind.CODEX,
+    )
+    assert (observation.state, observation.reason) == (
+        "unsupported",
+        (
+            "Workflow command '$code-review' was not ready to submit as typed; "
+            "check that the input box shows it unchanged."
+        ),
+    )
+    assert (terminal.pastes, terminal.enters) == (["dryheave launch check", "$code-review"], 0)
 
 
 @pytest.mark.parametrize("fail_on", ["paste", "clear"])
@@ -525,6 +915,29 @@ def test_launch_check_types_each_workflow_command_through_the_menu_without_submi
     assert (terminal.clears, terminal.enters, terminal.typed) == (4, 0, "")
 
 
+def test_launch_check_types_workflow_commands_into_codex_as_skill_mentions(
+    store, tmp_path, monkeypatch
+):
+    from functools import partial
+
+    observation, terminal = _launch_check(
+        store,
+        tmp_path,
+        monkeypatch,
+        partial(_CodexTerminal, commands=()),
+        commands=("/code-review --quick", " \n/release-notes"),
+        agent=AgentKind.CODEX,
+    )
+    assert observation.state == "ready"
+    assert terminal.pastes == [
+        "dryheave launch check",
+        "$code-review",
+        "$code-review --quick",
+        "$release-notes",
+    ]
+    assert (terminal.clears, terminal.enters, terminal.typed) == (4, 0, "")
+
+
 def test_launch_check_skips_slash_probing_when_workflows_are_disabled(store, tmp_path, monkeypatch):
     from functools import partial
 
@@ -567,25 +980,47 @@ def test_launch_check_fails_a_workflow_command_the_menu_does_not_highlight(
     assert (terminal.pastes[-1], terminal.enters) == (command, 0)
 
 
-def test_slash_prompts_are_the_case_workflow_commands(store, monkeypatch):
-    from dryheave import bench
-    from dryheave.cases import CaseContent, InspectStep, PromptStep, RubricCriterion
+@pytest.mark.parametrize("workflow", [True, False])
+def test_bench_workflow_derives_slash_commands_and_codex_skills_from_the_experiment(
+    store, benchmark, workflow
+):
+    from dryheave.bench import bench_workflow, slash_commands
+    from dryheave.cases import load_frozen_case
+    from dryheave.runner import codex_workflow_skills
 
-    case = CaseContent(
-        title="t",
-        initial_prompt="p",
-        criteria=(
-            RubricCriterion(criterion_id="quality", required=True, rubric="Quality rubric text."),
+    case_id = store.resolve(benchmark.cases[0])
+    case = load_frozen_case(store, case_id)
+    steps = (
+        PromptStep(step_id="review", prompt="/code-review --quick"),
+        PromptStep(step_id="docs", prompt="Update the docs."),
+        PromptStep(step_id="notes", prompt=" \n/release-notes"),
+    )
+    changed = store.put(
+        ObjectKind.CASE,
+        case.model_copy(update={"workflow": steps}),
+        files=store.read_blobs(case_id),
+        references=(case.persona_id, case.repository_id),
+    )
+    profiles = capture_variants(
+        store,
+        (
+            parse_variant("terra=codex:gpt-5.6-terra@low"),
+            parse_variant("sonnet=claude-sonnet-4-6@low"),
         ),
-        workflow=(
-            InspectStep(step_id="check", criteria=("quality",)),
-            PromptStep(step_id="review", prompt="/code-review --quick"),
-            PromptStep(step_id="docs", prompt="Update the docs."),
-            PromptStep(step_id="notes", prompt=" \n/release-notes"),
+        EXECUTABLES,
+    )
+    experiment_id = create_experiment(
+        store,
+        bench_draft(
+            changed, profiles, simulator=benchmark.simulator, judge=None, repetitions=1, seed=0
         ),
     )
-    monkeypatch.setattr(bench, "load_frozen_case", lambda store, case_id: case)
-    assert bench.slash_prompts(store, "case") == ("/code-review --quick", " \n/release-notes")
+    plan = bench_workflow(store, experiment_id, workflow=workflow)
+    assert (slash_commands(plan), codex_workflow_skills(plan)) == (
+        (("/code-review --quick", " \n/release-notes"), {"terra": ("code-review", "release-notes")})
+        if workflow
+        else ((), {})
+    )
 
 
 def _workflow_case(*, workflow):
@@ -655,7 +1090,7 @@ def test_attempt_progress_lines_name_stop_reason_and_workflow_fields():
 def test_bench_draft_sets_the_inspector_scoring_recipe(store, benchmark):
     case_id = check_case(store, benchmark.cases[0], judged=False)
     profiles = capture_variants(
-        store, (VariantChoice("sonnet", RoleChoice("claude-sonnet-4-6", "low"), ()),), "claude"
+        store, (parse_variant("sonnet=claude-sonnet-4-6@low"),), EXECUTABLES
     )
     inspector = claude_role(RoleChoice("claude-haiku-4-5", None), "claude", JUDGE_BUDGET)
     draft = bench_draft(

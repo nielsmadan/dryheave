@@ -3,6 +3,7 @@ import sys
 
 import pytest
 
+from conftest import HOST
 from dryheave.assessments import assess_run
 from dryheave.cases import RubricCriterion, load_frozen_case
 from dryheave.controller_models import ControllerRecipe
@@ -57,6 +58,7 @@ def test_deterministic_criterion_named_judge_has_separate_artifacts(
             store, graded_benchmark.model_copy(update={"cases": (changed,), "scoring": scoring})
         ),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert [(item.criterion_id, item.outcome) for item in result.criteria] == [
@@ -148,7 +150,10 @@ def test_partial_judge_response_retains_valid_judgment_and_spend(store, graded_b
     )
     benchmark = graded_benchmark.model_copy(update={"cases": (changed,), "scoring": scoring})
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.deterministic_completion == "pass"
@@ -255,6 +260,7 @@ def test_unfinished_assessment_and_export_reconstruct_durable_judge_spend(
         store,
         create_experiment(store, graded_benchmark),
         options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     active = []
 
@@ -335,7 +341,10 @@ def test_judge_is_not_called_when_the_subject_accepted_no_prompt(store, graded_b
         update={"cases": (changed,), "scoring": scoring, "fixture": fixture}
     )
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.accepted_turns == 0
@@ -683,7 +692,10 @@ def test_offline_assessment_calls_judge_for_checks_only_case(store, graded_bench
         }
     )
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert [(item.check_id, item.outcome, item.answer) for item in result.checks] == [
@@ -740,7 +752,10 @@ def test_offline_assessment_answers_checks_in_the_judge_call(store, graded_bench
         }
     )
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert [(item.check_id, item.outcome, item.answer) for item in result.checks] == [
@@ -790,7 +805,10 @@ def test_judge_projection_truncates_actions_of_a_fixture_capture(store, graded_b
         }
     )
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     capture_id = summary.pending_assessment[0]
     capture = load_capture(store, capture_id)
@@ -840,7 +858,10 @@ def test_resumed_assessment_reuses_journaled_check_results(
         }
     )
     summary = run_experiment(
-        store, create_experiment(store, benchmark), options=RunOptions(mode="offline-fixture")
+        store,
+        create_experiment(store, benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
     )
     saved = CheckResult(check_id="asked", outcome="pass", answer="yes")
     with RunStore(store.root).open(summary.run_id) as journal:

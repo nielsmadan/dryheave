@@ -14,7 +14,9 @@ Codex 0.153.4 and Claude 2.1.263 log shapes have fixture coverage; Claude's live
 TUI integration is unverified. Codex 0.154.0 has completed a live clarification
 exchange at Terra low and high effort. Both subjects then requested design
 approval and stopped without editing; successful live task completion remains
-unverified. See [native setup and limits](docs/user/native-setup.md) and the
+unverified. Codex 0.162.1 bench subjects have fixture coverage only: no launch
+check or trial has run against a real Codex 0.162.1 yet. See
+[native setup and limits](docs/user/native-setup.md) and the
 [dated QA records](docs/tests/qa-cli/).
 
 ## Install and try the complete offline loop
@@ -117,7 +119,91 @@ or a budget runs out. `bench CASE --variant NAME=MODEL[@EFFORT] [--judge
 MODEL[@EFFORT]]` runs that workflow by default; `--no-workflow` sends only the
 case's initial prompt, for a first-shot comparison against the full workflow.
 `--inspector MODEL[@EFFORT]` grades inspect steps with a separate model instead
-of the judge's.
+of the judge's. `bench` resumes an unfinished earlier run of the same experiment,
+and the experiment includes the built-in price table, so after an update that
+changes that table the same command starts and pays for a new run, while the
+earlier run stays reportable. Its JSON result's `live_config` maps each agent
+with a live snapshot in the run, `claude` and `codex`, to the manifest recorded
+in the run journal's first `live-config` event for that agent (`source`,
+`entries`, `files`, `bytes`, `tree_sha256`, `settings_sha256`,
+`instructions_sha256`, `skills`, `enabled_plugins`, `mcp_servers`,
+`hook_events`), even when the run has only Claude variants. The map key names the
+agent, so no value carries an `agent` key. A Claude manifest also carries
+`state_sha256`, except in runs recorded before that field existed.
+
+A variant is `NAME=[AGENT:]MODEL[@EFFORT][,-mcp:SERVER...]` with `AGENT` either
+`claude` (the default) or `codex`, so `luna-high=codex:gpt-5.6-luna@high` runs
+Codex (`--codex PATH`, default `codex`) beside Claude variants on the same case.
+Any other letters-only prefix, such as `codx:` or `Codex:`, is refused as a
+mistyped agent; a prefix with digits, dots or dashes is read as part of a Claude
+model name instead, since a model ID such as a Bedrock
+`us.anthropic.claude-sonnet-4-5-20250929-v1:0` can itself contain a colon. A
+variant whose model, effort or `-mcp:SERVER` removal its agent's profile would
+refuse is refused when parsed, with the variant's name.
+Each agent's variants start from one snapshot of its live config (`~/.claude` or
+`CLAUDE_CONFIG_DIR`; `~/.codex` or `CODEX_HOME`, without credentials or session
+state). The Codex snapshot copies only `config.toml`, `AGENTS.md`, `skills`,
+`rules`, `prompts`, `hooks` and `hooks.json`; plugins stay referenced by the
+absolute paths already in `config.toml` rather than copied. A symlinked
+top-level entry refuses the snapshot; links inside a copied entry are copied as
+their target content, unless they lead back into the Codex config outside the
+copied entries or resolve to a credential file, a credential, history, cache or
+trust name, or anything under `.ssh`, `.aws`, `.gnupg`, `.config/gcloud`,
+`.docker` or `.kube`, which refuses the snapshot. The Claude snapshot instead keeps every link as a link, and its
+hashes cover the link text, not the target's bytes, so a change behind a link
+goes undetected. Every copied Codex file is screened for credentials, by file
+kind. `config.toml`, `hooks.json`, `hooks` and `rules` get the same check as
+selected profile assets: a credential, history, cache or trust path, a literal
+value under a credential name (env references such as `env_http_headers`,
+`env_vars`, `env_key` and `*_env_var` are fine), a literal
+`experimental_bearer_token` or token-named `http_headers` entry, a literal
+value under a secret-named key (such as `HF_TOKEN`) in an `env` table or
+`[shell_environment_policy.set]` (a `$VAR` value is fine), a URL carrying a
+password, a credential-named query parameter in a URL, a literal credential assignment in
+a hook or rule file, or token material refuses the snapshot. TOML table and key
+names, such as a `[projects."…"]` path, are not scanned. `skills`, `prompts`
+and `AGENTS.md` are prose: only realistic-length key material (an `sk-` key
+needs at least 32 characters after its prefix) and credential file names
+(`.env`, `*.pem`, `id_rsa*`, `credentials*.json`, `credentials`, `auth.json`,
+`.git-credentials`, `.npmrc`, `.pypirc`, `.pgpass`) refuse them, so a short
+token-shaped secret in prose is copied; a directory with such a name refuses the
+snapshot too. `.git` directories in any entry, and `node_modules`, `.venv`,
+`venv`, `__pycache__`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache` and `.tox`
+directories under `skills` and `prompts`, are left out of the snapshot and its
+hashes.
+A resumed run and every attempt refuse a snapshot whose files or shared state no
+longer match the hashes in the run journal's `live-config` event. A run
+recorded before the manifest carried `state_sha256` is checked against its file
+hashes and its MCP server names only.
+Codex variants run with `--sandbox danger-full-access` (recorded as launch issue
+`codex-sandbox-disabled`) and the live approval settings; a snapshot whose
+`config.toml` sets `approval_policy = "never"` adds launch issue
+`codex-approvals-disabled`. `workspace-write` is
+not used because it silently blocks writes outside the repository, such as
+Xcode's DerivedData. Bench variants also trust the case workspace, so the case
+repository's own Codex config, hooks and exec policies load without a sandbox;
+trust a case repository as you would your own code. A live Codex subject
+inherits the operator's environment without `CLAUDE_CODE_OAUTH_TOKEN`,
+`ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`. Codex variants bind `auth.json`
+by symlink from `CODEX_AUTH_FILE`, or from `auth.json` under `$CODEX_HOME` or
+`~/.codex` when it is unset, the same Codex home the live snapshot reads; a
+leading `~/` expands against the inherited `HOME`, a relative or `~user/` path
+is refused, and so is a file that does not exist. The default comes from the
+variant's auth reference (`default_source: "codex-home"`), not from the
+variable's name. Bench checks it before the run and each binding resolves it
+again, without writing the default into any environment and without reading the
+file.
+`-mcp:SERVER` removal is Claude-only. The simulator, judge and
+inspector stay Claude, so `CLAUDE_CODE_OAUTH_TOKEN` is always required. A
+workflow command `/name args` reaches a Codex variant as the skill mention
+`$name args`, and only when the Codex config has a skill of that name: a
+directory up to six levels under `skills` (or the bundled `skills/.system`),
+outside hidden directories, holding a `SKILL.md` whose frontmatter `name`, or
+else the directory name, is `name`. A new run is refused before it is
+reserved when the live config lacks it, and a resumed run when its snapshot
+does. The launch check types each command in that form and clears it unsent, so
+it cannot show that Enter submits a `$name` mention; watch the first paid
+trial's review step.
 
 Haiku profiles omit effort. Derive Sonnet with `--model MODEL --effort low`;
 derive back to Haiku with `--clear-effort`. This is a configuration comparison,
@@ -222,9 +308,13 @@ exported inputs can contain sensitive task text and should be reviewed before sh
 
 Runs keep each attempt's working copies (the agent's workspace, its native profile and
 the grading workspaces) next to the journal, about 700 MB per attempt for an Xcode
-project. `store compact RUN_ID [--report DIR]` deletes them once every attempt is
-finished and assessed and its capture and assessment verify; results, captures and
-evidence stay in the store, so reports, the viewer and regrades keep working.
+project. `store compact RUN_ID [--report DIR]` deletes the workspace, assessment and
+regrade copies, plus the `plugins`, `skills` and `cache` directories inside the native
+profile and every `auth.json` and `.credentials.json` file or link in it (never
+a link's target), once every attempt is finished and assessed and its capture and
+assessment verify; the profile's session logs, file history and backups stay, and
+results, captures and evidence stay in the store, so reports, the viewer and
+regrades keep working.
 `store prune-checks` deletes failed launch-check evidence older than an hour.
 
 Read the contracts for [authoring](docs/tech/authoring.md),

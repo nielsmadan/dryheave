@@ -10,7 +10,9 @@ from dryheave.models import TrialStage
 from dryheave.runner_state import ExecutionJournal
 from dryheave.storage import ObjectStore
 
-WORKING_DIRECTORIES = ("workspace", "assessment", "regrades", "profile")
+WORKING_DIRECTORIES = ("workspace", "assessment", "regrades")
+PRUNED_PROFILE_DIRECTORY_NAMES = frozenset({"plugins", "skills", "cache"})
+PROFILE_CREDENTIAL_NAMES = frozenset({"auth.json", ".credentials.json"})
 COMPACTED_EVENT = "compacted"
 CHECK_MINIMUM_AGE_SECONDS = 3600.0
 UNASSESSED_STAGES = frozenset({TrialStage.CAPTURED, TrialStage.AUDITED, TrialStage.GRADING})
@@ -64,20 +66,73 @@ def _require_retained(store: ObjectStore, execution: ExecutionJournal) -> None:
                 ) from error
 
 
+def _profile_removals(profile_root: Path) -> list[Path]:
+    found: list[Path] = []
+    for current, directories, files in os.walk(profile_root, followlinks=False):
+        base = Path(current)
+        pruned = {
+            name
+            for name in directories
+            if name in PRUNED_PROFILE_DIRECTORY_NAMES and not (base / name).is_symlink()
+        }
+        credentials = {
+            name
+            for name in (*directories, *files)
+            if name in PROFILE_CREDENTIAL_NAMES
+            and ((base / name).is_symlink() or not (base / name).is_dir())
+        }
+        chosen = pruned | credentials
+        found.extend(base / name for name in chosen)
+        directories[:] = [name for name in directories if name not in chosen]
+    return sorted(found)
+
+
+def _require_owned(run: Path, root: Path) -> None:
+    linked = next(
+        (path for path in (root.parent, root) if path.is_symlink()),
+        None,
+    )
+    if linked is not None:
+        raise InputError(
+            f"Attempt path {linked.relative_to(run)} is a symlink; compaction refuses to "
+            "follow it out of the run directory."
+        )
+
+
+def _attempt_removals(root: Path) -> list[Path]:
+    working = [
+        root / name
+        for name in WORKING_DIRECTORIES
+        if (root / name).is_dir() and not (root / name).is_symlink()
+    ]
+    profile_root = root / "profile"
+    if not profile_root.is_dir() or profile_root.is_symlink():
+        return working
+    return [*working, *_profile_removals(profile_root)]
+
+
+def _remove(path: Path) -> int:
+    if path.is_symlink() or not path.is_dir():
+        info = os.lstat(path)
+        path.unlink()
+        return info.st_size if stat.S_ISREG(info.st_mode) else 0
+    size = _size(path)
+    shutil.rmtree(path)
+    return size
+
+
 def compact_run(store: ObjectStore, run_id: str) -> Compaction:
     with RunStore(store.root).open(run_id) as journal:
         execution = ExecutionJournal(journal)
         _require_retained(store, execution)
         removed = []
         freed = 0
-        for state in execution.attempts.values():
-            root = execution.attempt_root(state)
-            for name in WORKING_DIRECTORIES:
-                path = root / name
-                if not path.is_dir() or path.is_symlink():
-                    continue
-                freed += _size(path)
-                shutil.rmtree(path)
+        roots = [execution.attempt_root(state) for state in execution.attempts.values()]
+        for root in roots:
+            _require_owned(journal.path, root)
+        for root in roots:
+            for path in _attempt_removals(root):
+                freed += _remove(path)
                 removed.append(str(path.relative_to(journal.path)))
         journal.append(COMPACTED_EVENT, {"removed": list(removed), "bytes_freed": freed})
         return Compaction(run_id, len(execution.attempts), tuple(removed), freed)

@@ -3,6 +3,7 @@ from uuid import uuid4
 
 import pytest
 
+from conftest import HOST
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.base import TransportError
 from dryheave.drivers.fake import FakeEventSource
@@ -69,6 +70,7 @@ def test_native_wiring_builds_log_source_before_launch_and_preserves_plan(
         options=RunOptions(
             mode="native", runtime_root=str(runtime), transport=".tools/tui-test/tui-test"
         ),
+        host=HOST,
     )
     captured = load_capture(store, result.pending_assessment[0])
     assert order == ["log-source", "launch"]
@@ -129,6 +131,7 @@ def test_lost_launch_acknowledgement_requires_terminal_reconciliation(
             runtime_root=str(Path(".cache") / ("l" + uuid4().hex[:3])),
             transport=".tools/tui-test/tui-test",
         ),
+        host=HOST,
     )
     expected = 2 if terminal_closed else 1
     assert len(launches) == len(result.attempts) == expected
@@ -140,13 +143,13 @@ def test_lost_launch_acknowledgement_requires_terminal_reconciliation(
     assert captured.cleanup.terminal_closed is terminal_closed
     if terminal_closed:
         assert captured.workspace.complete
-        assert run_experiment(store, resume=result.run_id) == result
+        assert run_experiment(store, resume=result.run_id, host=HOST) == result
     else:
         assert captured.cleanup.errors == ("terminal_close_failed",)
         assert captured.workspace.complete is False
         assert captured.evidence_omissions == ("cleanup_unresolved",)
         with pytest.raises(InputError, match="reconciliation before another subject launch"):
-            run_experiment(store, resume=result.run_id)
+            run_experiment(store, resume=result.run_id, host=HOST)
 
 
 @pytest.mark.integration
@@ -187,6 +190,7 @@ def test_terminal_owner_publishes_pending_identities_before_each_simulator_call(
             runtime_root=str(Path(".cache") / ("o" + uuid4().hex[:3])),
             transport=".tools/tui-test/tui-test",
         ),
+        host=HOST,
     )
     captured = load_capture(store, result.pending_assessment[0])
     assert captured.accepted_turns == 2

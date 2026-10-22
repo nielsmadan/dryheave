@@ -1,6 +1,6 @@
 {
-  "version": "anthropic-2026-10-14",
-  "effective_date": "2026-10-14",
+  "version": "list-2026-10-16",
+  "effective_date": "2026-10-16",
   "currency": "USD",
   "unit": "per-million-tokens",
   "rates": [
@@ -67,6 +67,22 @@
         "cache_write_1h": 1,
         "output": 2.5
       }
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "uncached_input": 2.00,
+      "cache_read": 0.20,
+      "cache_write": 2.00,
+      "cache_write_1h": 2.00,
+      "output": 12.00
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "uncached_input": 0.20,
+      "cache_read": 0.02,
+      "cache_write": 0.20,
+      "cache_write_1h": 0.20,
+      "output": 1.20
     }
   ]
 }
