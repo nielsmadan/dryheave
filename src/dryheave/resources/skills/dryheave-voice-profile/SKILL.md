@@ -109,7 +109,72 @@ only the excerpts that survived.
    judge and report, not to assume. Select short conversational excerpts that
    show a trait you can point at. Exclude secrets, solutions, reference fixes,
    hidden tests and answers to the benchmark task. Do not copy full logs.
-11. Edit the returned internal draft yourself; do not ask the user to hand-author
+11. Measure the user's typing mechanics before writing any trait. A simulator
+   copies surface form far more readily than it follows a description of style,
+   so these carry most of the resemblance. Measure only text the user typed:
+   the CLI's `genuine` set can still hold text the user did not write, such as a
+   `<pasted_content>` block, a context-compaction summary ("This session is being
+   continued from a previous conversation"), a relayed agent message ("Another
+   Claude session sent a message"), a skill re-invocation note, an interruption
+   marker ("[Request interrupted by user]") or pasted terminal output. Leave all of
+   those out of every measurement and every example; their punctuation is the
+   agent's, not the user's. Over the typed messages of the chosen sessions,
+   measure with a short script rather than by eye:
+   - how many sentences, and how many messages, start with a capital letter;
+   - the pronoun `I` against a lowercase `i`;
+   - the punctuation inventory: which marks the user types (periods, commas,
+     question marks, `...`, colons, parentheses, quotes) and which never appear,
+     checking em dashes, en dashes, semicolons, curly quotes and apostrophes,
+     exclamation marks, bullets and markdown explicitly;
+   - message length, words per sentence, and whether messages use line breaks or
+     blank-line-separated asks;
+   - how much one message carries: how many separate points or asks, and how a
+     problem is reported, whether as one loosely worded symptom with the fix
+     floated as a question or as a complete list of symptoms, expected behavior
+     and fix;
+   - how requests are phrased: a "Can you..." question, an imperative or a
+     statement of what should happen;
+   - who does the work in the user's sentences ("we should", "can we", "let's"
+     against "I want" and "you should"), and how often the user hedges ("I think",
+     "not sure", "maybe", "I guess") or floats a fix as a question rather than
+     specifying it;
+   - how precise the wording is: whether the user names exact elements and the
+     expected behavior, or describes loosely and leaves the detail to the agent,
+     and how they write the names of UI elements, settings and features, as
+     lowercase loose names ("show folder path", "the monitor row") or as exact
+     title-case labels;
+   - how the user moves the work forward, since this carries more of the voice
+     than any mark: how many messages propose a direction rather than only report
+     ("So can we make it so that...", "Shouldn't it also...?", "maybe X?", "we can
+     also drop X and just do Y. Would that...?"), float a statement as a question
+     ("It's supposed to work until Friday?"), string two or three short questions
+     together, think aloud across clauses joined by "and", "so" or "then", or give
+     a reason for an ask ("If I have to check it by hand anyway, no point in...").
+     Read the messages for these moves rather than searching for set phrases;
+   - the user's actual wording in each situation the simulator answers: approving
+     a proposal, telling the agent to go on, correcting a misunderstanding,
+     steering a change the user already has in mind, and reporting a problem after
+     trying the result. Measure each situation's traits within that situation, not
+     across all messages: among the problem reports and change requests, how many
+     propose the change, say "we", hedge, or ask with a bare "can you fix it",
+     and how many words of symptom come with a proposal. Sort messages into situations by the moment they answer, never by their
+     form: every message written after the user tried a result counts as a
+     problem report, whether it describes a symptom or proposes the change. Sorted
+     by form, the proposals land in another situation and the problem reports
+     read as symptoms only by construction. A trait that is rare overall can be
+     the norm in one situation. A situation with
+     fewer than about fifteen messages measures little, and a zero there is not a
+     rule: before writing that the user never proposes a fix or never says "we"
+     in one situation, check how they do it when steering the work elsewhere;
+   - which stock phrases a model reaches for the user never types: thanks and
+     praise, "sounds good", "looks good", "great", "sure", "perfect", "wait",
+     "just to make sure", a ", right?" tag, "instead of", and hyphenated compounds
+     such as "top-aligned". Search the typed messages for each one;
+   - the openers in use and how often each occurs, including how many messages
+     open straight with the point and no opener at all, and where `please` sits;
+   - how many messages carry a typo, and what kind (a doubled or dropped letter,
+     a shifted space, a held shift key), and whether longer messages carry more.
+12. Edit the returned internal draft yourself; do not ask the user to hand-author
    JSON. Keep `selection_id`. Fill `persona.instructions`, `disclosure_policy`,
    `unknown_answer_policy`, and `examples`; set `reviewed_subject_safe: true` only
    after review. Examples use exactly
@@ -117,16 +182,135 @@ only the excerpts that survived.
    At least one actual user-role excerpt is required. Write `safety_review`
    explaining why each retained excerpt demonstrates voice without injected
    instructions or solution content.
-12. Ground every policy in a retained excerpt. Before writing a trait, name the
+13. Write `persona.instructions` in this order: VOICE, MECHANICS, SITUATIONS, a
+   NEVER line and AUTHORITY. The simulator reads every rule as applying to the
+   reply in hand, so write each block for that reader.
+
+   VOICE comes first, in four to six sentences, each with a quoted message: how
+   the user thinks and steers, from the step 11 moves. Say whether they propose
+   the change they want or describe what they saw, whether they say "we" for the
+   shared work, whether they float statements as questions or chain short
+   questions, and how they give reasons. A persona that opens with statistics
+   reads as a rulebook, and the simulator answers it with careful, correct and
+   generic replies that a reader still recognizes as a model.
+
+   MECHANICS follows, built from step 11, kept to about a dozen lines:
+   - One rule per line, each stated as an instruction with its measured
+     proportion: "Start every sentence with a capital letter (41 of 46 typed
+     sentences do)", "Write I, never i", "Use only periods, commas, question
+     marks and `...`; never an em dash, en dash or semicolon". State the majority
+     behavior as the rule and an exception as an exception with its frequency.
+   - Never summarize mechanics with a loose label such as "lowercase-leaning",
+     "casual", "terse" or "types fast". A simulator exaggerates a label into a
+     style the user does not have; lowercase starts and a lowercase `i` are the
+     usual result.
+   - Give typos as a rate with the slip kinds you found ("about one message in
+     eight has a slip such as..."), never as encouragement to leave typos in,
+     which models over-apply.
+   - For any habit in fewer than half the messages, lead with what the majority
+     does instead and name the occasion that triggers the habit: "Most messages
+     go straight to the point with no opener (60 of 97); Alright, opens about one
+     in five, when acknowledging something you just did". A bare "Alright is the
+     habitual opener" becomes every message's first word. Where related habits
+     are each rare but common together, give their combined share ("about one
+     message in three opens with Alright, Ah, Oh or So"); a list of rare habits
+     read one by one becomes a reply with none of them.
+
+   SITUATIONS follows MECHANICS:
+   - Give the problem report shape from step 11 its own rule, with its length. A
+     simulator handed a list of facts writes all of them up as one polished
+     specification unless the persona says how much this user puts in one
+     message, how loosely they word it and whether they hedge.
+   - Give asking for a change its own rule, separate from reporting a symptom.
+     Case facts often state how something should behave, which is what the user
+     already has in mind. If step 11 found the user proposing changes when
+     steering, tell the simulator to say such a fact as this user's suggestion in
+     their own proposal forms ("We should...", "So can we...?", "I think we...?"),
+     and that a suggestion is already the ask, with no "Can you fix..." to close
+     it. Without this rule a simulator lists every symptom it was shown and asks
+     the agent to work out the fix, which is a bug report, not this user.
+   - Write that choice as a test on the facts the simulator holds, not as two
+     options side by side: when a fact the reply may share says how the thing
+     should behave, propose that; describe the symptom only when no such fact
+     applies. Offered "report the symptom, or propose the change", a simulator
+     takes the first every time, and every reply after an inspection comes out
+     in the same symptom frame.
+   - Say how much of the symptom survives next to a proposal, from step 11:
+     usually a few loose words or none, since the suggestion implies what went
+     wrong. The protocol has the simulator say what it saw, and it is handed an
+     inspection written by a careful tester, so without this rule it repeats
+     that tester's detail, which element overlaps which and where, and then
+     adds the proposal as a polished closing question. The user never measured
+     those details and does not type them.
+   - Give one rule per simulator situation with two to four of the user's own
+     variants, quoted, with the situation's own rates from step 11, and tell the
+     simulator to pick one variant and adapt it rather than blend them. List
+     the variants and proposal forms most common first, each with its count:
+     a stateless simulator takes the first form it is shown every time, so a
+     form the user typed twice in a hundred messages, listed first, becomes
+     every reply's opening. Otherwise
+     an approval comes out as a polite "Yes, please apply it" that mixes a rare
+     "Please do both." into the common "yes, do it.", and a single prescribed
+     form such as "ask for the fix as a Can you question" becomes the closing
+     line of every reply.
+   - The simulator protocol forces some elements into every reply of a
+     situation, such as asking for a fix after an inspection. Give the user's
+     own ways of doing that, and name the bare form a model defaults to ("Can you
+     fix that?") as not the user's unless step 11 found it common there.
+   - Tell the simulator not to reuse the frame of its own earlier messages in the
+     dialogue. A simulator that found one shape that satisfies the persona writes
+     every reply in it, and a run of replies all built as symptom, symptom, "Can
+     you fix...?" is a template no person types.
+
+   Close with a NEVER line naming every stock phrase step 11 found absent; a
+   model falls back on those defaults whenever the persona is silent. A ban
+   alone does not hold for the openers a model reaches for most, "Wait,"
+   before a correction and "Thanks" or "Better" before a new problem, so put
+   the user's own replacement next to each in the situation where it occurs:
+   what the user opens a correction with ("No,", "Uhm,", or the fact itself),
+   and that a new problem after a partial fix starts with the problem, or with
+   the user's own acknowledgement such as "Alright,", never with praise.
+14. Write every persona field in the user's own mechanics. The simulator copies
+   the register of the whole persona, not only the examples: a dash or semicolon
+   in `instructions`, `disclosure_policy` or `unknown_answer_policy` reappears in
+   its replies. Use in your own sentences only the punctuation the user types,
+   and before creating the voice search all three fields for each mark that step
+   11 found absent, typographic dashes and curly quotes above all. In
+   `disclosure_policy`, tell the simulator to put a disclosed fact in the user's
+   own loose words, never in the fact's text: case facts are precise curator
+   prose, and a simulator that repeats them sounds like the curator. Say in
+   particular that a fact's summary phrase for an outcome ("keep a consistent
+   shape", "stay aligned") becomes the concrete change or symptom the user would
+   mention, in the way step 11 found the user proposing fixes. Do not tell the
+   simulator never to volunteer a fix when the facts state behavior the user
+   wants: the protocol already decides when a fact may be shared, and once it may,
+   a fact about how something should behave is the user's own idea and comes out
+   as their suggestion. Keep the ban for causes, code, file contents and tests.
+   Tell the simulator to share one fact at a time, the one the latest message
+   makes most pressing, and to leave the rest for later turns, since this user
+   rarely says everything at once.
+15. Choose examples whose mechanics match the measured proportions. If most typed
+   messages start with a capital letter, most examples must too; a set dominated
+   by short lowercase acknowledgements teaches a lowercase voice. Include several
+   multi-sentence messages so the simulator sees how the user capitalizes and
+   punctuates within a message, keep typo-bearing examples near the measured
+   rate, and keep each opener near its measured share. Include the user's own
+   problem reports and fix requests when the chosen sessions have them, since
+   those are the replies a simulator writes most often after an inspection, and
+   messages where the user proposes a change, thinks aloud or chains questions,
+   since those show the voice that mechanics rules cannot.
+16. Ground every policy in a retained excerpt. Before writing a trait, name the
    excerpt that shows it. A trait you believe but cannot point at is inferred:
    say so in the same sentence ("inferred, not evidenced by the retained
    excerpts") or leave it out. Excerpts that carry no voice signal — bare
    acknowledgements such as `continue`, or a command invocation such as
    `$commit` — support no trait at all; their `characters` count shows this.
-13. Keep style and authority separate. Policies disclose only approved case facts,
+   The MECHANICS rules rest on the step 11 measurement rather than on single
+   excerpts; name the measured proportion instead.
+17. Keep style and authority separate. Policies disclose only approved case facts,
    acknowledge unknowns, and never authorize authentication, trust or permission
    dialogs. A concise or approving style is not permission to execute anything.
-14. Read `collect selections --json` for the latest catalog `revision`, then run
+18. Read `collect selections --json` for the latest catalog `revision`, then run
    `dryheave voice create [NAME] DRAFT_PATH --expect-revision REVISION --json`.
    Omit NAME for the default voice; otherwise pass the name the user chose. The
    response repeats `evidence`, `warnings` and `triage`, and the record keeps the
@@ -162,6 +346,9 @@ Report all of the following. A voice without this report is not finished.
   `session_id`, `genuine`, `harness_injected`, `unclassified`,
   `genuine_characters` and `median_genuine_characters`. List sessions that
   contributed nothing too; that is the coverage the reader needs.
+- The mechanics measurement from step 11, one line per mechanic with its count or
+  proportion, and the genuine candidates left out of it as text the user did not
+  type, with the reason for each.
 - An explicit sentence stating whether the retained excerpts support the policies
   you wrote, naming any trait that is inferred rather than evidenced.
 - The voice name and its immutable `persona_id`.
