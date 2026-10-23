@@ -461,6 +461,32 @@ def test_voice_draft_reports_per_session_coverage_and_asks_for_more_sessions(
     assert "Untriaged sessions: 2 of 2" in drafted["warnings"][1]
 
 
+def test_voice_draft_warns_when_candidates_were_left_out(authoring_workspace, tmp_path, capsys):
+    log = tmp_path / "many.jsonl"
+    write_codex_log(log, tuple(f"Please handle case number {number}." for number in range(300)))
+    invoke(capsys, "collect", "select", "many", str(log), "--agent", "codex")
+    drafted = invoke(capsys, "voice", "draft", "--selection", "many")
+    assert drafted["evidence"]["truncated"] is True
+    assert drafted["evidence"]["omitted_candidates"] == 44
+    assert (
+        "Evidence lists 256 of 300 genuine candidates; 44 were left out" in drafted["warnings"][0]
+    )
+
+
+def test_voice_draft_does_not_warn_about_candidates_when_only_exclusions_are_cut(
+    authoring_workspace, tmp_path, capsys
+):
+    log = tmp_path / "noisy.jsonl"
+    texts = tuple(f"Please handle case number {number}." for number in range(127)) + tuple(
+        f"<system-reminder>noise {number}</system-reminder>" for number in range(100)
+    )
+    write_codex_log(log, texts)
+    invoke(capsys, "collect", "select", "noisy", str(log), "--agent", "codex")
+    drafted = invoke(capsys, "voice", "draft", "--selection", "noisy")
+    assert drafted["evidence"]["omitted_candidates"] == 0
+    assert not any("were left out" in warning for warning in drafted["warnings"])
+
+
 FEATURE_TEXTS = (
     "Can you add a greeting command that takes a name and prints it back?",
     "I want the empty name case handled too, and a test for it.",

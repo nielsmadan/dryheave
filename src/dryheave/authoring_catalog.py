@@ -16,6 +16,7 @@ from dryheave.serialization import canonical_json, digest, parse_model
 CATALOG_LIMIT = 8 * 1024 * 1024
 VOICE_PREVIEW_LIMIT = 160
 MAX_VOICE_EVIDENCE_EVENTS = 64
+MAX_VOICE_CANDIDATES = 256
 MAX_TRIAGED_SESSIONS = 24
 ReviewText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8000)]
 RepositoryPath = Annotated[str, StringConstraints(min_length=1, max_length=4096)]
@@ -280,12 +281,13 @@ class VoiceEvidence(StrictModel):
     harness_injected: int = Field(ge=0)
     unclassified: int = Field(ge=0)
     sufficient: bool
-    candidates: tuple[VoiceCandidate, ...] = Field(default=(), max_length=MAX_VOICE_EVIDENCE_EVENTS)
+    candidates: tuple[VoiceCandidate, ...] = Field(default=(), max_length=MAX_VOICE_CANDIDATES)
     excluded: tuple[ExcludedUserEvent, ...] = Field(
         default=(), max_length=MAX_VOICE_EVIDENCE_EVENTS
     )
     sessions: tuple[SessionEvidence, ...] = Field(default=(), max_length=24)
     truncated: bool = False
+    omitted_candidates: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def measured_classification(self) -> Self:
@@ -306,6 +308,8 @@ class VoiceEvidence(StrictModel):
             raise ValueError("listed user events exceed their counted classification")
         if self.truncated != (len(self.candidates) < self.genuine or len(self.excluded) < excluded):
             raise ValueError("truncation must follow the listed user events")
+        if self.omitted_candidates != self.genuine - len(self.candidates):
+            raise ValueError("omitted candidates must be the genuine count less those listed")
         return self
 
 

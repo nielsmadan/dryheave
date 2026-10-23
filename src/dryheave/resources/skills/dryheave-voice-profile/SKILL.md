@@ -86,12 +86,15 @@ only the excerpts that survived.
 8. Run `dryheave voice draft --selection NAME --json`.
    Its `data.evidence` is measured by the CLI from the selection, not by you:
    `user_events`, `harness_injected`, `genuine`, `unclassified`, the `threshold`,
-   a `sufficient` verdict, every genuine entry in `candidates` with `event_id`,
-   `characters` and `preview`, every `excluded` entry with the wrapper `reasons`
+   a `sufficient` verdict, the genuine entries in `candidates` (up to 256) with
+   `event_id`, `characters` and `preview`, the `excluded` entries (up to 64) with the wrapper `reasons`
    that classified it, and `sessions`, the per-session breakdown of those counts
    with each session's `genuine_characters` and `median_genuine_characters`. Read
    `sessions` for coverage: a selection whose genuine messages all come from one
    session is a one-session voice regardless of how many sessions were pinned.
+   When `omitted_candidates` is above zero, that many genuine messages are counted but
+   not listed; say so and pin a narrower selection rather than treating the list
+   as complete.
    Use these numbers verbatim. Never recount them
    yourself and never write counts into `safety_review` as if they were measured.
    `data.warnings` is one list of plain strings: the below-threshold warning

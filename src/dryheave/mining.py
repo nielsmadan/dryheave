@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import Field, JsonValue
 
 from dryheave.authoring_catalog import (
+    MAX_VOICE_CANDIDATES,
     MAX_VOICE_EVIDENCE_EVENTS,
     TRIAGE_GRADES,
     VOICE_PREVIEW_LIMIT,
@@ -556,7 +557,7 @@ def voice_evidence(store: ObjectStore, selection: Selection) -> VoiceEvidence:
             counts[classification] += 1
             if classification == "genuine":
                 lengths.append(len(remainder))
-                if len(candidates) < MAX_VOICE_EVIDENCE_EVENTS:
+                if len(candidates) < MAX_VOICE_CANDIDATES:
                     candidates.append(
                         VoiceCandidate(
                             session_id=identifier,
@@ -590,6 +591,7 @@ def voice_evidence(store: ObjectStore, selection: Selection) -> VoiceEvidence:
         excluded=tuple(excluded),
         sessions=tuple(sessions),
         truncated=len(candidates) < genuine or len(excluded) < listed,
+        omitted_candidates=genuine - len(candidates),
     )
 
 

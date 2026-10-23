@@ -104,7 +104,13 @@ def test_voice_evidence_accepts_consistent_measured_counts():
     assert evidence.excluded[1].reasons == ()
     sufficient = VoiceEvidence.model_validate_json(
         json.dumps(
-            voice_evidence_payload(genuine=8, user_events=10, sufficient=True, truncated=True)
+            voice_evidence_payload(
+                genuine=8,
+                user_events=10,
+                sufficient=True,
+                truncated=True,
+                omitted_candidates=7,
+            )
         )
     )
     assert sufficient.sufficient is True
@@ -118,6 +124,7 @@ def test_voice_evidence_accepts_consistent_measured_counts():
         ({"genuine": 8, "user_events": 10}, "sufficiency must follow"),
         ({"candidates": []}, "truncation must follow"),
         ({"truncated": True}, "truncation must follow"),
+        ({"omitted_candidates": 3}, "omitted candidates must be"),
         (
             {
                 "candidates": [

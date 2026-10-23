@@ -1001,3 +1001,25 @@ def test_droid_user_events_separate_genuine_writing_from_harness_traffic(store) 
         4,
         0,
     )
+
+
+@pytest.mark.parametrize(
+    ("count", "listed", "truncated", "omitted"),
+    [(127, 127, False, 0), (300, 256, True, 44)],
+)
+def test_voice_evidence_lists_candidates_up_to_the_cap(
+    store, tmp_path, count, listed, truncated, omitted
+):
+    root = tmp_path / "authoring"
+    root.mkdir()
+    session_id = synthetic_session(
+        store, [("user", f"Please handle case number {number}.") for number in range(count)]
+    )
+    catalog = select_logs(
+        store, root, "many", SelectionInputs(sessions=(session_id,)), expected_revision=0
+    )
+    evidence = voice_evidence(store, catalog.selections["many"])
+    assert evidence.genuine == count
+    assert len(evidence.candidates) == listed
+    assert evidence.truncated is truncated
+    assert evidence.omitted_candidates == omitted

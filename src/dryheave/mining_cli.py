@@ -301,7 +301,25 @@ def _validate_problem(args: argparse.Namespace, store: ObjectStore) -> dict[str,
 
 
 def _evidence_warnings(evidence: VoiceEvidence | None) -> list[JsonValue]:
-    if evidence is None or evidence.sufficient:
+    if evidence is None:
+        return []
+    return _shortfall_warnings(evidence) + _truncation_warnings(evidence)
+
+
+def _truncation_warnings(evidence: VoiceEvidence) -> list[JsonValue]:
+    if evidence.omitted_candidates == 0:
+        return []
+    return [
+        (
+            f"Evidence lists {len(evidence.candidates)} of {evidence.genuine} genuine "
+            f"candidates; {evidence.omitted_candidates} were left out and are counted but "
+            "not listed. Pin a narrower selection to inspect them."
+        )
+    ]
+
+
+def _shortfall_warnings(evidence: VoiceEvidence) -> list[JsonValue]:
+    if evidence.sufficient:
         return []
     coverage = "; ".join(f"{item.session_id}: {item.genuine}" for item in evidence.sessions)
     return [
