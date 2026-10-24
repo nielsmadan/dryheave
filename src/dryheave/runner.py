@@ -7,16 +7,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
-from dryheave.cases import (
-    InspectStep,
-    WorkflowStep,
-    effective_workflow,
-    load_frozen_case,
-)
+from dryheave.cases import PromptStep, load_frozen_case
 from dryheave.constants import MAX_RUNTIME_PATH_BYTES
 from dryheave.errors import DryheaveError, InputError
-from dryheave.experiment_models import FrozenExperiment, ScoringConfig, inspection_recipe
-from dryheave.experiments import inspect_experiment, load_experiment, load_role
+from dryheave.experiment_models import FrozenExperiment
+from dryheave.experiments import inspect_experiment, load_experiment
 from dryheave.host import HostContext
 from dryheave.journals import RunStore
 from dryheave.live_config import (
@@ -38,7 +33,7 @@ from dryheave.runner_models import CapturedAttempt, RunOptions, RunSummary
 from dryheave.runner_recovery import recover_attempt
 from dryheave.runner_state import ExecutionJournal
 from dryheave.storage import ObjectStore
-from dryheave.workflow import require_workflow_skills, slash_steps
+from dryheave.workflow import require_workflow_skills, slash_steps, workflow_steps
 
 
 def load_capture(store: ObjectStore, reference: str) -> CapturedAttempt:
@@ -52,9 +47,9 @@ def load_capture(store: ObjectStore, reference: str) -> CapturedAttempt:
     if trial is None or (
         trial.case_id,
         trial.profile_id,
-        experiment.simulator_id,
+        experiment.stand_in_id,
         experiment.scoring_id,
-    ) != (captured.case_id, captured.profile_id, captured.simulator_id, captured.scoring_id):
+    ) != (captured.case_id, captured.profile_id, captured.stand_in_id, captured.scoring_id):
         raise InputError("Captured attempt input identities differ from the experiment.")
     if load_frozen_case(store, captured.case_id).persona_id != captured.persona_id:
         raise InputError("Captured persona differs from the frozen case.")
@@ -137,24 +132,16 @@ class SlashTrial(NamedTuple):
 
 
 class WorkflowPlan(NamedTuple):
-    inspected: bool
-    workflows: dict[str, tuple[WorkflowStep, ...]]
+    workflows: dict[str, tuple[PromptStep, ...]]
     slash_trials: tuple[SlashTrial, ...]
 
 
 def workflow_plan(store: ObjectStore, experiment: FrozenExperiment) -> WorkflowPlan:
-    inspected = (
-        inspection_recipe(
-            load_role(store, experiment.scoring_id, ScoringConfig, ObjectKind.SCORING)
-        )
-        is not None
-    )
-    workflows = {
-        case_id: effective_workflow(
-            load_frozen_case(store, case_id), enabled=True, inspected=inspected
-        )
-        for case_id in {trial.case_id for trial in experiment.trials}
+    cases = {
+        case_id: load_frozen_case(store, case_id)
+        for case_id in sorted({trial.case_id for trial in experiment.trials})
     }
+    workflows = {case_id: workflow_steps(case, enabled=True) for case_id, case in cases.items()}
     skill_names = {
         case_id: tuple(step.skill_name for step in slash_steps(steps) if step.skill_name)
         for case_id, steps in workflows.items()
@@ -165,7 +152,6 @@ def workflow_plan(store: ObjectStore, experiment: FrozenExperiment) -> WorkflowP
         for profile in {trial.profile_id for trial in trials}
     }
     return WorkflowPlan(
-        inspected,
         workflows,
         tuple(
             SlashTrial(trial.variant, recipes[trial.profile_id], skill_names[trial.case_id])
@@ -175,12 +161,6 @@ def workflow_plan(store: ObjectStore, experiment: FrozenExperiment) -> WorkflowP
 
 
 def require_workflow_support(plan: WorkflowPlan) -> None:
-    if not plan.inspected and any(
-        isinstance(step, InspectStep) for steps in plan.workflows.values() for step in steps
-    ):
-        raise InputError(
-            "Workflow inspect steps need an inspector or judge with max_calls above zero."
-        )
     if not all(
         trial.recipe.agent == AgentKind.CLAUDE or trial.recipe.live_codex
         for trial in plan.slash_trials
@@ -298,7 +278,7 @@ def run_experiment(  # noqa: PLR0913
 def selected_workflow_plan(
     store: ObjectStore, experiment: FrozenExperiment, *, enabled: bool
 ) -> WorkflowPlan:
-    return workflow_plan(store, experiment) if enabled else WorkflowPlan(False, {}, ())
+    return workflow_plan(store, experiment) if enabled else WorkflowPlan({}, ())
 
 
 def _require_workflow_inputs(plan: WorkflowPlan, host: HostContext) -> None:

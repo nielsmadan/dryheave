@@ -34,7 +34,7 @@ def _recipe_issues(recipe: NativeRecipe) -> list[ProfileIssue]:
         issues.append(
             ProfileIssue(
                 code="claude-discovery-policy",
-                message="Claude 2.1.278 uses selected settings and instructions in an owned config root, historical project settings and explicit plugin directories. Managed settings, plugin discovery and effective effort remain unverified; native trust and permission prompts are never approved by the simulator.",
+                message="Claude 2.1.278 uses selected settings and instructions in an owned config root, historical project settings and explicit plugin directories. Managed settings, plugin discovery and effective effort remain unverified; native trust and permission prompts are never approved by the stand-in.",
             )
         )
     if recipe.codex_discovery is not None:

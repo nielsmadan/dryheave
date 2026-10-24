@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from pydantic import JsonValue, ValidationError
 
-from dryheave.cases import FrozenCase, InspectStep, effective_workflow, load_frozen_case
+from dryheave.cases import load_frozen_case, needs_judge
 from dryheave.codex_policy import CODEX_SANDBOX_ARGUMENTS
 from dryheave.controller_models import ClaudeControllerRuntime, ControllerRecipe, RoleBudget
 from dryheave.drivers.artifacts import ArtifactWriter
@@ -27,9 +27,9 @@ from dryheave.experiment_models import (
     ExperimentDraft,
     ScoringConfig,
     VariantSpec,
-    inspection_recipe,
 )
 from dryheave.experiments import load_experiment
+from dryheave.fact_metrics import derived_budget
 from dryheave.journals import RunStore
 from dryheave.live_config import (
     journaled_manifests,
@@ -54,16 +54,20 @@ from dryheave.profile_models import (
 )
 from dryheave.profiles import capture_profile
 from dryheave.report_models import AttemptReport, GroupMetrics, RunReport
+from dryheave.reports import attempt_eligibility, identities, report_run
+from dryheave.result_models import Assessment
 from dryheave.runner import (
     WorkflowPlan,
+    load_capture,
     require_snapshot_skills,
     run_status,
     selected_workflow_plan,
 )
+from dryheave.runner_models import RunBudget
 from dryheave.runner_state import ExecutionJournal
 from dryheave.skills import SKILL_NAMES
 from dryheave.storage import ObjectStore
-from dryheave.workflow import slash_steps
+from dryheave.workflow import inspection_records, slash_steps
 
 CLAUDE_AUTH_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
 VARIANT_AGENTS = {"claude": AgentKind.CLAUDE, "codex": AgentKind.CODEX}
@@ -72,7 +76,8 @@ PROBE = "dryheave launch check"
 LAUNCH_CHECK_SECONDS = 180.0
 ROLE = re.compile(r"^([^@,\s]+)(?:@([a-z]+))?$")
 VARIANT = re.compile(r"^([a-zA-Z0-9][a-zA-Z0-9_.-]{0,127})=([^,]+)((?:,[^,]+)*)$")
-SIMULATOR_CALL_SECONDS = 180
+STAND_IN_CALL_SECONDS = 180
+STAND_IN_BUDGET = RoleBudget(max_calls=100, call_seconds=STAND_IN_CALL_SECONDS, total_seconds=3600)
 JUDGE_BUDGET = RoleBudget(
     max_calls=6, call_seconds=300, total_seconds=1200, max_input_bytes=256 * 1024
 )
@@ -150,12 +155,15 @@ def variant_recipe(choice: VariantChoice, executable: str) -> NativeRecipe:
     )
 
 
-def simulator_budget(replies: int) -> RoleBudget:
-    return RoleBudget(
-        max_calls=replies,
-        call_seconds=SIMULATOR_CALL_SECONDS,
-        total_seconds=min(3600, max(1, replies) * SIMULATOR_CALL_SECONDS),
-    )
+def run_budget(*, max_turns: int, stand_in_replies: int, max_inspections: int) -> RunBudget:
+    try:
+        return RunBudget(
+            max_turns=max_turns,
+            stand_in_replies=stand_in_replies,
+            max_inspections=max_inspections,
+        )
+    except ValidationError as error:
+        raise InputError(f"Invalid run budget: {_recipe_refusal(error)}.") from error
 
 
 def claude_role(
@@ -187,7 +195,7 @@ def bench_draft(  # noqa: PLR0913
     case_id: str,
     profiles: Mapping[str, str],
     *,
-    simulator: ControllerRecipe,
+    stand_in: ControllerRecipe,
     judge: ControllerRecipe | None,
     inspector: ControllerRecipe | None = None,
     repetitions: int,
@@ -201,21 +209,9 @@ def bench_draft(  # noqa: PLR0913
         ),
         repetitions=repetitions,
         seed=seed,
-        simulator=simulator,
+        stand_in=stand_in,
         scoring=ScoringConfig(judge=judge, inspector=inspector, prices=builtin_price_table()),
     )
-
-
-def check_workflow(case: FrozenCase, *, workflow: bool, scoring: ScoringConfig) -> None:
-    if not workflow:
-        return
-    inspected = inspection_recipe(scoring) is not None
-    steps = effective_workflow(case, enabled=True, inspected=inspected)
-    if not inspected and any(isinstance(step, InspectStep) for step in steps):
-        raise InputError(
-            "This case's workflow has an inspect step but no judge or --inspector "
-            "MODEL[@EFFORT]; pass one, or run with --no-workflow."
-        )
 
 
 def capture_variants(
@@ -237,9 +233,10 @@ def capture_variants(
 def check_case(store: ObjectStore, reference: str, *, judged: bool) -> str:
     case_id = store.resolve(reference)
     case = load_frozen_case(store, case_id)
-    needs_judge = case.checks or any(criterion.kind == "judge" for criterion in case.criteria)
-    if not judged and needs_judge:
-        raise InputError("This case has checks or judge criteria; pass --judge MODEL[@EFFORT].")
+    if not judged and needs_judge(case):
+        raise InputError(
+            "This case has facts without a verifier or judge criteria; pass --judge MODEL[@EFFORT]."
+        )
     return case_id
 
 
@@ -401,9 +398,17 @@ def discard_check(root: Path) -> None:
 class PreviousRun:
     run_id: str
     finished: bool
+    configured: bool = True
 
 
-def resumable_run(store: ObjectStore, experiment_id: str, *, workflow: bool) -> PreviousRun | None:
+def resumable_run(
+    store: ObjectStore,
+    experiment_id: str,
+    *,
+    workflow: bool,
+    budget: RunBudget,
+    pilot_run: str | None = None,
+) -> PreviousRun | None:
     runs = RunStore(store.root)
     matching = sorted(
         (
@@ -415,20 +420,22 @@ def resumable_run(store: ObjectStore, experiment_id: str, *, workflow: bool) -> 
     )
     compatible = next(
         (
-            metadata
+            (metadata, options)
             for metadata in reversed(matching)
             if (options := ExecutionJournal(runs.inspect(metadata.run_id)).options) is None
-            or options.workflow == workflow
+            or (options.workflow, options.budget, options.pilot_run)
+            == (workflow, budget, pilot_run)
         ),
         None,
     )
     if compatible is None:
         return None
-    status = run_status(store, compatible.run_id)
+    status = run_status(store, compatible[0].run_id)
     return PreviousRun(
         run_id=status.run_id,
         finished=not status.unstarted_trials
         and all(state.stage == TrialStage.FINISHED for state in status.attempts),
+        configured=compatible[1] is not None,
     )
 
 
@@ -444,31 +451,6 @@ def _price_versions(attempts: Sequence[AttemptReport]) -> list[str]:
     )
 
 
-def _help_needed_summary(attempts: Sequence[AttemptReport]) -> dict[str, JsonValue]:
-    disclosed: Counter[str] = Counter()
-    proactive: Counter[str] = Counter()
-    on_request: Counter[str] = Counter()
-    measured = 0
-    latest = {attempt.trial_id: attempt for attempt in attempts}
-    for attempt in latest.values():
-        result = attempt.result
-        if result is None or not result.eligible or attempt.current_exclusions:
-            continue
-        help_needed = result.help_needed
-        if help_needed is None:
-            continue
-        measured += 1
-        disclosed.update(help_needed.facts_disclosed)
-        proactive.update(help_needed.proactive_facts)
-        on_request.update(help_needed.on_request_facts)
-    return {
-        "measured_attempts": measured,
-        "facts_disclosed": dict(disclosed),
-        "disclosed_proactively": dict(proactive),
-        "disclosed_on_request": dict(on_request),
-    }
-
-
 def _group_measures(
     group: GroupMetrics | None, attempts: Sequence[AttemptReport]
 ) -> dict[str, JsonValue]:
@@ -476,8 +458,31 @@ def _group_measures(
         return {}
     payload = group.model_dump(mode="json", exclude={"variant"})
     payload["price_versions"] = _price_versions(attempts)
-    payload["help_needed"] = _help_needed_summary(attempts)
     return payload
+
+
+def _tally(pairs: Sequence[tuple[str, str]]) -> dict[str, JsonValue]:
+    return {
+        identifier: dict(Counter(value for name, value in pairs if name == identifier))
+        for identifier in sorted({name for name, _ in pairs})
+    }
+
+
+def _attempt_summary(
+    attempt: AttemptReport, stop_reasons: Mapping[str, str | None]
+) -> dict[str, JsonValue]:
+    result, topline = attempt.result, attempt.topline
+    return {
+        "attempt_id": attempt.attempt_id,
+        "stop_reason": stop_reasons.get(attempt.attempt_id),
+        "outcome": result.outcome if result else None,
+        "outcome_reason": result.outcome_reason if result else None,
+        "independence": topline.independence if topline else None,
+        "corrections": topline.corrections if topline else None,
+        "exclusions": list(result.exclusion_reasons) if result else [],
+        "first_inspection": topline.first_inspection if topline else None,
+        "workflow": topline.workflow if topline else None,
+    }
 
 
 def summarize(report: RunReport, stop_reasons: Mapping[str, str | None]) -> dict[str, JsonValue]:
@@ -487,41 +492,120 @@ def summarize(report: RunReport, stop_reasons: Mapping[str, str | None]) -> dict
     def group(name: str) -> GroupMetrics | None:
         return next((item for item in report.groups if item.variant == name), None)
 
-    def outcomes(name: str) -> dict[str, JsonValue]:
-        results = [
-            criterion
-            for attempt in attempts(name)
-            if attempt.result is not None
-            for criterion in attempt.result.criteria
-        ]
-        return {
-            identifier: dict(
-                Counter(item.outcome for item in results if item.criterion_id == identifier)
-            )
-            for identifier in sorted({item.criterion_id for item in results})
-        }
+    def results(name: str) -> list[Assessment]:
+        return [attempt.result for attempt in attempts(name) if attempt.result is not None]
 
-    return {
+    summary: dict[str, JsonValue] = {
         name: {
-            "attempts": [
-                {
-                    "attempt_id": attempt.attempt_id,
-                    "stop_reason": stop_reasons.get(attempt.attempt_id),
-                    "completion": attempt.result.completion if attempt.result else None,
-                    "exclusions": list(attempt.result.exclusion_reasons) if attempt.result else [],
-                    "first_inspection": attempt.topline.first_inspection
-                    if attempt.topline
-                    else None,
-                    "fix_requests": attempt.topline.fix_requests if attempt.topline else None,
-                    "workflow": attempt.topline.workflow if attempt.topline else None,
-                }
-                for attempt in attempts(name)
-            ],
-            "criteria": outcomes(name),
+            "attempts": [_attempt_summary(attempt, stop_reasons) for attempt in attempts(name)],
+            "facts": _tally(
+                [(item.fact_id, item.verdict) for result in results(name) for item in result.facts]
+            ),
+            "criteria": _tally(
+                [
+                    (item.criterion_id, item.outcome)
+                    for result in results(name)
+                    for item in result.criteria
+                ]
+            ),
             "measures": _group_measures(group(name), attempts(name)),
         }
         for name in sorted({attempt.variant or "unknown" for attempt in report.attempts})
     }
+    floor = report.floor
+    if floor is not None:
+        summary[floor.label] = {
+            "floor": True,
+            "run_id": floor.run_id,
+            "budget": floor.budget.model_dump(mode="json"),
+            "measures": floor.group.model_dump(mode="json", exclude={"variant"}),
+        }
+    return summary
+
+
+@dataclass(frozen=True)
+class PilotBudget:
+    run_id: str
+    turns: int
+    stand_in_replies: int
+    inspections: int
+    budget: RunBudget
+
+    def describe(self) -> str:
+        budget = self.budget
+        return (
+            f"budget from pilot {self.run_id}: it used {self.turns} turns, "
+            f"{self.stand_in_replies} stand-in replies and {self.inspections} inspections; "
+            f"this run allows {budget.max_turns} turns, {budget.stand_in_replies} stand-in "
+            f"replies and {budget.max_inspections} inspections"
+        )
+
+
+def _used(store: ObjectStore, run_id: str, attempt: AttemptReport) -> tuple[int, int, int]:
+    result = attempt.result
+    if result is None or attempt.capture_id is None:
+        raise InputError(f"Pilot run {run_id} has no graded capture to derive a budget from.")
+    capture = load_capture(store, attempt.capture_id)
+    events = RunStore(store.root).inspect(run_id).events
+    return (
+        capture.accepted_turns,
+        sum(call.role == "stand_in" for call in capture.controller_calls),
+        len(inspection_records(events, attempt.attempt_id)),
+    )
+
+
+def pilot_budget(store: ObjectStore, run_id: str) -> PilotBudget:
+    report = report_run(store, run_id, floor=False)
+    if len(report.attempts) != 1:
+        raise InputError(
+            f"--budget-from needs a pilot run with exactly one attempt; run {run_id} has "
+            f"{len(report.attempts)}. Pilot with one variant and --repetitions 1."
+        )
+    attempt = report.attempts[0]
+    result = attempt.result
+    if result is None or result.phase != "finished":
+        raise InputError(
+            f"Pilot run {run_id} has no finished assessment; run `dryheave assess {run_id}` "
+            "first, then pass it to --budget-from."
+        )
+    if result.outcome != "pass":
+        raise InputError(
+            f"Pilot run {run_id} did not pass (outcome {result.outcome} "
+            f"({result.outcome_reason})), so its usage cannot size a budget. "
+            "Iterate on the case, or re-pilot on a stronger model (for example "
+            "--variant pilot=claude-sonnet-4-6@low) and pass that run to --budget-from."
+        )
+    if attempt_eligibility(attempt) != "eligible":
+        reasons = tuple(dict.fromkeys((*attempt.current_exclusions, *result.exclusion_reasons)))
+        named = ", ".join(reasons) or "an unresolved audit finding"
+        raise InputError(
+            f"Pilot run {run_id} passed but is excluded ({named}), so its usage cannot size a "
+            f"budget. Read it with `dryheave report {run_id}`, resolve a finding with "
+            "`dryheave review`, or re-pilot."
+        )
+    turns, replies, inspections = _used(store, run_id, attempt)
+    return PilotBudget(
+        run_id=run_id,
+        turns=turns,
+        stand_in_replies=replies,
+        inspections=inspections,
+        budget=derived_budget(turns=turns, stand_in_replies=replies, inspections=inspections),
+    )
+
+
+def check_pilot_matches(
+    store: ObjectStore, run_id: str, experiment_id: str, *, workflow: bool
+) -> None:
+    pilot = ExecutionJournal(RunStore(store.root).inspect(run_id))
+    pilot_experiment = load_experiment(store, pilot.journal.metadata.experiment_id)
+    if pilot.options is None or identities(pilot_experiment, pilot.options.workflow) != identities(
+        load_experiment(store, experiment_id), workflow
+    ):
+        raise InputError(
+            f"Pilot run {run_id} used a different case, stand-in, scoring or workflow setting "
+            "than this benchmark, so it cannot size or floor it. Pilot with the same case, "
+            "--stand-in, --judge and --inspector settings, and --no-workflow on both or neither."
+        )
 
 
 def attempt_progress_lines(
@@ -530,9 +614,14 @@ def attempt_progress_lines(
     def line(attempt: AttemptReport) -> str:
         topline = attempt.topline
         parts = [f"attempt {attempt.attempt_id} stopped ({stop_reasons.get(attempt.attempt_id)})"]
+        if topline is not None and topline.outcome is not None:
+            parts.append(
+                f"outcome {topline.outcome}"
+                + (f" ({topline.outcome_reason})" if topline.outcome != "pass" else "")
+            )
         if topline is not None and topline.workflow is not None:
             parts.append(f"workflow {topline.workflow}")
-            parts.append(f"fix requests {topline.fix_requests}")
+            parts.append(f"corrections {topline.corrections}")
             parts.append(f"first check {topline.first_inspection}")
         return "; ".join(parts)
 

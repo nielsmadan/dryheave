@@ -81,6 +81,16 @@ stable lock. Updating a different target requires `replace=True` or CLI `--repla
 Deleting an alias preserves its old objects. Aliases cannot resemble object IDs.
 Store reads do not create a missing store. New files/directories use 0600/0700.
 
+## Store format marker
+
+`<store>/format.json` holds `{"format": 2}` and is written by `ensure_store_format`
+when a store is created: on the first object put, workspace init, run-store
+creation and bundle-import staging. Opening a store that has objects or runs but no
+matching marker fails with one `InputError` that names the problem and the
+fallback, running the old CLI from commit `626c1b1`. Format 2 is a clean break: there
+are no readers or migrations for earlier schemas, and every persisted model keeps
+unknown fields and versions as errors.
+
 ## Runs and recovery
 
 ```python
@@ -176,7 +186,7 @@ Process ownership is journaled as `owned-processes` attempt events whose data is
 has not recorded before, so the event count grows with publications rather than
 with observed processes. `ProcessOwner.publish` hands every unpublished identity
 to its callback as one batch. A forced publication, used when a command's direct
-child is claimed, when the terminal reports its launch, before every simulator
+child is claimed, when the terminal reports its launch, before every stand-in
 call, and before and after cleanup, is written before the caller continues.
 Polling publications are throttled to one
 batch per second, so an attempt's ownership events stay bounded by its duration
@@ -195,8 +205,9 @@ attempt-state event. Run-list rows whose journal exceeds the row budget take the
 attempt counts from that checkpoint, overlaid with later `attempt-state` events in
 the prefix, and report the sequence the counts are exact through.
 
-Assessment events (`criterion-intent`, `criterion-result`, `check-result`,
-`metrics-intent`, `metrics-result`, `judge-intent`, `judge-result`) written by a
+Assessment events (`criterion-intent`, `criterion-result`, `fact-judge-intent`,
+`fact-grade`, `rubric-intent`, `metrics-intent`, `metrics-result`, `judge-intent`,
+`judge-result`) written by a
 regrade add a `regrade_id` key to their data. `ExecutionJournal` indexes them by
 attempt, regrade scope and name; an unscoped journal never returns regrade events,
 and a scoped one returns only its own regrade's events with that key removed.
@@ -278,7 +289,9 @@ CLI store selection uses an explicit `--store`, then the nearest workspace's
 `dryheave.toml` store path, then the XDG fallback. Configuration is a strict
 versioned TOML boundary; relative paths resolve from that file's directory.
 Workspace setup and directory ownership are separate from immutable object
-storage. See [workspace setup](../user/workspaces.md).
+storage. `.dryheave/` holds only store, runtime and catalog state; authored
+files live in git-tracked `voices/`, `cases/` and `reports/` (`workspace_git.py`
+owns repository setup and the explicit-path checkpoint commits). See [workspace setup](../user/workspaces.md).
 
 ## Filesystem portability
 
@@ -294,11 +307,15 @@ a supported platform for this persistence implementation.
 
 ## Standalone calibrations
 
-`ObjectKind.CALIBRATION` has a strict version-1 `CaseCalibration` payload and a
-manifest reference to its exact frozen case. Its payload `files` map must match
-the retained evidence blobs. The calibration loader checks ordered criteria and
-verifier identities, baseline/reference results against retained output, and
-resolved cleanup. These records do not create run journals or subject captures.
-Exporting one requires `--include-sensitive calibration-evidence`; import verifies
-the declared sensitive class and the full exact input/evidence closure before
-publishing objects. Existing object kinds, frozen schemas and IDs are unchanged.
+`ObjectKind.CALIBRATION` has a strict version-2 `CaseCalibration` payload (one
+`CalibratedFact` per graded requirement and optional fact, in case order, plus the
+judge calls) and a manifest reference to its exact frozen case. Its payload `files`
+map must match the retained evidence blobs: verifier executions per fact and side,
+judge call evidence under `judge/<side>/`, and `cleanup.json`. The calibration
+loader checks the facts identity, each fact's kind, source (`verifier` or `judge`)
+and verifier identity, one judge call per calibrated side when the case has judged
+facts, judgments against their calls, baseline/reference results against retained
+output, and resolved cleanup. These records do not create run journals or subject
+captures. Exporting one requires `--include-sensitive calibration-evidence`; import
+verifies the declared sensitive class and the full exact input/evidence closure
+before publishing objects.

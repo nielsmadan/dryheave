@@ -10,8 +10,9 @@ from pydantic import JsonValue
 from dryheave.assessment_inputs import load_assessment_inputs, role_metrics, saved_judge_calls
 from dryheave.controller_models import ControllerRecipe
 from dryheave.errors import DryheaveError, InputError
-from dryheave.experiment_models import ScoringConfig, TrialSpec, inspection_recipe
+from dryheave.experiment_models import FrozenExperiment, ScoringConfig, TrialSpec, inspection_recipe
 from dryheave.experiments import inspect_experiment, load_role
+from dryheave.fact_metrics import fact_group
 from dryheave.integrity import load_assessment
 from dryheave.journals import RunStore
 from dryheave.metrics import total_input
@@ -20,30 +21,27 @@ from dryheave.profiles import load_profile
 from dryheave.report_models import (
     AttemptReport,
     AttemptTopline,
-    CheckSummary,
     Comparison,
     CriterionSummary,
     Distribution,
     Eligibility,
-    FactDisclosure,
+    FloorVariant,
     GroupMetrics,
     GroupTopline,
-    HelpNeededSummary,
     MetricSummary,
     ModelSetup,
     PairChange,
     PriceBasis,
     RunReport,
     RunSetup,
-    ToplineCheck,
 )
 from dryheave.result_models import (
     Assessment,
-    CheckResult,
     CriterionResult,
     MetricValue,
     RoleMetrics,
     UsageCharge,
+    verifier_verdict,
 )
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json, digest
@@ -84,6 +82,20 @@ def _reported_case_id(result: Assessment) -> ObjectId | None:
     return result.graded_case_id or result.case_id
 
 
+GRADED_OUTCOMES: dict[str | None, Literal["pass", "fail"]] = {
+    "pass": "pass",
+    "fail": "fail",
+    "met": "pass",
+    "unmet": "fail",
+}
+
+
+def _graded_outcome(item: CriterionResult) -> Literal["pass", "fail"] | None:
+    if item.kind == "judge":
+        return GRADED_OUTCOMES.get(item.outcome)
+    return GRADED_OUTCOMES.get(None if item.execution is None else verifier_verdict(item.execution))
+
+
 def _criteria_summary(eligible: list[Assessment]) -> tuple[CriterionSummary, ...]:
     by_case_criterion: dict[tuple[ObjectId, str], list[CriterionResult]] = defaultdict(list)
     for result in eligible:
@@ -96,43 +108,11 @@ def _criteria_summary(eligible: list[Assessment]) -> tuple[CriterionSummary, ...
         CriterionSummary(
             case_id=case_id,
             criterion_id=criterion_id,
-            passes=sum(item.outcome == "pass" for item in items),
-            graded=sum(item.outcome in {"pass", "fail"} for item in items),
+            passes=sum(_graded_outcome(item) == "pass" for item in items),
+            graded=sum(_graded_outcome(item) is not None for item in items),
             scores=distribution(item.score for item in items),
         )
         for (case_id, criterion_id), items in by_case_criterion.items()
-    )
-
-
-MIN_AGREEMENT_SAMPLE = 2
-
-
-def _agreement(items: list[CheckResult]) -> float | None:
-    applicable = [item.outcome for item in items if item.outcome in {"pass", "fail"}]
-    if len(applicable) < MIN_AGREEMENT_SAMPLE:
-        return None
-    return max(Counter(applicable).values()) / len(applicable)
-
-
-def _checks_summary(eligible: list[Assessment]) -> tuple[CheckSummary, ...]:
-    by_case_check: dict[tuple[ObjectId, str], list[CheckResult]] = defaultdict(list)
-    for result in eligible:
-        case_id = _reported_case_id(result)
-        if case_id is None:
-            continue
-        for item in result.checks:
-            by_case_check[(case_id, item.check_id)].append(item)
-    return tuple(
-        CheckSummary(
-            case_id=case_id,
-            check_id=check_id,
-            passes=sum(item.outcome == "pass" for item in items),
-            fails=sum(item.outcome == "fail" for item in items),
-            not_applicable=sum(item.outcome == "not_applicable" for item in items),
-            errors=sum(item.outcome == "error" for item in items),
-            agreement=_agreement(items),
-        )
-        for (case_id, check_id), items in by_case_check.items()
     )
 
 
@@ -168,6 +148,13 @@ def _latest_eligible(attempts: list[AttemptReport]) -> list[Assessment]:
     ]
 
 
+def _latest_finished(attempts: list[AttemptReport]) -> list[Assessment]:
+    latest = {item.trial_id: item for item in attempts}
+    return [
+        item.result for item in latest.values() if item.result and item.result.phase == "finished"
+    ]
+
+
 def attempt_eligibility(item: AttemptReport) -> Eligibility:
     if item.result is None:
         return "unassessed"
@@ -184,35 +171,6 @@ def price_basis(records: Iterable[UsageCharge]) -> PriceBasis:
         currencies=tuple(sorted({item.currency for item in charges if item.currency})),
         versions=tuple(sorted({item.price_version for item in charges if item.price_version})),
         dates=tuple(sorted({item.price_date for item in charges if item.price_date})),
-    )
-
-
-def _fact_kind(fact_id: str, result: Assessment) -> Literal["proactive", "on request", "unknown"]:
-    help_needed = result.help_needed
-    if help_needed and fact_id in help_needed.proactive_facts:
-        return "proactive"
-    if help_needed and fact_id in help_needed.on_request_facts:
-        return "on request"
-    return "unknown"
-
-
-def help_needed_summary(eligible: list[Assessment]) -> HelpNeededSummary | None:
-    measured = [item for item in eligible if item.help_needed]
-    if not measured:
-        return None
-    counts = Counter(
-        (fact_id, _fact_kind(fact_id, item))
-        for item in measured
-        if item.help_needed
-        for fact_id in item.help_needed.facts_disclosed
-    )
-    return HelpNeededSummary(
-        measured=len(measured),
-        unmeasured=len(eligible) - len(measured),
-        facts=tuple(
-            FactDisclosure(fact_id=fact_id, kind=kind, count=count)
-            for (fact_id, kind), count in sorted(counts.items())
-        ),
     )
 
 
@@ -244,38 +202,29 @@ def attempt_topline(item: AttemptReport, *, latest: bool) -> AttemptTopline:
     subject = _subject_role(item)
     result = item.result
     workflow = result.workflow if result else None
-    has_workflow = workflow is not None and workflow.steps > 0
-    inspection_seconds = workflow.inspection_seconds if workflow else 0.0
-    seconds = (
-        result.subject_seconds - inspection_seconds
-        if result and result.subject_seconds is not None
-        else None
-    )
+    account = result.fact_account if result else None
+    finished = result is not None and result.phase == "finished"
     return AttemptTopline(
         latest=latest,
         turns=result.accepted_turns if result else None,
-        seconds=seconds,
+        seconds=result.subject_seconds if result else None,
         tokens=_total_tokens(subject.known_tokens) if subject else None,
         cost=subject.known_cost if subject else None,
         currency=subject.currency if subject else None,
-        checks=result.checks if result else (),
-        first_inspection=workflow.first_inspection if has_workflow and workflow else None,
-        fix_requests=workflow.fix_requests if has_workflow and workflow else None,
-        workflow=f"{workflow.completed_steps}/{workflow.steps}"
-        if has_workflow and workflow
-        else None,
-        workflow_completed=workflow.completed_steps == workflow.steps
-        if has_workflow and workflow
-        else None,
+        outcome=result.outcome if result and finished else None,
+        outcome_reason=result.outcome_reason if result else None,
+        independence=account.independence if account else None,
+        corrections=account.fix_rounds if account else None,
+        first_inspection=workflow.first_inspection if workflow else None,
+        workflow=f"{workflow.completed_steps}/{workflow.steps}" if workflow else None,
+        workflow_completed=workflow.completed if workflow else None,
+        eligible=attempt_eligibility(item) == "eligible",
     )
 
 
 def group_topline(toplines: list[AttemptTopline]) -> GroupTopline:
     currencies = {item.currency for item in toplines if item.cost is not None}
-    check_ids = dict.fromkeys(check.check_id for item in toplines for check in item.checks)
-    answered = [
-        check for item in toplines for check in item.checks if check.outcome in {"pass", "fail"}
-    ]
+    counted = [item for item in toplines if item.eligible]
     return GroupTopline(
         attempts=len(toplines),
         turns=_mean(item.turns for item in toplines),
@@ -283,21 +232,14 @@ def group_topline(toplines: list[AttemptTopline]) -> GroupTopline:
         tokens=_mean(item.tokens for item in toplines),
         cost=_mean(item.cost for item in toplines) if len(currencies) <= 1 else None,
         currency=next(iter(currencies)) if len(currencies) == 1 else None,
-        checks=tuple(
-            ToplineCheck(
-                check_id=check_id,
-                passes=sum(
-                    check.check_id == check_id and check.outcome == "pass" for check in answered
-                ),
-                answered=sum(check.check_id == check_id for check in answered),
-            )
-            for check_id in check_ids
-        ),
+        passes=sum(item.outcome == "pass" for item in counted),
+        graded=sum(item.outcome in {"pass", "fail"} for item in counted),
+        independence=_mean(item.independence for item in counted),
+        corrections=_mean(item.corrections for item in counted),
         first_inspection_passes=sum(1 for item in toplines if item.first_inspection == "passed"),
         first_inspection_attempts=sum(
             1 for item in toplines if item.first_inspection not in (None, "none")
         ),
-        fix_requests=_mean(item.fix_requests for item in toplines),
         workflows_completed=sum(1 for item in toplines if item.workflow_completed),
         workflow_attempts=sum(1 for item in toplines if item.workflow is not None),
     )
@@ -312,7 +254,7 @@ def _derived_group(group: GroupMetrics, members: list[AttemptReport]) -> GroupMe
                 for role in _attempt_roles(item)
                 for record in role.records
             ),
-            "help_needed": help_needed_summary(_latest_eligible(members)),
+            "facts": fact_group(_latest_finished(members), _latest_eligible(members)),
             "topline": group_topline(
                 [item.topline for item in members if item.topline and item.topline.latest]
             ),
@@ -398,7 +340,7 @@ def _group(
         scheduled_trials=scheduled,
         attempts=len(attempts),
         completed=sum(item.stage == TrialStage.FINISHED for item in attempts),
-        scored=sum(item.completion != "indeterminate" for item in results),
+        scored=sum(item.outcome != "indeterminate" for item in results),
         eligible=len(eligible),
         audit_excluded=sum(
             any(
@@ -411,8 +353,8 @@ def _group(
             for item in attempts
         ),
         exclusion_reasons=dict(reasons),
-        eligible_passes=sum(item.completion == "pass" for item in eligible),
-        eligible_completion_rate=sum(item.completion == "pass" for item in eligible) / len(eligible)
+        eligible_passes=sum(item.outcome == "pass" for item in eligible),
+        eligible_completion_rate=sum(item.outcome == "pass" for item in eligible) / len(eligible)
         if eligible
         else None,
         subjects_reporting_completion=sum(
@@ -436,10 +378,9 @@ def _group(
             total_input(tokens) if tokens else None for tokens in subject_tokens
         ),
         criteria=_criteria_summary(latest_eligible),
-        checks=_checks_summary(latest_eligible),
         metrics=_metrics_summary(latest_eligible),
-        simulator_replies=distribution(
-            item.help_needed.simulator_replies if item.help_needed else None
+        stand_in_replies=distribution(
+            item.fact_account.stand_in_replies if item.fact_account else None
             for item in latest_eligible
         ),
         cost_by_role={role: distribution(values) for role, values in role_costs.items()},
@@ -469,6 +410,7 @@ def report_run(
     *,
     journal_limit: int | None = None,
     execution: ExecutionJournal | None = None,
+    floor: bool = True,
 ) -> RunReport:
     if not re.fullmatch(r"[0-9a-f]{32}", reference):
         return with_derived(store.load(reference, RunReport, kind=ObjectKind.PORTABLE_REPORT))
@@ -505,9 +447,9 @@ def report_run(
                 quarantine_id=state.quarantine_id,
                 pairing_id=_pair_identity(
                     trials.get(state.trial_id) or result,
-                    experiment.simulator_id
+                    experiment.stand_in_id
                     if experiment
-                    else result.simulator_id
+                    else result.stand_in_id
                     if result
                     else None,
                     experiment.scoring_id if experiment else result.scoring_id if result else None,
@@ -536,7 +478,7 @@ def report_run(
                 canonical_json(
                     {
                         "cases": ",".join(sorted(experiment.case_ids)),
-                        "simulator": experiment.simulator_id,
+                        "stand_in": experiment.stand_in_id,
                         "scoring": experiment.scoring_id,
                         "seed": experiment.seed,
                         "repetitions": experiment.repetitions,
@@ -554,7 +496,43 @@ def report_run(
             groups=group_metrics(
                 tuple(rows), scheduled, execution.options.mode if execution.options else "pending"
             ),
+            budget=execution.options.budget if execution.options else None,
+            floor=_floor(store, experiment, execution) if floor else None,
         )
+    )
+
+
+def identities(experiment: FrozenExperiment, workflow: bool) -> tuple[object, ...]:
+    return (sorted(experiment.case_ids), experiment.stand_in_id, experiment.scoring_id, workflow)
+
+
+def _floor(
+    store: ObjectStore, experiment: FrozenExperiment | None, execution: ExecutionJournal
+) -> FloorVariant | None:
+    options = execution.options
+    if experiment is None or options is None or options.pilot_run is None:
+        return None
+    try:
+        pilot = ExecutionJournal(RunStore(store.root).inspect(options.pilot_run))
+    except (DryheaveError, OSError):
+        return None
+    pilot_experiment, _ = inspect_experiment(store, pilot.journal.metadata.experiment_id)
+    if (
+        pilot_experiment is None
+        or pilot.options is None
+        or identities(pilot_experiment, pilot.options.workflow)
+        != identities(experiment, options.workflow)
+    ):
+        return None
+    report = report_run(store, options.pilot_run, execution=pilot, floor=False)
+    group = next(iter(report.groups), None)
+    if group is None or len(report.groups) != 1:
+        return None
+    return FloorVariant(
+        run_id=report.run_id,
+        label=f"{group.variant} (n={group.attempts})",
+        budget=pilot.options.budget,
+        group=group,
     )
 
 
@@ -595,12 +573,12 @@ def _experiment_setup(store: ObjectStore, run_id: str, experiment_id: str) -> Ru
         return RunSetup(run_id=run_id, issues=(f"Experiment {experiment_id}: {error}",))
     issues: list[str] = []
     try:
-        simulator = _recipe_setup(
-            load_role(store, experiment.simulator_id, ControllerRecipe, ObjectKind.SIMULATOR)
-        ).model_copy(update={"identity": experiment.simulator_id})
+        stand_in = _recipe_setup(
+            load_role(store, experiment.stand_in_id, ControllerRecipe, ObjectKind.STAND_IN)
+        ).model_copy(update={"identity": experiment.stand_in_id})
     except DryheaveError as failure:
-        simulator = ModelSetup(status="unavailable")
-        issues.append(f"Simulated user {experiment.simulator_id}: {failure}")
+        stand_in = ModelSetup(status="unavailable")
+        issues.append(f"Stand-in {experiment.stand_in_id}: {failure}")
     try:
         scoring = load_role(store, experiment.scoring_id, ScoringConfig, ObjectKind.SCORING)
     except DryheaveError as failure:
@@ -615,7 +593,7 @@ def _experiment_setup(store: ObjectStore, run_id: str, experiment_id: str) -> Ru
         run_id=run_id,
         case_ids=experiment.case_ids,
         variants=variants,
-        simulator=simulator,
+        stand_in=stand_in,
         judge=_recipe_setup(scoring.judge) if scoring else ModelSetup(status="unavailable"),
         inspector=_recipe_setup(inspection_recipe(scoring))
         if scoring
@@ -654,7 +632,7 @@ def run_setups(store: ObjectStore, reports: Sequence[RunReport]) -> tuple[RunSet
 
 def _pair_identity(
     identity: TrialSpec | Assessment | None,
-    simulator_id: str | None,
+    stand_in_id: str | None,
     scoring_id: str | None,
     mode: str | None,
 ) -> str | None:
@@ -662,7 +640,7 @@ def _pair_identity(
         return None
     values: dict[str, JsonValue] = {
         "case": identity.case_id,
-        "simulator": simulator_id,
+        "stand_in": stand_in_id,
         "scoring": scoring_id,
         "repetition": identity.repetition,
         "seed": identity.seed,
@@ -679,7 +657,7 @@ def _pairs(report: RunReport, variant: str | None) -> dict[tuple[object, ...], A
             continue
         result = item.result
         identity = item.pairing_id or (
-            _pair_identity(result, result.simulator_id, result.scoring_id, result.mode)
+            _pair_identity(result, result.stand_in_id, result.scoring_id, result.mode)
             if result
             else None
         )
@@ -711,7 +689,7 @@ def compare_runs(
     )
     if not earlier or not later or incompatible:
         raise InputError(
-            "Comparison requires matching frozen case/criteria/simulator/scoring, repetitions, seeds and modes; select compatible variants explicitly."
+            "Comparison requires matching frozen case/criteria/stand-in/scoring, repetitions, seeds and modes; select compatible variants explicitly."
         )
     pairs = []
     for key, row in earlier.items():
@@ -733,17 +711,23 @@ def compare_runs(
         if first.case_id is None or first.repetition is None:
             raise InputError("Pair identities are incomplete.")
         criteria = {item.criterion_id: item.outcome for item in first.criteria}
+        facts = {item.fact_id: item.verdict for item in first.facts}
         pairs.append(
             PairChange(
                 case_id=first.case_id,
                 repetition=first.repetition,
                 before_attempt=first.attempt_id,
                 after_attempt=second.attempt_id,
-                before_completion=first.completion,
-                after_completion=second.completion,
+                before_outcome=first.outcome,
+                after_outcome=second.outcome,
                 criterion_changes={
                     item.criterion_id: (criteria[item.criterion_id], item.outcome)
                     for item in second.criteria
+                    if item.criterion_id in criteria
+                },
+                fact_changes={
+                    item.fact_id: (facts.get(item.fact_id, "missing"), item.verdict)
+                    for item in second.facts
                 },
             )
         )

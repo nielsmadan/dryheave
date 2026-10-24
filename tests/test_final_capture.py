@@ -110,7 +110,7 @@ def test_links_to_workspace_root_preserve_bytes_and_remain_grade_eligible(
         assert (copy / path).resolve() == copy
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.eligible
-    assert result.completion == "pass"
+    assert result.outcome == "pass"
 
 
 @pytest.mark.integration

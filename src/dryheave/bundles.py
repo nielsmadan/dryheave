@@ -26,7 +26,7 @@ from dryheave.personas import load_frozen_persona
 from dryheave.report_models import RunReport
 from dryheave.reports import report_run
 from dryheave.serialization import canonical_json, parse_model
-from dryheave.storage import ObjectStore, validated_alias
+from dryheave.storage import ObjectStore, ensure_store_format, validated_alias
 from dryheave.tar_bounds import preflight_tar
 
 MAX_BUNDLE_BYTES = 1024 * 1024 * 1024
@@ -36,7 +36,7 @@ RAW_CLASSES = {
     "raw terminal/native logs and screens": "captures",
     "final files and patches": "captures",
     "raw Git metadata": "captures",
-    "simulator requests and responses": "captures",
+    "stand-in requests and responses": "captures",
     "judge requests and responses": "assessment-evidence",
     "verifier stdout/stderr": "assessment-evidence",
     "full source transcripts": "source-sessions",
@@ -270,6 +270,7 @@ def export_bundle(
 
 
 def _unpack(source: Path, staging: Path) -> BundleManifest:
+    ensure_store_format(staging)
     try:
         with (
             regular_fd(source, os.O_RDONLY) as descriptor,

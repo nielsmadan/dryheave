@@ -9,11 +9,21 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
-from dryheave.cases import DeterministicCriterion
+from dryheave.cases import FactVerifier, TaskFact
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.errors import LimitError
 from dryheave.grading import execute_check
 from dryheave.models import CommandSpec
+
+
+def verifier_fact(**verifier) -> TaskFact:
+    return TaskFact(
+        fact_id="check",
+        phase="fix",
+        text="The hidden check passes.",
+        curator_authored=True,
+        verifier=FactVerifier(**verifier),
+    )
 
 
 def test_subject_owned_executable_is_rejected_before_execution(tmp_path):
@@ -27,9 +37,7 @@ def test_subject_owned_executable_is_rejected_before_execution(tmp_path):
         f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(canary)!r}).write_text('ran')\nprint('CHECKS_PASSED')\n"
     )
     executable.chmod(0o700)
-    criterion = DeterministicCriterion(
-        criterion_id="check",
-        description="Reject a subject-owned executable before it can forge a result.",
+    fact = verifier_fact(
         command=CommandSpec(argv=(str(executable), "{verifier}/check.py")),
         entrypoint="check.py",
         expected_stdout="CHECKS_PASSED",
@@ -40,7 +48,7 @@ def test_subject_owned_executable_is_rejected_before_execution(tmp_path):
         on_identities=lambda _identities: None,
     )
     evidence = ArtifactWriter(tmp_path / "evidence", 1000000)
-    execution = execute_check(criterion, workspace, hidden, evidence, context)
+    execution = execute_check(fact, workspace, hidden, evidence, context)
     assert execution.outcome == "error"
     assert json.loads(next(evidence.root.glob("*-error.json")).read_text()) == {
         "type": "InputError",
@@ -78,9 +86,7 @@ def test_exit_codes_require_truthful_execution_evidence(
     workspace.mkdir()
     hidden.mkdir()
     (hidden / "check.py").write_text(program + "\n")
-    criterion = DeterministicCriterion(
-        criterion_id="check",
-        description="Check the trusted execution evidence contract.",
+    fact = verifier_fact(
         command=CommandSpec(argv=(sys.executable, "{verifier}/check.py")),
         entrypoint="check.py",
         expected_stdout="CHECKS_PASSED",
@@ -93,7 +99,7 @@ def test_exit_codes_require_truthful_execution_evidence(
         on_identities=identities.extend,
     )
     execution = execute_check(
-        criterion, workspace, hidden, ArtifactWriter(tmp_path / "evidence", 1000000), context
+        fact, workspace, hidden, ArtifactWriter(tmp_path / "evidence", 1000000), context
     )
     assert (execution.outcome, execution.execution_observed) == (outcome, observed)
     if not observed:
@@ -111,9 +117,7 @@ def test_one_byte_stream_limit_remains_independent_of_evidence_budget(tmp_path, 
     workspace.mkdir()
     hidden.mkdir()
     (hidden / "check.py").write_text(f"import sys\nsys.{stream}.write('PP')\n")
-    criterion = DeterministicCriterion(
-        criterion_id="check",
-        description="Bound the actual verifier output separately from its retained metadata.",
+    fact = verifier_fact(
         command=CommandSpec(argv=(sys.executable, "{verifier}/check.py"), max_output_bytes=1),
         entrypoint="check.py",
         expected_stdout="P",
@@ -122,7 +126,7 @@ def test_one_byte_stream_limit_remains_independent_of_evidence_budget(tmp_path, 
         cancelled=threading.Event(), original_workspace=None, on_identities=lambda _identities: None
     )
     evidence = ArtifactWriter(tmp_path / "evidence", 65536)
-    execution = execute_check(criterion, workspace, hidden, evidence, context)
+    execution = execute_check(fact, workspace, hidden, evidence, context)
     assert execution.outcome == "error"
     assert execution.process_outcome == "output_limit"
     assert (evidence.root / (stream + ".bin")).read_bytes() == b"P"
@@ -142,9 +146,7 @@ def test_failed_pre_stop_publish_still_stops_the_owned_child(tmp_path):
         "time.sleep(.3)\n"
         "print(child.pid, 'CHECKS_PASSED')\n"
     )
-    criterion = DeterministicCriterion(
-        criterion_id="check",
-        description="Stop owned processes even when the pre-stop identity flush fails.",
+    fact = verifier_fact(
         command=CommandSpec(argv=(sys.executable, "{verifier}/check.py")),
         entrypoint="check.py",
         expected_stdout="CHECKS_PASSED",
@@ -165,7 +167,7 @@ def test_failed_pre_stop_publish_still_stops_the_owned_child(tmp_path):
         cancelled=threading.Event(), original_workspace=None, on_identities=on_identities
     )
     evidence = ArtifactWriter(tmp_path / "evidence", 1000000)
-    execution = execute_check(criterion, workspace, hidden, evidence, context)
+    execution = execute_check(fact, workspace, hidden, evidence, context)
     child = int((evidence.root / "stdout.bin").read_text().split()[0])
     try:
         assert child in failed[0]
@@ -192,9 +194,7 @@ def test_execute_check_stops_the_verifier_at_its_deadline(tmp_path):
     workspace.mkdir()
     hidden.mkdir()
     (hidden / "check.py").write_text('import time\ntime.sleep(30)\nprint("CHECKS_PASSED")\n')
-    criterion = DeterministicCriterion(
-        criterion_id="check",
-        description="Stop a verifier that outlives the caller's deadline.",
+    fact = verifier_fact(
         command=CommandSpec(argv=(sys.executable, "{verifier}/check.py")),
         entrypoint="check.py",
         expected_stdout="CHECKS_PASSED",
@@ -204,14 +204,18 @@ def test_execute_check_stops_the_verifier_at_its_deadline(tmp_path):
     )
     started = time.monotonic()
     execution = execute_check(
-        criterion,
+        fact,
         workspace,
         hidden,
         ArtifactWriter(tmp_path / "evidence", 1000000),
         context,
         started + 0.5,
     )
-    assert (execution.outcome, execution.process_outcome) == ("error", "timeout")
+    assert (execution.outcome, execution.process_outcome, execution.error) == (
+        "error",
+        "timeout",
+        "deadline_exhausted",
+    )
     assert time.monotonic() - started < 10
 
 
@@ -237,9 +241,7 @@ def test_check_snapshot_materializes_captured_files_into_a_fresh_final_copy(tmp_
         complete=True,
         git_complete=True,
     )
-    criterion = DeterministicCriterion(
-        criterion_id="check",
-        description="Run the hidden verifier against the captured files only.",
+    fact = verifier_fact(
         command=CommandSpec(argv=(sys.executable, "{verifier}/check.py")),
         entrypoint="check.py",
         expected_stdout="CHECKS_PASSED",
@@ -253,12 +255,12 @@ def test_check_snapshot_materializes_captured_files_into_a_fresh_final_copy(tmp_
         on_identities=lambda _identities: None,
         cancelled=threading.Event(),
     )
-    execution, evidence = check_snapshot(context, criterion, snapshot, time.monotonic() + 30)
+    execution, evidence = check_snapshot(context, fact, snapshot, time.monotonic() + 30)
     assert (execution.outcome, execution.execution_observed) == ("pass", True)
-    assert evidence == tmp_path / "inspection/criteria/check/final/check-evidence"
+    assert evidence == tmp_path / "inspection/facts/check/final/check-evidence"
     assert json.loads((evidence / "result.json").read_text())["outcome"] == "pass"
     with pytest.raises(InputError, match="fresh directory"):
-        check_snapshot(context, criterion, snapshot, time.monotonic() + 30)
+        check_snapshot(context, fact, snapshot, time.monotonic() + 30)
 
 
 def test_run_copy_keeps_cleanup_failure_precedence_over_a_later_hidden_file_change(
@@ -277,21 +279,19 @@ def test_run_copy_keeps_cleanup_failure_precedence_over_a_later_hidden_file_chan
         on_identities=lambda _identities: None,
         cancelled=threading.Event(),
     )
-    criterion = DeterministicCriterion(
-        criterion_id="check",
-        description="Keep cleanup-failure precedence over a later hidden file change.",
+    fact = verifier_fact(
         command=CommandSpec(argv=(sys.executable, "{verifier}/check.py")),
         entrypoint="check.py",
         expected_stdout="CHECKS_PASSED",
     )
 
-    def forced_execute_check(criterion, workspace, hidden, artifacts, context, deadline=None):
+    def forced_execute_check(fact, workspace, hidden, artifacts, context, deadline=None):
         (hidden / "check.py").write_text("tampered\n")
         return CheckExecution(outcome="error", error="verifier_cleanup_failed")
 
     monkeypatch.setattr(grading, "execute_check", forced_execute_check)
     artifacts = ArtifactWriter(context.root / "evidence", 1_000_000)
     execution = _run_copy(
-        context, criterion, context.root, artifacts, lambda workspace: workspace.mkdir(), None
+        context, fact, context.root, artifacts, lambda workspace: workspace.mkdir(), None
     )
     assert (execution.outcome, execution.error) == ("error", "verifier_cleanup_failed")

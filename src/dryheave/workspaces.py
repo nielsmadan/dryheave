@@ -6,7 +6,7 @@ import shutil
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import ValidationError, field_validator
@@ -21,20 +21,27 @@ from dryheave.filesystem import (
 )
 from dryheave.models import RunId, StrictModel
 from dryheave.serialization import parse_model, validation_message
+from dryheave.storage import LEGACY_STORE_COMMIT, ensure_store_format
 
+WORKSPACE_SCHEMA_VERSION = 2
 CONFIG_FILE = "dryheave.toml"
 WORKSPACE_OWNER_FILE = ".dryheave-workspace.json"
 DIRECTORY_OWNER_FILE = ".dryheave-owned.json"
 CONFIG_LIMIT = 64 * 1024
 
 
+GitCommitMode = Literal["ask", "auto", "off"]
+GIT_COMMIT_MODES: tuple[GitCommitMode, ...] = ("ask", "auto", "off")
+
+
 class WorkspaceConfig(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     authoring: str = ".dryheave/authoring"
     store: str = ".dryheave/store"
     runtime: str = ".dryheave/rt"
     skills: str = ".agents/skills"
     tui_test: str | None = None
+    git_commit: GitCommitMode = "ask"
 
     @field_validator("authoring", "store", "runtime", "skills", "tui_test")
     @classmethod
@@ -53,7 +60,7 @@ class WorkspaceConfig(StrictModel):
 
 
 class WorkspaceOwnership(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     owner: Literal["dryheave"] = "dryheave"
     workspace_id: RunId
     config: WorkspaceConfig
@@ -74,6 +81,22 @@ class Workspace:
     def path(self, role: Literal["authoring", "store", "runtime", "skills"]) -> Path:
         configured: str = getattr(self.config, role)
         return (self.root / configured).absolute()
+
+    @property
+    def voices_dir(self) -> Path:
+        return self.root / "voices"
+
+    @property
+    def cases_dir(self) -> Path:
+        return self.root / "cases"
+
+    @property
+    def reports_dir(self) -> Path:
+        return self.root / "reports"
+
+    @property
+    def replays_dir(self) -> Path:
+        return self.root / "replays"
 
     def transport(self) -> Path | None:
         return (self.root / self.config.tui_test).absolute() if self.config.tui_test else None
@@ -110,7 +133,15 @@ def read_workspace(root: Path) -> Workspace:
     path = root / CONFIG_FILE
     try:
         value = tomllib.loads(read_bytes(path, limit=CONFIG_LIMIT).decode("utf-8"))
-        config = WorkspaceConfig.model_validate(value)
+        version = value.get("schema_version", WORKSPACE_SCHEMA_VERSION)
+        if version != WORKSPACE_SCHEMA_VERSION:
+            raise InputError(
+                f"Workspace {path} uses schema_version {version}, the pre-redesign format; "
+                "this Dryheave reads only schema_version 2 and has no migration. Use the "
+                f"Dryheave CLI from commit {LEGACY_STORE_COMMIT} for the old workspace, "
+                "or create a new workspace with dryheave init."
+            )
+        config = WorkspaceConfig.model_validate(_flatten_git(value))
     except (tomllib.TOMLDecodeError, UnicodeError) as error:
         raise InputError(f"Invalid workspace TOML: {path}") from error
     except ValidationError as error:
@@ -118,6 +149,14 @@ def read_workspace(root: Path) -> Workspace:
     workspace = Workspace(root.absolute(), config)
     _validate_paths(workspace)
     return workspace
+
+
+def _flatten_git(value: dict[str, Any]) -> dict[str, Any]:
+    table = value.get("git", {})
+    if "git_commit" in value or not isinstance(table, dict) or set(table) - {"commit"}:
+        raise InputError("Workspace git settings belong in a [git] table with only 'commit'.")
+    rest = {name: item for name, item in value.items() if name != "git"}
+    return rest | ({"git_commit": table["commit"]} if "commit" in table else {})
 
 
 def discover_workspace(start: Path | None = None) -> Workspace | None:
@@ -158,10 +197,12 @@ def _validate_paths(workspace: Workspace) -> None:
 
 
 def _config_bytes(config: WorkspaceConfig) -> bytes:
-    return "".join(
-        f"{name} = {json.dumps(value, ensure_ascii=False)}\n"
-        for name, value in config.model_dump(exclude_none=True).items()
-    ).encode("utf-8")
+    values = config.model_dump(exclude_none=True, exclude={"git_commit"})
+    lines = [
+        f"{name} = {json.dumps(value, ensure_ascii=False)}\n" for name, value in values.items()
+    ]
+    lines += ["\n[git]\n", f"commit = {json.dumps(config.git_commit)}\n"]
+    return "".join(lines).encode("utf-8")
 
 
 def _ownership(root: Path) -> WorkspaceOwnership | None:
@@ -206,31 +247,50 @@ def _create_directory(path: Path, ownership: WorkspaceDirectoryOwnership) -> Non
             shutil.rmtree(staged)
 
 
-def _initialize_locked(root: Path, runtime_root: Path | None, tui_test: Path | None) -> Workspace:
+def _with_mode(config: WorkspaceConfig, mode: GitCommitMode) -> WorkspaceConfig:
+    return config.model_copy(update={"git_commit": mode})
+
+
+def _initialize_locked(
+    root: Path,
+    runtime_root: Path | None,
+    tui_test: Path | None,
+    git_commit: GitCommitMode | None,
+) -> Workspace:
     owned = _ownership(root)
     try:
         existing = read_workspace(root)
     except FileNotFoundError:
         existing = None
-    if existing is not None and (owned is None or owned.config != existing.config):
+    if existing is not None and (
+        owned is None or _with_mode(owned.config, existing.config.git_commit) != existing.config
+    ):
         raise ConflictError(
             f"Workspace config is foreign or edited; preserve it: {root / CONFIG_FILE}"
         )
     config = owned.config if owned is not None else WorkspaceConfig()
+    if existing is not None:
+        config = _with_mode(config, existing.config.git_commit)
+    mode = git_commit or config.git_commit
     if runtime_root is not None:
         config = WorkspaceConfig.model_validate(
             config.model_dump() | {"runtime": str(runtime_root)}
         )
     if tui_test is not None:
         config = WorkspaceConfig.model_validate(config.model_dump() | {"tui_test": str(tui_test)})
-    if owned is not None and config != owned.config:
+    if owned is not None and _with_mode(config, owned.config.git_commit) != owned.config:
         raise ConflictError(
             "Init options differ from the owned workspace; preserve its existing configuration."
         )
+    config = _with_mode(config, mode)
     workspace = Workspace(root, config)
     _validate_paths(workspace)
     validate_runtime_root(workspace.path("runtime"))
-    ownership = owned or WorkspaceOwnership(workspace_id=uuid4().hex, config=config)
+    ownership = (
+        owned.model_copy(update={"config": config})
+        if owned is not None
+        else WorkspaceOwnership(workspace_id=uuid4().hex, config=config)
+    )
     missing: list[tuple[Path, WorkspaceDirectoryOwnership]] = []
     for role in ("authoring", "store", "runtime"):
         marker = WorkspaceDirectoryOwnership.model_validate(
@@ -239,19 +299,26 @@ def _initialize_locked(root: Path, runtime_root: Path | None, tui_test: Path | N
         path = workspace.path(marker.role)
         if not _check_directory(path, marker):
             missing.append((path, marker))
-    if owned is None:
+    if owned is None or owned.config != config:
         atomic_write(
-            root / WORKSPACE_OWNER_FILE, ownership.model_dump_json().encode() + b"\n", replace=False
+            root / WORKSPACE_OWNER_FILE,
+            ownership.model_dump_json().encode() + b"\n",
+            replace=owned is not None,
         )
     for path, marker in missing:
         _create_directory(path, marker)
-    if existing is None:
-        atomic_write(root / CONFIG_FILE, _config_bytes(config), replace=False)
+    ensure_store_format(workspace.path("store"))
+    if existing is None or existing.config != config:
+        atomic_write(root / CONFIG_FILE, _config_bytes(config), replace=existing is not None)
     return workspace
 
 
 def initialize_workspace(
-    path: Path, *, runtime_root: Path | None = None, tui_test: Path | None = None
+    path: Path,
+    *,
+    runtime_root: Path | None = None,
+    tui_test: Path | None = None,
+    git_commit: GitCommitMode | None = None,
 ) -> Workspace:
     root = _safe_directory(path)
     with directory_fd(root, create=True) as descriptor:
@@ -262,6 +329,6 @@ def initialize_workspace(
                 f"Workspace initialization is running; retry when it finishes: {root}"
             ) from error
         try:
-            return _initialize_locked(root, runtime_root, tui_test)
+            return _initialize_locked(root, runtime_root, tui_test, git_commit)
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)

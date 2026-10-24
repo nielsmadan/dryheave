@@ -1,10 +1,13 @@
 import json
+import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from conftest import write_baseline_log
 from dryheave.cli import main
+from dryheave.workspaces import initialize_workspace
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -98,8 +101,15 @@ def test_case_cli_freeze_and_inspect(
     capsys.readouterr()
     payload = json.loads(draft.read_text())
     payload.update(
+        phases=["fix"],
         allowed_facts=[
-            {"fact_id": "punctuation", "text": "Use a comma after Hello.", "curator_authored": True}
+            {
+                "fact_id": "punctuation",
+                "phase": "fix",
+                "text": "Use a comma after Hello.",
+                "check": "greet('Ada') returns 'Hello, Ada'.",
+                "curator_authored": True,
+            }
         ],
         intent_confirmed=True,
         facts_reviewed=True,
@@ -122,7 +132,14 @@ def test_case_cli_freeze_and_inspect(
     assert main([*common, "case", "validate", str(draft)]) == 0
     assert json.loads(capsys.readouterr().out)["data"]["valid"] is True
     assert main([*common, "case", "freeze", str(draft)]) == 0
-    identifier = json.loads(capsys.readouterr().out)["data"]["id"]
+    frozen = json.loads(capsys.readouterr().out)["data"]
+    identifier = frozen["id"]
+    assert "alias" not in frozen
+    assert frozen["next"] == (
+        f"Calibrate before subject spend with case calibrate {identifier} --judge MODEL[@EFFORT]."
+    )
+    assert main([*common, "store", "alias", "list"]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["aliases"] == {}
     assert main([*common, "case", "inspect", identifier]) == 0
     assert json.loads(capsys.readouterr().out)["data"]["case"]["intent_confirmed"] is True
 
@@ -250,3 +267,195 @@ def test_collect_accepts_droid_logs(tmp_path: Path, capsys) -> None:
     session = json.loads(capsys.readouterr().out)["data"]["session"]
     assert session["agent"] == "droid"
     assert session["source_version"] == "2"
+
+
+def run(capsys, *arguments):
+    assert main([*arguments, "--json"]) == 0
+    return json.loads(capsys.readouterr().out)["data"]
+
+
+@pytest.mark.integration
+def test_case_draft_and_freeze_use_the_cases_folder_and_commit_in_auto_mode(
+    historical_repo: tuple[Path, str, str, str],
+    tmp_path: Path,
+    short_runtime: Path,
+    git_identity,
+    monkeypatch,
+    capsys,
+) -> None:
+    source, baseline, _, _ = historical_repo
+    workspace = tmp_path / "ws"
+    run(
+        capsys, "init", str(workspace), "--runtime-root", str(short_runtime), "--git-commit", "auto"
+    )
+    monkeypatch.chdir(workspace)
+    session_id = run(
+        capsys, "collect", "import", str(FIXTURES / "codex-recorded.jsonl"), "--agent", "codex"
+    )["id"]
+    drafted = run(
+        capsys,
+        "case",
+        "draft",
+        session_id,
+        "--repo",
+        str(source),
+        "--commit",
+        baseline,
+        "--name",
+        "mine",
+    )
+    draft = workspace / "cases/mine/case.json"
+    assert drafted["path"] == str(draft)
+    assert drafted["commit_paths"] == ["cases/mine/case.json"]
+    assert drafted["commit"]["state"] == "committed"
+    assert drafted["commit"]["message"] == "case: draft mine"
+    payload = json.loads(draft.read_text())
+    payload.update(
+        phases=["fix"],
+        allowed_facts=[
+            {
+                "fact_id": "punctuation",
+                "phase": "fix",
+                "text": "Use a comma after Hello.",
+                "check": "greet('Ada') returns 'Hello, Ada'.",
+                "curator_authored": True,
+            }
+        ],
+        intent_confirmed=True,
+        facts_reviewed=True,
+        unresolved_issues=[],
+    )
+    payload["persona"].update(
+        instructions="Ask direct questions.",
+        disclosure_policy="Use only allowed facts.",
+        unknown_answer_policy="Say when an answer is unknown.",
+        reviewed_subject_safe=True,
+    )
+    draft.write_text(json.dumps(payload))
+    frozen = run(capsys, "case", "freeze", str(draft))
+    assert frozen["commit_paths"] == ["cases/mine/case.json"]
+    assert frozen["commit"]["message"] == "case: freeze mine"
+    assert frozen["commit"]["state"] == "committed"
+    log = subprocess.run(
+        ["git", "log", "--format=%s"], cwd=workspace, capture_output=True, text=True, check=False
+    )
+    assert log.stdout.splitlines() == ["case: freeze mine", "case: draft mine"]
+    assert frozen["alias"] == "mine"
+    assert frozen["next"] == (
+        "Calibrate before subject spend with case calibrate mine --judge MODEL[@EFFORT]."
+    )
+    assert run(capsys, "store", "alias", "list")["aliases"] == {"mine": frozen["id"]}
+
+    payload["title"] = "Edited title"
+    draft.write_text(json.dumps(payload))
+    refrozen = run(capsys, "case", "freeze", str(draft))
+    assert refrozen["id"] != frozen["id"]
+    assert refrozen["alias"] == "mine"
+    assert run(capsys, "store", "alias", "list")["aliases"] == {"mine": refrozen["id"]}
+    assert run(capsys, "case", "inspect", "mine")["id"] == refrozen["id"]
+
+
+@pytest.mark.integration
+def test_case_freeze_reports_an_unusable_folder_name_as_alias_error_and_still_freezes(
+    historical_repo: tuple[Path, str, str, str],
+    tmp_path: Path,
+    short_runtime: Path,
+    git_identity,
+    monkeypatch,
+    capsys,
+) -> None:
+    source, baseline, _, _ = historical_repo
+    name = "a" * 64
+    workspace = tmp_path / "ws"
+    run(capsys, "init", str(workspace), "--runtime-root", str(short_runtime))
+    monkeypatch.chdir(workspace)
+    session_id = run(
+        capsys, "collect", "import", str(FIXTURES / "codex-recorded.jsonl"), "--agent", "codex"
+    )["id"]
+    run(
+        capsys,
+        "case",
+        "draft",
+        session_id,
+        "--repo",
+        str(source),
+        "--commit",
+        baseline,
+        "--name",
+        name,
+    )
+    draft = workspace / "cases" / name / "case.json"
+    payload = json.loads(draft.read_text())
+    payload.update(
+        phases=["fix"],
+        allowed_facts=[
+            {
+                "fact_id": "punctuation",
+                "phase": "fix",
+                "text": "Use a comma after Hello.",
+                "check": "greet('Ada') returns 'Hello, Ada'.",
+                "curator_authored": True,
+            }
+        ],
+        intent_confirmed=True,
+        facts_reviewed=True,
+        unresolved_issues=[],
+    )
+    payload["persona"].update(
+        instructions="Ask direct questions.",
+        disclosure_policy="Use only allowed facts.",
+        unknown_answer_policy="Say when an answer is unknown.",
+        reviewed_subject_safe=True,
+    )
+    draft.write_text(json.dumps(payload))
+    assert main(["case", "freeze", str(draft), "--json"]) == 0
+    frozen = json.loads(capsys.readouterr().out)["data"]
+    assert re.fullmatch(r"[0-9a-f]{64}", frozen["id"])
+    assert frozen["alias_error"] == "An alias cannot look like an object ID."
+    assert run(capsys, "store", "alias", "list")["aliases"] == {}
+
+
+def test_case_draft_outside_a_workspace_still_needs_an_explicit_out(tmp_path: Path, capsys) -> None:
+    store = ["--store", str(tmp_path / "store")]
+    session_id = run(
+        capsys,
+        *store,
+        "collect",
+        "import",
+        str(FIXTURES / "codex-recorded.jsonl"),
+        "--agent",
+        "codex",
+    )["id"]
+    assert main([*store, "case", "draft", session_id, "--json"]) == 2
+    assert "--out" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_case_draft_names_cannot_escape_the_cases_folder(
+    tmp_path: Path, short_runtime: Path, git_identity, monkeypatch, capsys
+) -> None:
+    workspace = tmp_path / "ws"
+    run(capsys, "init", str(workspace), "--runtime-root", str(short_runtime))
+    monkeypatch.chdir(workspace)
+    session_id = run(
+        capsys, "collect", "import", str(FIXTURES / "codex-recorded.jsonl"), "--agent", "codex"
+    )["id"]
+    assert main(["case", "draft", session_id, "--name", "../evil", "--json"]) == 2
+    assert not (workspace / "evil").exists()
+
+
+def test_a_second_case_draft_from_one_session_takes_the_next_free_folder(
+    tmp_path: Path, short_runtime: Path, monkeypatch, capsys
+) -> None:
+    workspace = tmp_path / "ws"
+    initialize_workspace(workspace, runtime_root=short_runtime)
+    monkeypatch.chdir(workspace)
+    session_id = run(
+        capsys, "collect", "import", str(FIXTURES / "codex-recorded.jsonl"), "--agent", "codex"
+    )["id"]
+    first = run(capsys, "case", "draft", session_id)["path"]
+    second = run(capsys, "case", "draft", session_id)["path"]
+    stem = f"case-{session_id[:12]}"
+    assert first == str(workspace / "cases" / stem / "case.json")
+    assert second == str(workspace / "cases" / f"{stem}-2" / "case.json")
+    assert main(["case", "draft", session_id, "--name", stem, "--json"]) == 1
+    assert "choose another --name" in json.loads(capsys.readouterr().err)["error"]["message"]

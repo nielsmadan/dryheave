@@ -21,15 +21,19 @@ def test_deterministic_criterion_named_judge_has_separate_artifacts(
 ):
     case_id = graded_benchmark.cases[0]
     case = load_frozen_case(store, case_id)
+    punctuation = case.allowed_facts[0]
     case = case.model_copy(
         update={
+            "allowed_facts": (
+                punctuation.model_copy(update={"kind": "context", "phase": None, "verifier": None}),
+                punctuation.model_copy(update={"fact_id": "judge"}),
+            ),
             "criteria": (
-                case.criteria[0].model_copy(update={"criterion_id": "judge"}),
                 RubricCriterion(
                     criterion_id="quality",
                     rubric="The implementation preserves the existing public interface.",
                 ),
-            )
+            ),
         }
     )
     changed = store.put(
@@ -70,10 +74,10 @@ def test_deterministic_criterion_named_judge_has_separate_artifacts(
     ]
     assert [item.required for item in result.criteria[2:]] == [False, False, False]
     assert result.rubric_set == "default-v1"
-    assert result.completion == "pass"
+    assert result.outcome == "pass"
     assert result.eligible
     evidence = store.read_blobs(result.evidence_id)
-    assert any("/criteria/judge/final/" in name for name in evidence)
+    assert any("/facts/judge/final/" in name for name in evidence)
     assert any("/judge/j-" in name for name in evidence)
 
 
@@ -156,10 +160,17 @@ def test_partial_judge_response_retains_valid_judgment_and_spend(store, graded_b
         host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
-    assert result.deterministic_completion == "pass"
-    assert result.completion == "indeterminate"
+    assert result.outcome_reason == "all_met"
+    assert result.outcome == "pass"
+    assert [(item.criterion_id, item.required) for item in result.criteria][1:] == [
+        ("quality", False),
+        ("design", False),
+        ("code-quality", False),
+        ("codebase-consistency", False),
+        ("test-quality", False),
+    ]
     assert [(item.criterion_id, item.outcome) for item in result.criteria] == [
-        ("greeting", "pass"),
+        ("punctuation", "pass"),
         ("quality", "pass"),
         ("design", "error"),
         ("code-quality", "error"),
@@ -195,7 +206,7 @@ def test_claude_judge_uses_structured_protocol_and_provider_usage(
 
     from dryheave.controllers import CallContext
     from dryheave.drivers.artifacts import ArtifactWriter
-    from dryheave.judges import JudgeCheck, JudgeInput, invoke_judge
+    from dryheave.judges import JudgeInput, invoke_judge
     from test_claude_controller import FIXTURE, fake_executable, recipe_for
 
     payload = json.loads(FIXTURE.read_bytes())
@@ -208,9 +219,6 @@ def test_claude_judge_uses_structured_protocol_and_provider_usage(
                 "rationale": "Synthetic rubric fixture.",
             },
         ],
-        "checks": [
-            {"check_id": "applied", "answer": "yes", "rationale": "The edit is in greet.py."}
-        ],
     }
     recipe = recipe_for(fake_executable(tmp_path, payload))
     request = JudgeInput(
@@ -220,7 +228,6 @@ def test_claude_judge_uses_structured_protocol_and_provider_usage(
         ),
         files={"greet.py": "synthetic"},
         omitted_binary_files=(),
-        checks=(JudgeCheck(check_id="applied", question="Was the greeting edited in place?"),),
     )
     context = CallContext(
         call_id="judge-call",
@@ -231,7 +238,7 @@ def test_claude_judge_uses_structured_protocol_and_provider_usage(
         on_identities=lambda _identities: None,
         runtime_root=tmp_path / "runtime",
     )
-    call, results, answers, judgments = invoke_judge(
+    call, results, judgments = invoke_judge(
         recipe, request, ArtifactWriter(tmp_path / "evidence", 1000000), context
     )
     assert call.status == ("failed" if invalid else "completed")
@@ -240,7 +247,6 @@ def test_claude_judge_uses_structured_protocol_and_provider_usage(
     assert call.observed_effort is None
     assert call.cleanup.known_writers_stopped
     assert results[0].outcome == ("error" if invalid else "pass")
-    assert answers == ({} if invalid else {"applied": "yes"})
     assert [(item.criterion_id, item.rationale) for item in judgments] == (
         [] if invalid else [("quality", "Synthetic rubric fixture.")]
     )
@@ -264,7 +270,7 @@ def test_unfinished_assessment_and_export_reconstruct_durable_judge_spend(
     )
     active = []
 
-    def interrupt(execution, state, *_args):
+    def interrupt(execution, state, *_args, **_kwargs):
         if completed:
             call = RoleCall(call_id="completed-judge", role="judge", status="intent")
             execution.evidence(state, "judge-intent", call)
@@ -546,93 +552,7 @@ def test_transcript_redacts_host_paths_after_escapes_colons_and_include_flags(co
     assert transcript[0].text == expected
 
 
-def test_check_answers_map_to_outcomes():
-    from dryheave.cases import CaseCheck, CheckCondition
-    from dryheave.judges import check_results
-
-    checks = (
-        CaseCheck(check_id="asked", question="Did the agent ask first?", expect="yes"),
-        CaseCheck(
-            check_id="kept",
-            question="Was the old greeting kept?",
-            expect="no",
-            only_if=CheckCondition(check_id="asked", answer="yes"),
-        ),
-        CaseCheck(
-            check_id="guessed",
-            question="Did the agent guess the punctuation?",
-            expect="no",
-            only_if=CheckCondition(check_id="asked", answer="no"),
-        ),
-        CaseCheck(
-            check_id="nested",
-            question="Did the agent explain its guess?",
-            expect="yes",
-            only_if=CheckCondition(check_id="guessed", answer="yes"),
-        ),
-        CaseCheck(check_id="tested", question="Did the agent run the tests?", expect="yes"),
-        CaseCheck(
-            check_id="followup",
-            question="Did the agent fix failing tests?",
-            expect="yes",
-            only_if=CheckCondition(check_id="tested", answer="yes"),
-        ),
-        CaseCheck(check_id="silent", question="Did the agent stay silent?", expect="no"),
-        CaseCheck(
-            check_id="explained",
-            question="Did the agent explain its silence?",
-            expect="yes",
-            only_if=CheckCondition(check_id="silent", answer="yes"),
-        ),
-    )
-    answers = {
-        "asked": "yes",
-        "kept": "yes",
-        "guessed": "yes",
-        "nested": "yes",
-        "tested": "unclear",
-        "followup": "yes",
-        "explained": "yes",
-    }
-    assert [
-        (item.check_id, item.outcome, item.answer) for item in check_results(checks, answers)
-    ] == [
-        ("asked", "pass", "yes"),
-        ("kept", "fail", "yes"),
-        ("guessed", "not_applicable", "yes"),
-        ("nested", "not_applicable", "yes"),
-        ("tested", "error", "unclear"),
-        ("followup", "not_applicable", "yes"),
-        ("silent", "error", None),
-        ("explained", "not_applicable", "yes"),
-    ]
-
-
-CHECKS = (
-    {
-        "check_id": "asked",
-        "question": "Did the agent ask which punctuation to use?",
-        "expect": "yes",
-    },
-    {
-        "check_id": "kept",
-        "question": "Did the agent keep the old greeting text?",
-        "expect": "no",
-        "only_if": {"check_id": "asked", "answer": "yes"},
-    },
-    {
-        "check_id": "guessed",
-        "question": "Did the agent guess the punctuation?",
-        "expect": "no",
-        "only_if": {"check_id": "asked", "answer": "no"},
-    },
-    {"check_id": "unsure", "question": "Did the agent run the greeting?", "expect": "yes"},
-)
-
-
-def checked_case(store, graded_benchmark):
-    from dryheave.cases import CaseCheck
-
+def quality_case(store, graded_benchmark):
     case_id = graded_benchmark.cases[0]
     case = load_frozen_case(store, case_id)
     case = case.model_copy(
@@ -643,7 +563,6 @@ def checked_case(store, graded_benchmark):
                     criterion_id="quality", rubric="The greeting keeps its public interface."
                 ),
             ),
-            "checks": tuple(CaseCheck.model_validate_json(json.dumps(item)) for item in CHECKS),
             "disabled_rubrics": ("test-quality",),
         }
     )
@@ -653,61 +572,6 @@ def checked_case(store, graded_benchmark):
         files=store.read_blobs(case_id),
         references=(case.persona_id, case.repository_id),
     )
-
-
-def checks_only_case(store, graded_benchmark):
-    from dryheave.cases import CaseCheck
-
-    case_id = graded_benchmark.cases[0]
-    case = load_frozen_case(store, case_id)
-    case = case.model_copy(
-        update={
-            "checks": tuple(CaseCheck.model_validate_json(json.dumps(item)) for item in CHECKS),
-            "disabled_rubrics": ("code-quality", "codebase-consistency", "test-quality"),
-        }
-    )
-    return store.put(
-        ObjectKind.CASE,
-        case,
-        files=store.read_blobs(case_id),
-        references=(case.persona_id, case.repository_id),
-    )
-
-
-@pytest.mark.integration
-def test_offline_assessment_calls_judge_for_checks_only_case(store, graded_benchmark, tmp_path):
-    response = {
-        "judgments": [],
-        "checks": [
-            {"check_id": "asked", "answer": "yes", "rationale": "It asked about punctuation."},
-            {"check_id": "kept", "answer": "no", "rationale": "The text was replaced."},
-            {"check_id": "guessed", "answer": "no", "rationale": "It asked instead."},
-            {"check_id": "unsure", "answer": "unclear", "rationale": "No run is visible."},
-        ],
-    }
-    benchmark = graded_benchmark.model_copy(
-        update={
-            "cases": (checks_only_case(store, graded_benchmark),),
-            "scoring": json_judge(tmp_path, response),
-        }
-    )
-    summary = run_experiment(
-        store,
-        create_experiment(store, benchmark),
-        options=RunOptions(mode="offline-fixture"),
-        host=HOST,
-    )
-    result = load_assessment(store, assess_run(store, summary.run_id)[0])
-    assert [(item.check_id, item.outcome, item.answer) for item in result.checks] == [
-        ("asked", "pass", "yes"),
-        ("kept", "pass", "no"),
-        ("guessed", "not_applicable", "no"),
-        ("unsure", "error", "unclear"),
-    ]
-    assert [item.criterion_id for item in result.criteria] == ["greeting"]
-    assert result.rubric_set is None
-    request = json.loads((tmp_path / "request.json").read_bytes())
-    assert request["criteria"] == []
 
 
 def json_judge(tmp_path, response: dict) -> ScoringConfig:
@@ -727,7 +591,7 @@ def json_judge(tmp_path, response: dict) -> ScoringConfig:
 
 
 @pytest.mark.integration
-def test_offline_assessment_answers_checks_in_the_judge_call(store, graded_benchmark, tmp_path):
+def test_offline_assessment_judges_rubrics_with_the_transcript(store, graded_benchmark, tmp_path):
     response = {
         "judgments": [
             {"criterion_id": "quality", "outcome": "pass", "rationale": "Interface preserved."},
@@ -738,16 +602,10 @@ def test_offline_assessment_answers_checks_in_the_judge_call(store, graded_bench
                 "rationale": "Clean.",
             },
         ],
-        "checks": [
-            {"check_id": "asked", "answer": "yes", "rationale": "It asked about punctuation."},
-            {"check_id": "kept", "answer": "no", "rationale": "The text was replaced."},
-            {"check_id": "guessed", "answer": "no", "rationale": "It asked instead."},
-            {"check_id": "unsure", "answer": "unclear", "rationale": "No run is visible."},
-        ],
     }
     benchmark = graded_benchmark.model_copy(
         update={
-            "cases": (checked_case(store, graded_benchmark),),
+            "cases": (quality_case(store, graded_benchmark),),
             "scoring": json_judge(tmp_path, response),
         }
     )
@@ -758,25 +616,17 @@ def test_offline_assessment_answers_checks_in_the_judge_call(store, graded_bench
         host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
-    assert [(item.check_id, item.outcome, item.answer) for item in result.checks] == [
-        ("asked", "pass", "yes"),
-        ("kept", "pass", "no"),
-        ("guessed", "not_applicable", "no"),
-        ("unsure", "error", "unclear"),
-    ]
+    assert result.uncovered == ()
     assert [(item.criterion_id, item.outcome) for item in result.criteria] == [
-        ("greeting", "pass"),
+        ("punctuation", "pass"),
         ("quality", "pass"),
         ("code-quality", "pass"),
         ("codebase-consistency", "error"),
     ]
     assert result.rubric_set == "default-v1"
-    assert (result.completion, result.eligible) == ("pass", True)
+    assert (result.outcome, result.eligible) == ("pass", True)
     assert "rationale" not in result.model_dump_json()
     request = json.loads((tmp_path / "request.json").read_bytes())
-    assert request["checks"] == [
-        {"check_id": item["check_id"], "question": item["question"]} for item in CHECKS
-    ]
     assert [item["criterion_id"] for item in request["criteria"]] == [
         "quality",
         "code-quality",
@@ -787,9 +637,6 @@ def test_offline_assessment_answers_checks_in_the_judge_call(store, graded_bench
         {"role": "assistant", "text": "Which punctuation?"},
     ]
     assert request["transcript_truncated"] is False
-    raw = (tmp_path / "request.json").read_text()
-    assert '"expect"' not in raw
-    assert '"only_if"' not in raw
 
 
 @pytest.mark.integration
@@ -800,7 +647,7 @@ def test_judge_projection_truncates_actions_of_a_fixture_capture(store, graded_b
 
     benchmark = graded_benchmark.model_copy(
         update={
-            "cases": (checked_case(store, graded_benchmark),),
+            "cases": (quality_case(store, graded_benchmark),),
             "scoring": json_judge(tmp_path, {"judgments": []}),
         }
     )
@@ -827,7 +674,6 @@ def test_judge_projection_truncates_actions_of_a_fixture_capture(store, graded_b
         'Read greet.py: {"offset": 0}',
         'Read greet.py: {"offset": 1}',
     ]
-    assert [item.check_id for item in full.checks] == [item["check_id"] for item in CHECKS]
     limited = judge_projection(
         case, capture, files, roots=(workspace,), limit=len(canonical_json(full)) - 1
     )
@@ -842,18 +688,17 @@ def test_judge_projection_truncates_actions_of_a_fixture_capture(store, graded_b
 
 
 @pytest.mark.integration
-def test_resumed_assessment_reuses_journaled_check_results(
+def test_resumed_assessment_never_repeats_a_journaled_judge_call(
     store, graded_benchmark, tmp_path, monkeypatch
 ):
     from dryheave.controller_models import RoleCall
     from dryheave.journals import RunStore
     from dryheave.models import TrialStage
-    from dryheave.result_models import CheckResult
     from dryheave.runner_state import ExecutionJournal
 
     benchmark = graded_benchmark.model_copy(
         update={
-            "cases": (checked_case(store, graded_benchmark),),
+            "cases": (quality_case(store, graded_benchmark),),
             "scoring": json_judge(tmp_path, {"judgments": []}),
         }
     )
@@ -863,30 +708,170 @@ def test_resumed_assessment_reuses_journaled_check_results(
         options=RunOptions(mode="offline-fixture"),
         host=HOST,
     )
-    saved = CheckResult(check_id="asked", outcome="pass", answer="yes")
     with RunStore(store.root).open(summary.run_id) as journal:
         execution = ExecutionJournal(journal)
         state = execution.attempts[summary.attempts[0].attempt_id]
         for stage in (TrialStage.AUDITED, TrialStage.GRADING):
             state = state.model_copy(update={"stage": stage})
             execution.save(state)
+        execution.record(state, "rubric-intent", {"criteria": ["quality"]})
         call = RoleCall(call_id="j-saved", role="judge", status="intent")
         execution.evidence(state, "judge-intent", call)
         execution.evidence(state, "judge-result", call.model_copy(update={"status": "completed"}))
-        execution.evidence(state, "check-result", saved)
     monkeypatch.setattr(
         "dryheave.assessments.invoke_judge",
         lambda *_args: pytest.fail("A journaled judge call must not repeat."),
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
-    assert result.checks[0] == saved
-    assert [item.outcome for item in result.checks[1:]] == ["error", "error", "error"]
-    assert result.criteria[1].error == "interrupted_judge"
-    with RunStore(store.root).open(summary.run_id) as journal:
-        events = ExecutionJournal(journal).events_for(state.attempt_id, "check-result")
-    assert [event.data["check_id"] for event in events] == [
-        "asked",
-        "kept",
-        "guessed",
-        "unsure",
+    assert [(item.criterion_id, item.error) for item in result.criteria[1:]] == [
+        ("quality", "interrupted_judge"),
+        ("code-quality", "interrupted_judge"),
+        ("codebase-consistency", "interrupted_judge"),
     ]
+
+
+FACT = {"fact_id": "comma", "text": "Use a comma.", "check": "greet('Ada') is 'Hello, Ada'."}
+
+
+def fact_request():
+    from dryheave.judges import FactJudgeInput, JudgeFact
+
+    return FactJudgeInput(
+        initial_prompt="Fix the greeting.",
+        facts=(JudgeFact(**FACT),),
+        files={"greet.py": 'return "Hello, " + name'},
+        omitted_binary_files=(),
+    )
+
+
+def fact_context(tmp_path):
+    import threading
+    import time
+
+    from dryheave.controllers import CallContext
+
+    return CallContext(
+        call_id="fact-call",
+        index=0,
+        deadline=time.monotonic() + 3,
+        cancelled=threading.Event(),
+        inherited={"CLAUDE_CODE_OAUTH_TOKEN": "synthetic-offline-value"},
+        on_identities=lambda _identities: None,
+        runtime_root=tmp_path / "runtime",
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("judged", "expected"),
+    [
+        ({"fact_id": "comma", "verdict": "met", "evidence": "greet.py:1"}, ("completed", "met")),
+        ({"fact_id": "comma", "verdict": "unmet", "evidence": ""}, ("completed", "unclear")),
+        ({"fact_id": "other", "verdict": "met", "evidence": "greet.py:1"}, ("failed", None)),
+    ],
+)
+def test_claude_fact_judge_uses_structured_judgments(tmp_path, judged, expected):
+    from dryheave.drivers.artifacts import ArtifactWriter
+    from dryheave.judges import invoke_fact_judge
+    from test_claude_controller import FIXTURE, fake_executable, recipe_for
+
+    payload = json.loads(FIXTURE.read_bytes())
+    payload["structured_output"] = {
+        "judgments": [judged | {"observation": "Running it prints Hello, Ada."}]
+    }
+    call, judgments = invoke_fact_judge(
+        recipe_for(fake_executable(tmp_path, payload)),
+        fact_request(),
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        fact_context(tmp_path),
+    )
+    assert (call.status, judgments[0].verdict if judgments else None) == expected
+    assert call.usage.output == 12
+
+
+@pytest.mark.integration
+def test_fact_judge_request_carries_text_check_and_files(tmp_path):
+    from dryheave.drivers.artifacts import ArtifactWriter
+    from dryheave.judges import invoke_fact_judge
+
+    response = {
+        "judgments": [
+            {
+                "fact_id": "comma",
+                "verdict": "met",
+                "observation": "Hello, Ada.",
+                "evidence": "greet.py:1",
+            }
+        ]
+    }
+    scoring = json_judge(tmp_path, response)
+    call, judgments = invoke_fact_judge(
+        scoring.judge,
+        fact_request(),
+        ArtifactWriter(tmp_path / "evidence", 1000000),
+        fact_context(tmp_path),
+    )
+    assert (call.status, [item.verdict for item in judgments]) == ("completed", ["met"])
+    request = json.loads((tmp_path / "request.json").read_bytes())
+    assert request["facts"] == [FACT]
+    assert request["files"] == {"greet.py": 'return "Hello, " + name'}
+    assert "verdict met, unmet or unclear" in request["instruction"]
+
+
+def test_the_fact_judge_output_bound_grows_with_the_fact_count():
+    from dryheave.controller_models import RoleBudget
+    from dryheave.judges import FACT_OUTPUT_BASE_BYTES, FACT_OUTPUT_BYTES, fact_judge_recipe
+
+    recipe = ControllerRecipe(
+        kind="json-command",
+        isolation="trusted-native",
+        command=CommandSpec(argv=(sys.executable, "-c", "pass")),
+        budget=RoleBudget(max_output_bytes=65536),
+    )
+    assert fact_judge_recipe(recipe, 2) == recipe
+    grown = fact_judge_recipe(recipe, 10)
+    assert grown.budget.max_output_bytes == FACT_OUTPUT_BASE_BYTES + 10 * FACT_OUTPUT_BYTES
+    assert fact_judge_recipe(recipe, 1000).budget.max_output_bytes == 1024 * 1024
+
+
+def inspection_values(**changes):
+    from dryheave.judges import FactJudgment
+
+    return {
+        "inspection_id": "i-1",
+        "turn": 1,
+        "snapshot_digest": "s",
+        "input_digest": "d",
+        "status": "completed",
+        "judgments": (FactJudgment(fact_id="a", verdict="met", observation="", evidence="x"),),
+        "error": None,
+    } | changes
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"input_digest": None},
+        {"error": "late"},
+        {"status": "unavailable"},
+        {"status": "unavailable", "error": "judge_unavailable"},
+    ],
+)
+def test_a_fact_inspection_rejects_an_inconsistent_status(changes):
+    from pydantic import ValidationError
+
+    from dryheave.judges import FactInspection
+
+    with pytest.raises(ValidationError):
+        FactInspection(**inspection_values(**changes))
+
+
+def test_an_unavailable_fact_inspection_names_its_error_without_judgments():
+    from dryheave.judges import FactInspection
+
+    inspection = FactInspection(
+        **inspection_values(
+            status="unavailable", error="judge_unavailable", judgments=(), input_digest=None
+        )
+    )
+    assert (inspection.status, inspection.error) == ("unavailable", "judge_unavailable")

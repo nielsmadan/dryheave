@@ -47,6 +47,7 @@ const state = {
   evidenceFile: area(),
   evidenceName: null,
   reasoning: area(),
+  review: area(),
   progress: area(),
   calibration: area(),
   calibrationQuery: "",
@@ -335,7 +336,14 @@ function paintAttempts() {
 }
 
 function detailKey() {
-  const slots = [state.dialogue, state.patch, state.evidence, state.evidenceFile, state.reasoning];
+  const slots = [
+    state.dialogue,
+    state.patch,
+    state.evidence,
+    state.evidenceFile,
+    state.reasoning,
+    state.review,
+  ];
   return [
     slotKey(state.report),
     state.attemptId ?? "",
@@ -366,6 +374,7 @@ function paintDetail() {
     ["evidence", state.evidence],
     ["evidence file", state.evidenceFile],
     ["judge reasoning", state.reasoning],
+    ["review", state.review],
   ]) {
     if (slot.error) {
       errors.push(stateCard("error", `Could not load the ${label}: ${slot.error}`));
@@ -381,6 +390,7 @@ function paintDetail() {
         evidence: state.evidence.data,
         evidenceFile: state.evidenceFile.data,
         reasoning: state.reasoning.data,
+        review: state.review.data,
       },
       labelIndex(),
     ),
@@ -519,6 +529,7 @@ function resetDetails() {
   reset("evidence");
   reset("evidenceFile");
   reset("reasoning");
+  reset("review");
   state.evidenceName = null;
 }
 
@@ -535,6 +546,7 @@ async function loadDetails() {
     load("patch", attemptPath(source, attemptId, "patch")),
     load("evidence", attemptPath(source, attemptId, "evidence")),
     load("reasoning", attemptPath(source, attemptId, "reasoning")),
+    load("review", attemptPath(source, attemptId, "review")),
   ]);
 }
 

@@ -111,7 +111,7 @@ class ExperimentDraft(StrictModel):
     variants: tuple[VariantSpec, ...] = Field(min_length=1, max_length=100)
     repetitions: int = Field(default=1, gt=0, le=1000)
     seed: int = Field(default=0, ge=0, le=2**63 - 1)
-    simulator: ControllerRecipe = Field(default_factory=ControllerRecipe)
+    stand_in: ControllerRecipe = Field(default_factory=ControllerRecipe)
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     fixture: tuple[FixtureTurn, ...] = Field(default=(), max_length=100)
     initial_input_policy: Literal["conversation", "curated-native-command"] = "conversation"
@@ -143,7 +143,7 @@ class FrozenExperiment(StrictModel):
     variants: tuple[FrozenVariant, ...] = Field(min_length=1, max_length=100)
     repetitions: int = Field(gt=0, le=1000)
     seed: int = Field(ge=0, le=2**63 - 1)
-    simulator_id: ObjectId
+    stand_in_id: ObjectId
     scoring_id: ObjectId
     trials: tuple[TrialSpec, ...] = Field(min_length=1, max_length=10000)
     fixture: tuple[FixtureTurn, ...] = Field(default=(), max_length=100)

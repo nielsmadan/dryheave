@@ -25,9 +25,11 @@ from dryheave.reports import compare_runs, distribution, group_metrics, report_r
 from dryheave.result_models import (
     Assessment,
     AuditReport,
-    CheckResult,
+    CheckExecution,
     CriterionResult,
-    HelpNeeded,
+    FactAccount,
+    FactProgress,
+    FactResult,
     MetricsResult,
     MetricValue,
     RoleMetrics,
@@ -94,7 +96,7 @@ def test_currencyless_proven_zero_is_neutral_and_pending_spend_is_visible(
         },
         "observed_model": "fixture-model",
     }
-    script = tmp_path / "simulator.py"
+    script = tmp_path / "stand_in.py"
     script.write_text("print(" + repr(json.dumps(response)) + ")\n")
     recipe = ControllerRecipe(
         kind="json-command",
@@ -120,7 +122,7 @@ def test_currencyless_proven_zero_is_neutral_and_pending_spend_is_visible(
     summary = run_experiment(
         store,
         create_experiment(
-            store, graded_benchmark.model_copy(update={"simulator": recipe, "scoring": scoring})
+            store, graded_benchmark.model_copy(update={"stand_in": recipe, "scoring": scoring})
         ),
         options=RunOptions(mode="offline-fixture"),
         host=HOST,
@@ -322,13 +324,14 @@ def test_saved_variant_comparison_records_real_failure_improvement_and_selected_
     assess_run(store, summary.run_id)
     report = report_run(store, summary.run_id)
     results = {item.variant: item.result for item in report.attempts}
-    assert [(results[name].completion, results[name].eligible) for name in ("base", "changed")] == [
-        ("fail", True),
-        ("pass", True),
+    assert [
+        (results[name].outcome, results[name].outcome_reason, results[name].eligible)
+        for name in ("base", "changed")
+    ] == [("fail", "unmet", True), ("pass", "all_met", True)]
+    assert [results[name].facts[0].source for name in ("base", "changed")] == [
+        "verifier",
+        "verifier",
     ]
-    assert all(
-        result.criteria[0].calibration.status == "demonstrated" for result in results.values()
-    )
     assert {group.variant: group.eligible_completion_rate for group in report.groups} == {
         "base": 0.0,
         "changed": 1.0,
@@ -341,8 +344,8 @@ def test_saved_variant_comparison_records_real_failure_improvement_and_selected_
     restored = parse_model(saved.read_bytes(), Comparison)
     assert restored.paired_count == 1
     assert (restored.excluded_before, restored.excluded_after) == (0, 0)
-    assert restored.pairs[0].criterion_changes == {"greeting": ("fail", "pass")}
-    assert (restored.pairs[0].before_completion, restored.pairs[0].after_completion) == (
+    assert restored.pairs[0].fact_changes == {"punctuation": ("unmet", "met")}
+    assert (restored.pairs[0].before_outcome, restored.pairs[0].after_outcome) == (
         "fail",
         "pass",
     )
@@ -383,7 +386,7 @@ def _fixture_assessment(tokens: TokenUsage, case_id: str = "a" * 64) -> Assessme
         capture_id=None,
         case_id=case_id,
         profile_id=None,
-        simulator_id=None,
+        stand_in_id=None,
         scoring_id=None,
         criteria_id=None,
         variant="base",
@@ -391,14 +394,15 @@ def _fixture_assessment(tokens: TokenUsage, case_id: str = "a" * 64) -> Assessme
         created_at=datetime.now(UTC),
         phase="finished",
         audit=audit,
-        completion="pass",
+        outcome="pass",
+        outcome_reason="all_met",
         eligible=True,
         exclusion_reasons=(),
         stop_reason="completed",
         subject_observation="completed",
         roles=(
             _fixture_role("subject", tokens),
-            _fixture_role("simulator", tokens),
+            _fixture_role("stand_in", tokens),
             _fixture_role("judge", tokens),
         ),
     )
@@ -488,7 +492,7 @@ def test_group_metrics_reports_a_partial_role_known_cost_as_a_lower_bound() -> N
     )
     assessment = _fixture_assessment(tokens).model_copy(
         update={
-            "roles": (priced, _fixture_role("simulator", tokens), _fixture_role("judge", tokens))
+            "roles": (priced, _fixture_role("stand_in", tokens), _fixture_role("judge", tokens))
         }
     )
     attempt = AttemptReport(
@@ -502,6 +506,49 @@ def test_group_metrics_reports_a_partial_role_known_cost_as_a_lower_bound() -> N
     )
     group = group_metrics((attempt,))[0]
     assert group.cost_by_role["subject"].mean == 0.5
+
+
+def _fact_result(fact_id: str, verdict: str = "met", phase: str = "fix") -> FactResult:
+    return FactResult(
+        fact_id=fact_id,
+        kind="requirement",
+        phase=phase,
+        verdict=verdict,
+        observation="seen",
+        evidence="greet.py:2",
+        source="judge",
+    )
+
+
+def _progress(
+    fact_id: str, credit: str = "own", *, raised: int = 0, first: str | None = None
+) -> FactProgress:
+    return FactProgress(
+        fact_id=fact_id,
+        kind="requirement",
+        phase="fix",
+        credit=credit,
+        raised=raised,
+        elicited=credit == "elicited",
+        first_inspection=first,
+    )
+
+
+def _account(
+    *progress: FactProgress,
+    independence: float | None = 1.0,
+    replies: int = 0,
+    fix_rounds: int = 0,
+    unreached: tuple[str, ...] = (),
+) -> FactAccount:
+    return FactAccount(
+        independence=independence,
+        stand_in_replies=replies,
+        fix_rounds=fix_rounds,
+        reached_phases=("fix",),
+        unreached_phases=unreached,
+        facts=progress,
+    )
 
 
 def _fixture_attempt(attempt_id: str, result: Assessment) -> AttemptReport:
@@ -553,32 +600,37 @@ def test_group_metrics_summarizes_criterion_pass_counts_and_score_distribution()
     assert (summary.scores.count, summary.scores.mean) == (2, 0.5)
 
 
-def test_group_metrics_check_agreement_covers_matching_split_and_single_repetition() -> None:
+def test_criterion_pass_rate_counts_a_crashed_verifier_as_a_graded_fail() -> None:
     tokens = TokenUsage(provenance="fixture")
 
-    def with_check(outcome: str) -> Assessment:
-        return _fixture_assessment(tokens).model_copy(
-            update={"checks": (CheckResult(check_id="right-view", outcome=outcome),)}
+    def attempt(attempt_id: str, execution: CheckExecution) -> AttemptReport:
+        criterion = CriterionResult(
+            criterion_id="punctuation",
+            kind="deterministic",
+            required=True,
+            outcome=execution.outcome,
+            execution=execution,
         )
+        result = _fixture_assessment(tokens).model_copy(update={"criteria": (criterion,)})
+        return _fixture_attempt(attempt_id, result)
 
-    matching = group_metrics(
+    passed = CheckExecution(outcome="pass", returncode=0, process_outcome="exited")
+    crashed = CheckExecution(
+        outcome="error",
+        returncode=1,
+        process_outcome="exited",
+        error="expected_execution_evidence_missing",
+    )
+    not_launched = CheckExecution(outcome="error", error="InputError")
+    group = group_metrics(
         (
-            _fixture_attempt("attempt-1", with_check("pass")),
-            _fixture_attempt("attempt-2", with_check("pass")),
+            attempt("attempt-1", passed),
+            attempt("attempt-2", crashed),
+            attempt("attempt-3", not_launched),
         )
     )[0]
-    assert (matching.checks[0].passes, matching.checks[0].agreement) == (2, 1.0)
-
-    split = group_metrics(
-        (
-            _fixture_attempt("attempt-3", with_check("pass")),
-            _fixture_attempt("attempt-4", with_check("fail")),
-        )
-    )[0]
-    assert split.checks[0].agreement == 0.5
-
-    single = group_metrics((_fixture_attempt("attempt-5", with_check("pass")),))[0]
-    assert single.checks[0].agreement is None
+    (summary,) = group.criteria
+    assert (summary.criterion_id, summary.passes, summary.graded) == ("punctuation", 1, 2)
 
 
 def test_group_metrics_metric_distribution_ignores_non_numeric_values() -> None:
@@ -620,50 +672,43 @@ def test_group_metrics_metric_distribution_ignores_non_numeric_values() -> None:
     assert (summary.values.count, summary.values.mean) == (1, 12)
 
 
-def test_group_metrics_simulator_replies_distribution_and_old_shape_assessment_still_builds() -> (
+def test_group_metrics_stand_in_replies_distribution_counts_unaccounted_attempts_as_unknown() -> (
     None
 ):
     tokens = TokenUsage(provenance="fixture")
-    with_help = _fixture_assessment(tokens).model_copy(
-        update={
-            "help_needed": HelpNeeded(
-                simulator_replies=2,
-                facts_disclosed=("a",),
-                proactive_facts=("a",),
-                on_request_facts=(),
-            )
-        }
-    )
-    old_shape = _fixture_assessment(tokens)
+    accounted = _fixture_assessment(tokens).model_copy(update={"fact_account": _account(replies=2)})
+    unaccounted = _fixture_assessment(tokens)
     group = group_metrics(
-        (_fixture_attempt("attempt-1", with_help), _fixture_attempt("attempt-2", old_shape))
+        (_fixture_attempt("attempt-1", accounted), _fixture_attempt("attempt-2", unaccounted))
     )[0]
-    assert group.simulator_replies is not None
-    assert (group.simulator_replies.count, group.simulator_replies.unknown) == (1, 1)
-    assert (group.criteria, group.checks, group.metrics) == ((), (), ())
+    assert group.stand_in_replies is not None
+    assert (group.stand_in_replies.count, group.stand_in_replies.unknown) == (1, 1)
+    assert (group.criteria, group.metrics) == ((), ())
 
 
-def test_group_metrics_does_not_pool_colliding_ids_across_different_cases() -> None:
+def test_fact_group_does_not_pool_colliding_fact_ids_across_different_cases() -> None:
+    from dryheave.fact_metrics import fact_group
+
     tokens = TokenUsage(provenance="fixture")
     case_a, case_b = "a" * 64, "b" * 64
 
-    def with_check(case_id: str, outcome: str) -> Assessment:
+    def with_fact(case_id: str, verdict: str) -> Assessment:
         return _fixture_assessment(tokens, case_id=case_id).model_copy(
-            update={"checks": (CheckResult(check_id="builds", outcome=outcome),)}
+            update={
+                "facts": (_fact_result("builds", verdict),),
+                "fact_account": _account(
+                    _progress("builds", "own" if verdict == "met" else "unmet")
+                ),
+            }
         )
 
-    group = group_metrics(
-        (
-            _fixture_attempt("attempt-1", with_check(case_a, "pass")),
-            _fixture_attempt("attempt-2", with_check(case_a, "pass")),
-            _fixture_attempt("attempt-3", with_check(case_b, "fail")),
-            _fixture_attempt("attempt-4", with_check(case_b, "fail")),
-        )
-    )[0]
-    assert len(group.checks) == 2
-    by_case = {summary.case_id: summary for summary in group.checks}
-    assert (by_case[case_a].passes, by_case[case_a].fails, by_case[case_a].agreement) == (2, 0, 1.0)
-    assert (by_case[case_b].passes, by_case[case_b].fails, by_case[case_b].agreement) == (0, 2, 1.0)
+    results = [with_fact(case_a, "met"), with_fact(case_a, "met"), with_fact(case_b, "unmet")]
+    group = fact_group(results, results)
+    assert group is not None
+    assert [(row.case_id, row.met, row.unmet, row.own, row.attempts) for row in group.facts] == [
+        (case_a, 2, 0, 2, 2),
+        (case_b, 0, 1, 0, 1),
+    ]
 
 
 def _graded_items(outcome: str, value: int, graded_case_id: str | None) -> Assessment:
@@ -675,7 +720,6 @@ def _graded_items(outcome: str, value: int, graded_case_id: str | None) -> Asses
                     criterion_id="quality", kind="judge", required=False, outcome=outcome
                 ),
             ),
-            "checks": (CheckResult(check_id="builds", outcome=outcome),),
             "metrics": (
                 MetricsResult(
                     metrics_id="coverage",
@@ -700,9 +744,6 @@ def test_group_metrics_merges_a_regrade_against_the_reported_case_with_unregrade
     assert [(item.case_id, item.passes, item.graded) for item in group.criteria] == [
         (reported_case, 1, 2)
     ]
-    assert [(item.case_id, item.passes, item.fails) for item in group.checks] == [
-        (reported_case, 1, 1)
-    ]
     assert [(item.case_id, item.values.count, item.values.mean) for item in group.metrics] == [
         (reported_case, 2, 3)
     ]
@@ -719,10 +760,6 @@ def test_group_metrics_keys_a_regrade_against_a_different_case_under_its_graded_
     assert sorted((item.case_id, item.passes, item.graded) for item in group.criteria) == [
         (original_case, 0, 1),
         (regraded_case, 1, 1),
-    ]
-    assert sorted((item.case_id, item.passes, item.fails) for item in group.checks) == [
-        (original_case, 0, 1),
-        (regraded_case, 1, 0),
     ]
     assert sorted((item.case_id, item.values.mean) for item in group.metrics) == [
         (original_case, 2),
@@ -769,8 +806,31 @@ def test_compare_pairs_attempts_only_when_graded_against_the_same_case(
     assert comparison.paired_count == paired
 
 
-def test_report_derives_group_price_basis_help_needed_and_eligibility() -> None:
-    from dryheave.report_models import FactDisclosure, HelpNeededSummary, PriceBasis, RunReport
+def test_compare_rejects_incompatible_runs_naming_the_stand_in(store, monkeypatch) -> None:
+    from dryheave import reports
+    from dryheave.report_models import RunReport
+
+    def run(run_id: str, compatibility_id: str) -> RunReport:
+        return RunReport(
+            run_id=run_id,
+            experiment_id="a" * 64,
+            compatibility_id=compatibility_id,
+            durable_sequence=1,
+            scheduled_trials=0,
+            unstarted_trials=(),
+            input_error=None,
+            attempts=(),
+            groups=(),
+        )
+
+    reports_by_id = {"1" * 32: run("1" * 32, "b" * 64), "2" * 32: run("2" * 32, "c" * 64)}
+    monkeypatch.setattr(reports, "report_run", lambda _store, run_id, **_: reports_by_id[run_id])
+    with pytest.raises(DryheaveError, match=r"case/criteria/stand-in/scoring"):
+        compare_runs(store, "1" * 32, "2" * 32)
+
+
+def test_report_derives_group_price_basis_facts_and_eligibility() -> None:
+    from dryheave.report_models import PriceBasis, RunReport
     from dryheave.reports import with_derived
 
     def charge(kind: str, currency: str | None, version: str | None) -> UsageCharge:
@@ -801,16 +861,18 @@ def test_report_derives_group_price_basis_help_needed_and_eligibility() -> None:
                 "trial_id": trial_id,
                 "roles": (
                     role,
-                    _fixture_role("simulator", tokens),
+                    _fixture_role("stand_in", tokens),
                     _fixture_role("judge", tokens),
                 ),
-                "help_needed": None
+                "facts": tuple(_fact_result(fact_id) for fact_id in facts or ()),
+                "fact_account": None
                 if facts is None
-                else HelpNeeded(
-                    simulator_replies=1,
-                    facts_disclosed=facts,
-                    proactive_facts=("budget",),
-                    on_request_facts=("deadline",),
+                else _account(
+                    *(
+                        _progress(fact_id, "elicited" if fact_id == "deadline" else "own")
+                        for fact_id in facts
+                    ),
+                    independence=0.875 if "deadline" in facts else 1.0,
                 ),
                 **update,
             }
@@ -863,38 +925,18 @@ def test_report_derives_group_price_basis_help_needed_and_eligibility() -> None:
         versions=("v1",),
         dates=("2026-10-01",),
     )
-    assert base.help_needed == HelpNeededSummary(
-        measured=2,
-        unmeasured=1,
-        facts=(
-            FactDisclosure(fact_id="budget", kind="proactive", count=2),
-            FactDisclosure(fact_id="deadline", kind="on request", count=1),
-            FactDisclosure(fact_id="other", kind="unknown", count=1),
-        ),
-    )
-    assert by_variant[("other", "offline-fixture")].help_needed is None
-
-
-def test_group_metrics_check_agreement_denominator_excludes_not_applicable_and_error() -> None:
-    tokens = TokenUsage(provenance="fixture")
-
-    def with_check(outcome: str) -> Assessment:
-        return _fixture_assessment(tokens).model_copy(
-            update={"checks": (CheckResult(check_id="right-view", outcome=outcome),)}
-        )
-
-    group = group_metrics(
-        (
-            _fixture_attempt("attempt-1", with_check("pass")),
-            _fixture_attempt("attempt-2", with_check("pass")),
-            _fixture_attempt("attempt-3", with_check("fail")),
-            _fixture_attempt("attempt-4", with_check("not_applicable")),
-            _fixture_attempt("attempt-5", with_check("error")),
-        )
-    )[0]
-    summary = group.checks[0]
-    assert (summary.passes, summary.fails, summary.not_applicable, summary.errors) == (2, 1, 1, 1)
-    assert summary.agreement == pytest.approx(2 / 3)
+    facts = base.facts
+    assert facts is not None
+    assert (facts.attempts, facts.outcomes, facts.pass_rate) == (3, {"pass": 3}, 1.0)
+    assert (facts.independence.count, facts.independence.mean) == (2, pytest.approx(0.9375))
+    assert [(row.fact_id, row.met, row.own, row.elicited) for row in facts.facts] == [
+        ("budget", 2, 2, 0),
+        ("deadline", 1, 0, 1),
+        ("other", 1, 1, 0),
+    ]
+    other = by_variant[("other", "offline-fixture")].facts
+    assert other is not None
+    assert (other.attempts, other.facts) == (1, ())
 
 
 def test_group_metrics_metric_distribution_counts_booleans_as_zero_and_one() -> None:
@@ -963,15 +1005,13 @@ def test_group_metrics_restricts_new_summaries_to_the_latest_retained_attempt_pe
     tokens = TokenUsage(provenance="fixture")
 
     def with_check(outcome: str, accepted_turns: int) -> Assessment:
+        verdict = "met" if outcome == "pass" else "unmet"
         return _fixture_assessment(tokens).model_copy(
             update={
-                "help_needed": HelpNeeded(
-                    simulator_replies=1,
-                    facts_disclosed=(),
-                    proactive_facts=(),
-                    on_request_facts=(),
+                "fact_account": _account(
+                    _progress("right-view", "own" if verdict == "met" else "unmet"), replies=1
                 ),
-                "checks": (CheckResult(check_id="right-view", outcome=outcome),),
+                "facts": (_fact_result("right-view", verdict),),
                 "accepted_turns": accepted_turns,
             }
         )
@@ -994,12 +1034,25 @@ def test_group_metrics_restricts_new_summaries_to_the_latest_retained_attempt_pe
         result=with_check("pass", 7),
         raw_evidence="unavailable",
     )
-    group = group_metrics((first_attempt, retry_attempt))[0]
-    assert group.checks[0].passes == 1
-    assert group.checks[0].fails == 0
-    assert group.checks[0].agreement is None
-    assert group.simulator_replies is not None
-    assert group.simulator_replies.count == 1
+    from dryheave.reports import with_derived
+
+    attempts = (first_attempt, retry_attempt)
+    group = with_derived(
+        RunReport(
+            run_id="a" * 32,
+            experiment_id="a" * 64,
+            durable_sequence=1,
+            scheduled_trials=1,
+            unstarted_trials=(),
+            input_error=None,
+            attempts=attempts,
+            groups=group_metrics(attempts),
+        )
+    ).groups[0]
+    assert group.facts is not None
+    assert [(row.met, row.unmet, row.attempts) for row in group.facts.facts] == [(1, 0, 1)]
+    assert group.stand_in_replies is not None
+    assert group.stand_in_replies.count == 1
     assert group.accepted_turns.count == 2
     assert group.accepted_turns.mean == 6
 
@@ -1010,9 +1063,7 @@ def _empty_distribution() -> Distribution:
     )
 
 
-def test_group_metrics_serializer_drops_empty_criteria_checks_metrics_and_simulator_replies() -> (
-    None
-):
+def test_group_metrics_serializer_drops_empty_criteria_metrics_facts_and_stand_in_replies() -> None:
     group = GroupMetrics(
         variant="base",
         mode="offline-fixture",
@@ -1035,15 +1086,14 @@ def test_group_metrics_serializer_drops_empty_criteria_checks_metrics_and_simula
         partial_cost_attempts=0,
         costs=_empty_distribution(),
         criteria=(),
-        checks=(),
         metrics=(),
-        simulator_replies=None,
+        stand_in_replies=None,
     )
     parsed = json.loads(canonical_json(group))
-    assert not {"criteria", "checks", "metrics", "simulator_replies"} & set(parsed)
+    assert not {"criteria", "metrics", "facts", "stand_in_replies"} & set(parsed)
 
 
-def test_legacy_shaped_portable_report_loads_with_new_group_fields_defaulted(store) -> None:
+def test_portable_report_without_optional_group_fields_loads_them_defaulted(store) -> None:
     from dryheave.models import Manifest, ObjectKind
 
     legacy_group = {
@@ -1069,7 +1119,7 @@ def test_legacy_shaped_portable_report_loads_with_new_group_fields_defaulted(sto
         "costs": json.loads(canonical_json(_empty_distribution())),
     }
     legacy_report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "run-report",
         "run_id": "a" * 32,
         "experiment_id": "a" * 64,
@@ -1087,12 +1137,13 @@ def test_legacy_shaped_portable_report_loads_with_new_group_fields_defaulted(sto
     identifier = store.put_manifest(manifest, files={})
     report = report_run(store, identifier)
     group = report.groups[0]
-    assert (group.criteria, group.checks, group.metrics, group.simulator_replies) == (
-        (),
+    assert (group.criteria, group.metrics, group.stand_in_replies, group.facts) == (
         (),
         (),
         None,
+        None,
     )
+    assert (report.budget, report.floor) == (None, None)
     assert (group.cache_read_tokens, group.cache_write_tokens, group.total_input_tokens) == (
         None,
         None,
@@ -1101,13 +1152,15 @@ def test_legacy_shaped_portable_report_loads_with_new_group_fields_defaulted(sto
     assert group.cost_by_role == {}
 
 
-def _topline_attempt(
+def _topline_attempt(  # noqa: PLR0913
     attempt_id: str,
     trial_id: str,
     *,
     cost: float,
     seconds: float,
-    checks: tuple[tuple[str, str], ...],
+    outcome: str = "pass",
+    independence: float | None = None,
+    fix_rounds: int = 0,
 ) -> AttemptReport:
     tokens = TokenUsage(
         uncached_input=100, cache_read=1000, cache_write=200, output=50, provenance="fixture"
@@ -1124,41 +1177,34 @@ def _topline_attempt(
             "trial_id": trial_id,
             "accepted_turns": 3,
             "subject_seconds": seconds,
-            "roles": (subject, _fixture_role("simulator", tokens), judge),
-            "checks": tuple(
-                CheckResult(
-                    check_id=check_id,
-                    outcome=outcome,
-                    answer="yes" if outcome == "pass" else None,
-                )
-                for check_id, outcome in checks
-            ),
+            "roles": (subject, _fixture_role("stand_in", tokens), judge),
+            "outcome": outcome,
+            "outcome_reason": {"pass": "all_met", "fail": "unmet"}.get(outcome, "unclear"),
+            "eligible": outcome != "indeterminate",
+            "exclusion_reasons": () if outcome != "indeterminate" else ("unscorable",),
+            "fact_account": _account(independence=independence, fix_rounds=fix_rounds),
         }
     )
     return _fixture_attempt(attempt_id, result).model_copy(update={"trial_id": trial_id})
 
 
 def test_report_derives_agent_topline_per_attempt_and_variant_from_latest_attempts() -> None:
-    from dryheave.report_models import AttemptTopline, GroupTopline, RunReport, ToplineCheck
+    from dryheave.report_models import AttemptTopline, GroupTopline, RunReport
     from dryheave.reports import with_derived
 
     attempts = (
+        _topline_attempt("attempt-1", "trial-1", cost=9.0, seconds=999.0, outcome="indeterminate"),
         _topline_attempt(
-            "attempt-1", "trial-1", cost=9.0, seconds=999.0, checks=(("right-view", "error"),)
-        ),
-        _topline_attempt(
-            "attempt-2",
-            "trial-1",
-            cost=1.0,
-            seconds=100.0,
-            checks=(("right-view", "pass"), ("stable", "fail")),
+            "attempt-2", "trial-1", cost=1.0, seconds=100.0, independence=0.75, fix_rounds=1
         ),
         _topline_attempt(
             "attempt-3",
             "trial-2",
             cost=2.0,
             seconds=300.0,
-            checks=(("right-view", "fail"), ("stable", "not_applicable")),
+            outcome="fail",
+            independence=0.25,
+            fix_rounds=3,
         ),
     )
     report = with_derived(
@@ -1185,7 +1231,11 @@ def test_report_derives_agent_topline_per_attempt_and_variant_from_latest_attemp
         tokens=1350,
         cost=1.0,
         currency="USD",
-        checks=attempts[1].result.checks if attempts[1].result else (),
+        outcome="pass",
+        outcome_reason="all_met",
+        independence=0.75,
+        corrections=1,
+        eligible=True,
     )
     assert report.groups[0].topline == GroupTopline(
         attempts=2,
@@ -1194,17 +1244,34 @@ def test_report_derives_agent_topline_per_attempt_and_variant_from_latest_attemp
         tokens=1350.0,
         cost=1.5,
         currency="USD",
-        checks=(
-            ToplineCheck(check_id="right-view", passes=1, answered=2),
-            ToplineCheck(check_id="stable", passes=0, answered=1),
-        ),
+        passes=1,
+        graded=2,
+        independence=0.5,
+        corrections=2.0,
     )
+
+
+def test_group_topline_counts_passes_and_independence_over_eligible_attempts_only() -> None:
+    from dryheave.reports import attempt_topline, group_topline
+
+    counted = _topline_attempt("attempt-a", "trial-a", cost=1.0, seconds=1.0, independence=1.0)
+    failed = _topline_attempt(
+        "attempt-b", "trial-b", cost=1.0, seconds=1.0, outcome="fail", independence=0.0
+    )
+    excluded = _topline_attempt(
+        "attempt-c", "trial-c", cost=1.0, seconds=1.0, independence=0.5, fix_rounds=4
+    ).model_copy(update={"current_exclusions": ("contamination_suspected",)})
+    toplines = [attempt_topline(item, latest=True) for item in (counted, failed, excluded)]
+    assert [item.eligible for item in toplines] == [True, True, False]
+    group = group_topline(toplines)
+    assert (group.attempts, group.passes, group.graded) == (3, 1, 2)
+    assert (group.independence, group.corrections) == (0.5, 0.0)
 
 
 def test_attempt_topline_leaves_tokens_unknown_when_a_category_is_unobserved() -> None:
     from dryheave.reports import attempt_topline
 
-    item = _topline_attempt("attempt-1", "trial-1", cost=1.0, seconds=1.0, checks=())
+    item = _topline_attempt("attempt-1", "trial-1", cost=1.0, seconds=1.0)
     assert item.result is not None
     partial = item.model_copy(
         update={
@@ -1241,10 +1308,10 @@ def _workflow_outcome(**overrides: object):
     return WorkflowOutcome(**base)
 
 
-def test_attempt_topline_subtracts_inspection_seconds_and_carries_workflow_fields() -> None:
+def test_attempt_topline_keeps_subject_seconds_and_carries_workflow_fields() -> None:
     from dryheave.reports import attempt_topline
 
-    item = _topline_attempt("attempt-1", "trial-1", cost=1.0, seconds=100.0, checks=())
+    item = _topline_attempt("attempt-1", "trial-1", cost=1.0, seconds=100.0)
     assert item.result is not None
     outcome = _workflow_outcome(
         steps=2,
@@ -1259,15 +1326,15 @@ def test_attempt_topline_subtracts_inspection_seconds_and_carries_workflow_field
         update={"result": item.result.model_copy(update={"workflow": outcome})}
     )
     topline = attempt_topline(with_workflow, latest=True)
-    assert topline.seconds == 85.0
-    assert (topline.first_inspection, topline.fix_requests, topline.workflow) == (
+    assert topline.seconds == 100.0
+    assert (topline.first_inspection, topline.workflow, topline.workflow_completed) == (
         "passed",
-        1,
         "2/2",
+        False,
     )
 
 
-def test_group_topline_aggregates_first_check_fix_requests_and_workflow_completion() -> None:
+def test_group_topline_aggregates_first_check_and_workflow_completion() -> None:
     from dryheave.reports import attempt_topline, group_topline
 
     passed = _workflow_outcome(
@@ -1276,6 +1343,7 @@ def test_group_topline_aggregates_first_check_fix_requests_and_workflow_completi
         inspections=1,
         first_inspection="passed",
         final_inspection="passed",
+        completed=True,
     )
     failed = _workflow_outcome(
         steps=2,
@@ -1285,9 +1353,9 @@ def test_group_topline_aggregates_first_check_fix_requests_and_workflow_completi
         first_inspection="failed",
         final_inspection="failed",
     )
-    attempt_a = _topline_attempt("attempt-a", "trial-a", cost=1.0, seconds=10.0, checks=())
-    attempt_b = _topline_attempt("attempt-b", "trial-b", cost=1.0, seconds=10.0, checks=())
-    attempt_c = _topline_attempt("attempt-c", "trial-c", cost=1.0, seconds=10.0, checks=())
+    attempt_a = _topline_attempt("attempt-a", "trial-a", cost=1.0, seconds=10.0)
+    attempt_b = _topline_attempt("attempt-b", "trial-b", cost=1.0, seconds=10.0)
+    attempt_c = _topline_attempt("attempt-c", "trial-c", cost=1.0, seconds=10.0)
     assert attempt_a.result and attempt_b.result and attempt_c.result
     with_a = attempt_a.model_copy(
         update={"result": attempt_a.result.model_copy(update={"workflow": passed})}
@@ -1303,28 +1371,41 @@ def test_group_topline_aggregates_first_check_fix_requests_and_workflow_completi
     group = group_topline(toplines)
     assert group.first_inspection_passes == 1
     assert group.first_inspection_attempts == 2
-    assert group.fix_requests == pytest.approx(1.0)
     assert group.workflows_completed == 1
     assert group.workflow_attempts == 2
 
 
-def test_attempt_topline_hides_workflow_and_fix_requests_for_dialogs_without_a_workflow() -> None:
+def test_attempt_topline_hides_workflow_fields_when_workflows_were_off() -> None:
     from dryheave.reports import attempt_topline, group_topline
 
-    dialog_only = _workflow_outcome(steps=0, completed_steps=0, dialogs_answered=1)
-    attempt_a = _topline_attempt("attempt-a", "trial-a", cost=1.0, seconds=10.0, checks=())
-    assert attempt_a.result is not None
-    with_dialog = attempt_a.model_copy(
-        update={"result": attempt_a.result.model_copy(update={"workflow": dialog_only})}
+    attempt_a = _topline_attempt("attempt-a", "trial-a", cost=1.0, seconds=10.0)
+    topline = attempt_topline(attempt_a, latest=True)
+    assert (topline.first_inspection, topline.workflow, topline.workflow_completed) == (
+        None,
+        None,
+        None,
     )
-    topline = attempt_topline(with_dialog, latest=True)
-    assert (topline.first_inspection, topline.fix_requests, topline.workflow) == (None, None, None)
     group = group_topline([topline])
     assert (
         group.first_inspection_attempts,
         group.workflow_attempts,
         group.workflows_completed,
     ) == (0, 0, 0)
+
+
+def test_attempt_topline_counts_a_workflow_with_inspections_but_no_prompt_steps() -> None:
+    from dryheave.reports import attempt_topline
+
+    raised_only = _workflow_outcome(
+        inspections=2, fix_requests=1, first_inspection="failed", final_inspection="passed"
+    )
+    attempt_a = _topline_attempt("attempt-a", "trial-a", cost=1.0, seconds=10.0)
+    assert attempt_a.result is not None
+    with_workflow = attempt_a.model_copy(
+        update={"result": attempt_a.result.model_copy(update={"workflow": raised_only})}
+    )
+    topline = attempt_topline(with_workflow, latest=True)
+    assert (topline.first_inspection, topline.workflow) == ("failed", "0/0")
 
 
 JUDGE = ControllerRecipe(
@@ -1353,7 +1434,7 @@ def test_run_setups_read_the_frozen_case_roles_and_variant_profiles(store, bench
     assert setup.case_ids == experiment.case_ids
     assert setup.variants["base"].status == "configured"
     assert setup.variants["base"].identity == experiment.variants[0].profile_id
-    assert (setup.simulator.kind, setup.simulator.identity) == ("scripted", experiment.simulator_id)
+    assert (setup.stand_in.kind, setup.stand_in.identity) == ("scripted", experiment.stand_in_id)
     judge = ModelSetup(
         status="configured",
         kind="json-command",
@@ -1379,7 +1460,7 @@ def test_run_setups_show_no_inspector_when_its_budget_disables_inspection(store,
 def test_run_setups_mark_a_missing_experiment_unavailable_with_its_reason(store):
     (setup,) = run_setups(store, [_bare_report("f" * 64)])
     assert setup.case_ids is None
-    assert setup.simulator.status == "unavailable"
+    assert setup.stand_in.status == "unavailable"
     assert setup.issues[0].startswith("Experiment " + "f" * 64)
 
 
@@ -1413,3 +1494,49 @@ def test_run_setups_load_a_shared_experiment_once(store, benchmark, monkeypatch)
     )
     assert inspected == [identifier]
     assert [setup.run_id for setup in setups] == ["1" * 32, "2" * 32]
+
+
+@pytest.mark.integration
+def test_report_joins_a_matching_pilot_as_a_floor_variant_with_its_budget(store, graded_benchmark):
+    from dryheave.runner_models import RunBudget
+
+    experiment_id = create_experiment(store, graded_benchmark)
+    pilot = run_experiment(
+        store, experiment_id, options=RunOptions(mode="offline-fixture"), host=HOST
+    )
+    assess_run(store, pilot.run_id)
+    budget = RunBudget(max_turns=8, stand_in_replies=8, max_inspections=5)
+    bench = run_experiment(
+        store,
+        experiment_id,
+        options=RunOptions(mode="offline-fixture", budget=budget, pilot_run=pilot.run_id),
+        host=HOST,
+    )
+    report = report_run(store, bench.run_id)
+    assert report.budget == budget
+    assert report.floor is not None
+    variant = report.groups[0].variant
+    assert (report.floor.run_id, report.floor.label, report.floor.budget) == (
+        pilot.run_id,
+        f"{variant} (n=1)",
+        RunBudget(),
+    )
+    assert report.floor.group.eligible_passes == 1
+
+    other = create_experiment(
+        store,
+        graded_benchmark.model_copy(
+            update={
+                "stand_in": graded_benchmark.stand_in.model_copy(
+                    update={"budget": RoleBudget(max_calls=5)}
+                )
+            }
+        ),
+    )
+    mismatched = run_experiment(
+        store,
+        other,
+        options=RunOptions(mode="offline-fixture", pilot_run=pilot.run_id),
+        host=HOST,
+    )
+    assert report_run(store, mismatched.run_id).floor is None

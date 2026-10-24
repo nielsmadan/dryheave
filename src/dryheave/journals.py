@@ -25,6 +25,7 @@ from dryheave.filesystem import (
 )
 from dryheave.models import JournalEvent, RunCheckpoint, RunMetadata
 from dryheave.serialization import canonical_json, digest, parse_model, validation_message
+from dryheave.storage import ensure_store_format
 
 
 def _run_id(value: str) -> str:
@@ -259,6 +260,7 @@ class RunStore:
             )
         except ValidationError as error:
             raise InputError(validation_message(error)) from error
+        ensure_store_format(self.root)
         parent = self.root / "runs"
         staged = parent / f".pending-{uuid4().hex}"
         ensure_directory(staged)

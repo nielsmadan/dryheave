@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from dryheave.cases import FrozenCase, RubricCriterion, load_frozen_case
+from dryheave.cases import FrozenCase, judged_facts, load_frozen_case
 from dryheave.controller_models import ControllerRecipe
 from dryheave.errors import DryheaveError, InputError
 from dryheave.experiment_models import (
@@ -39,7 +39,7 @@ def variant_changes(variant: VariantSpec) -> dict[str, object]:
 
 def validate_experiment(store: ObjectStore, draft: ExperimentDraft) -> ExperimentDraft:
     draft = parse_model(canonical_json(draft), ExperimentDraft)
-    validate_role_recipe(draft.simulator)
+    validate_role_recipe(draft.stand_in)
     if draft.scoring.judge is not None:
         validate_role_recipe(draft.scoring.judge)
     if draft.scoring.inspector is not None:
@@ -52,8 +52,8 @@ def validate_experiment(store: ObjectStore, draft: ExperimentDraft) -> Experimen
         case = load_frozen_case(store, case_id)
         validate_judge(draft.scoring, case)
         allowed = {fact.fact_id for fact in case.allowed_facts}
-        if any(not set(step.decision.fact_ids) <= allowed for step in draft.simulator.script):
-            raise InputError("Scripted simulator cites facts outside an experiment case.")
+        if any(not set(step.decision.fact_ids) <= allowed for step in draft.stand_in.script):
+            raise InputError("Scripted stand-in cites facts outside an experiment case.")
     variants = []
     for variant in draft.variants:
         profile_id = store.resolve(variant.profile)
@@ -102,7 +102,7 @@ def create_experiment(store: ObjectStore, draft: ExperimentDraft) -> str:
         )
         for variant in pinned.variants
     )
-    simulator_id = store.put(ObjectKind.SIMULATOR, pinned.simulator)
+    stand_in_id = store.put(ObjectKind.STAND_IN, pinned.stand_in)
     scoring_id = store.put(ObjectKind.SCORING, pinned.scoring)
     frozen = FrozenExperiment(
         name=pinned.name,
@@ -110,7 +110,7 @@ def create_experiment(store: ObjectStore, draft: ExperimentDraft) -> str:
         variants=variants,
         repetitions=pinned.repetitions,
         seed=pinned.seed,
-        simulator_id=simulator_id,
+        stand_in_id=stand_in_id,
         scoring_id=scoring_id,
         trials=expand_trials(pinned.cases, variants, pinned.repetitions, pinned.seed),
         fixture=pinned.fixture,
@@ -125,7 +125,7 @@ def references(experiment: FrozenExperiment) -> tuple[str, ...]:
             {
                 *experiment.case_ids,
                 *(variant.profile_id for variant in experiment.variants),
-                experiment.simulator_id,
+                experiment.stand_in_id,
                 experiment.scoring_id,
             }
         )
@@ -144,16 +144,9 @@ def validate_judge(scoring: ScoringConfig, case: FrozenCase | None = None) -> No
         raise InputError("Scripted controllers are unsupported as judges.")
     if scoring.inspector is not None and scoring.inspector.kind == "scripted":
         raise InputError("Scripted controllers are unsupported as inspectors.")
-    if (
-        case is not None
-        and any(
-            isinstance(criterion, RubricCriterion) and criterion.required
-            for criterion in case.criteria
-        )
-        and (judge is None or judge.budget.max_calls == 0)
-    ):
+    if case is not None and judged_facts(case) and (judge is None or judge.budget.max_calls == 0):
         raise InputError(
-            "Required judge rubrics need a non-scripted judge with a positive call budget."
+            "Facts without a verifier need a non-scripted judge with a positive call budget."
         )
 
 
@@ -179,7 +172,7 @@ def load_experiment(store: ObjectStore, reference: str) -> FrozenExperiment:
     frozen = store.load(identifier, FrozenExperiment, kind=ObjectKind.EXPERIMENT)
     manifest = store.get(identifier, kind=ObjectKind.EXPERIMENT)
     _validate_matrix(frozen, manifest)
-    simulator = load_role(store, frozen.simulator_id, ControllerRecipe, ObjectKind.SIMULATOR)
+    stand_in = load_role(store, frozen.stand_in_id, ControllerRecipe, ObjectKind.STAND_IN)
     scoring = load_role(store, frozen.scoring_id, ScoringConfig, ObjectKind.SCORING)
     validate_judge(scoring)
     for case_id in frozen.case_ids:
@@ -187,9 +180,9 @@ def load_experiment(store: ObjectStore, reference: str) -> FrozenExperiment:
         validate_judge(scoring, case)
         if any(
             not set(step.decision.fact_ids) <= {fact.fact_id for fact in case.allowed_facts}
-            for step in simulator.script
+            for step in stand_in.script
         ):
-            raise InputError("Frozen simulator cites unavailable facts.")
+            raise InputError("Frozen stand-in cites unavailable facts.")
     for variant in frozen.variants:
         load_profile(store, variant.profile_id)
     return frozen

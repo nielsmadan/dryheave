@@ -188,7 +188,46 @@ function reasoning() {
     reason: "No judge reasoning was retained for this assessment.",
     reason_code: "not_retained",
     criteria: [],
-    checks: [],
+  };
+}
+
+function review(text) {
+  return {
+    attempt_id: "attempt-1",
+    status: "ok",
+    reason: null,
+    reason_code: null,
+    lanes: {
+      schema_version: 1,
+      run_id: RUN,
+      attempt_id: "attempt-1",
+      case_id: null,
+      outcome: "fail",
+      outcome_reason: "unmet",
+      stop_reason: "stand_in_stop",
+      conversation: [{ turn: 1, role: "user", text, author: "initial", origin: null }],
+      behind_the_scenes: [
+        {
+          kind: "correction",
+          turn: 2,
+          call_id: "c-fix",
+          purpose: null,
+          status: null,
+          action: null,
+          text: null,
+          reason: null,
+          cited: [],
+          phase: "fix",
+          handed: ["punctuation"],
+          rejection: null,
+          inspection_id: null,
+          facts: [],
+          detail: "fix_request",
+        },
+      ],
+      gaps: { assessed: true, facts: [], uncovered: ["The greeting drops a newline."], unreached_phases: [] },
+      notes: [],
+    },
   };
 }
 
@@ -197,13 +236,13 @@ function caseView(id) {
     case_id: id,
     title: "Fix the greeting",
     initial_prompt: "Fix the greeting; ask which punctuation to use.",
+    phases: [],
     facts: [],
+    workflow: [],
     rubrics: [],
     disabled_rubrics: [],
-    deterministic: [],
-    checks: [],
     metrics: [],
-    budgets: { max_turns: 4, subject_seconds: 180, setup_seconds: 120 },
+    budgets: { subject_seconds: 180, setup_seconds: 120 },
     tool_requirements: [],
     repository_id: "r".repeat(64),
     persona_id: "p".repeat(64),
@@ -225,6 +264,7 @@ function store(overrides = {}) {
     calibrations: calibrations(RUN, null, [calibrationEntry("1".repeat(64))]),
     dialogue: dialogue("hello"),
     reasoning: reasoning(),
+    review: review("Fix the greeting."),
     cases: { [CASE]: caseView(CASE) },
     comparison: null,
     ...overrides,
@@ -258,6 +298,9 @@ function answer(path, data) {
     }
     if (kind === "reasoning") {
       return { body: data.reasoning };
+    }
+    if (kind === "review") {
+      return { body: data.review };
     }
     return { body: name ? evidenceFile(name, `bytes of ${name}`) : evidenceListing() };
   }
@@ -593,8 +636,20 @@ test("choosing an attempt loads judge reasoning and renders when it is unavailab
   assert.ok(fresh.includes(`/api/runs/${RUN}/attempts/attempt-2/reasoning`));
   assert.match(
     renderedText(node(page.doc, "panel-detail")),
-    /No help-needed accounting is retained for this attempt\./,
+    /No fact results are retained for this attempt\./,
   );
+});
+
+test("choosing an attempt loads its review lanes beside the other detail", async () => {
+  const page = await open();
+  const before = page.calls.length;
+  fire(attemptButtons(page.doc)[1], "click");
+  await flush();
+  const fresh = page.paths().slice(before);
+  assert.ok(fresh.includes(`/api/runs/${RUN}/attempts/attempt-2/review`));
+  const text = renderedText(node(page.doc, "panel-detail"));
+  assert.match(text, /turn 2 · correction/);
+  assert.match(text, /The greeting drops a newline\./);
 });
 
 test("the case lookup form opens a case and renders it", async () => {

@@ -252,7 +252,7 @@ def test_delayed_composer_render_waits_for_match(tmp_path, driver_plan):
         ),
     ],
 )
-def test_native_dialogs_stop_before_simulator_text(tmp_path, driver_plan, text, state):
+def test_native_dialogs_stop_before_stand_in_text(tmp_path, driver_plan, text, state):
     terminal = FakeTerminal([Screen(text=text, exited=None)])
     source = FakeEventSource([])
     session = DriverSession(

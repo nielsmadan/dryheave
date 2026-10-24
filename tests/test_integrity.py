@@ -80,7 +80,7 @@ def test_suspicion_review_retains_original_finding_and_cannot_override_corruptio
     )
     original_id = assess_run(store, summary.run_id)[0]
     original = load_assessment(store, original_id)
-    assert original.completion == "pass"
+    assert original.outcome == "pass"
     assert original.eligible is False
     review = AuditReview(
         finding_id=original.audit.findings[0].finding_id,

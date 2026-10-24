@@ -10,7 +10,7 @@ from threading import Event
 import psutil
 
 from dryheave.capture_models import WorkspaceCapture
-from dryheave.cases import DeterministicCriterion, FrozenCase
+from dryheave.cases import FrozenCase, TaskFact, fact_verifier
 from dryheave.controller_watch import ControllerWatch
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.models import ProcessIdentity
@@ -88,20 +88,21 @@ def _environment(command: CommandSpec) -> dict[str, str]:
 
 
 def execute_check(
-    criterion: DeterministicCriterion,
+    fact: TaskFact,
     workspace: Path,
     hidden: Path,
     artifacts: ArtifactWriter,
     context: VerifierContext,
     deadline: float | None = None,
 ) -> CheckExecution:
+    verifier = fact_verifier(fact)
     started = time.monotonic()
     owner = ProcessOwner()
     watch = ControllerWatch(
         artifacts.root,
         context.cancelled,
         max_bytes=artifacts.max_bytes,
-        output_bytes=criterion.command.max_output_bytes,
+        output_bytes=verifier.command.max_output_bytes,
     )
 
     def own(pid: int) -> None:
@@ -118,12 +119,13 @@ def execute_check(
             workspace,
             *((context.original_workspace,) if context.original_workspace else ()),
         )
-        command = trusted_command(criterion.command, criterion.entrypoint, hidden, forbidden)
+        command = trusted_command(verifier.command, verifier.entrypoint, hidden, forbidden)
         artifacts.record("command", command)
         executable = Path(command.argv[0])
         artifacts.record(
             "executable", {"sha256": digest(read_bytes(executable, limit=256 * 1024 * 1024))}
         )
+        launched = time.monotonic()
         result = run_command(
             command,
             workspace,
@@ -134,11 +136,16 @@ def execute_check(
         artifacts.append("stdout.bin", result.stdout)
         artifacts.append("stderr.bin", result.stderr)
         expected = (
-            criterion.expected_failure_stdout or criterion.expected_stdout
+            verifier.expected_failure_stdout or verifier.expected_stdout
             if result.returncode > 0
-            else criterion.expected_stdout
+            else verifier.expected_stdout
         )
         marker = expected.encode() in result.stdout
+        cut_short = (
+            result.outcome == "timeout"
+            and deadline is not None
+            and deadline <= launched + command.timeout_seconds
+        )
         outcome: Outcome = (
             "error"
             if result.outcome != "exited" or result.returncode < 0 or not marker
@@ -154,7 +161,11 @@ def execute_check(
             elapsed_seconds=time.monotonic() - started,
             stdout_sha256=digest(result.stdout),
             stderr_sha256=digest(result.stderr),
-            error="expected_execution_evidence_missing" if not marker else None,
+            error="deadline_exhausted"
+            if cut_short
+            else "expected_execution_evidence_missing"
+            if not marker
+            else None,
         )
     except (DryheaveError, OSError, ValueError) as error:
         artifacts.record("error", {"type": type(error).__name__, "message": str(error)})
@@ -188,57 +199,53 @@ def hidden_inputs(context: VerifierContext, root: Path) -> Path:
     return hidden
 
 
-def check_path(criterion: DeterministicCriterion, kind: str) -> Path:
-    return (
-        Path("suites" if criterion.suite_id else "criteria")
-        / (criterion.suite_id or criterion.criterion_id)
-        / kind
+def check_path(fact: TaskFact, kind: str) -> Path:
+    suite = fact_verifier(fact).suite_id
+    return Path("suites" if suite else "facts") / (suite or fact.fact_id) / kind
+
+
+def evidence_writer(fact: TaskFact, root: Path) -> ArtifactWriter:
+    return ArtifactWriter(
+        root / (fact.fact_id + "-evidence"),
+        max(65536, 8 * fact_verifier(fact).command.max_output_bytes),
     )
 
 
-def check_copy(
-    context: VerifierContext, criterion: DeterministicCriterion, kind: str
-) -> CheckExecution:
-    root = context.root / check_path(criterion, kind)
+def check_copy(context: VerifierContext, fact: TaskFact, kind: str) -> CheckExecution:
+    root = context.root / check_path(fact, kind)
     ensure_directory(root)
-    artifacts = ArtifactWriter(
-        root / (criterion.criterion_id + "-evidence"),
-        max(65536, 8 * criterion.command.max_output_bytes),
-    )
+    artifacts = evidence_writer(fact, root)
 
     def materialize(workspace: Path) -> None:
         if not workspace.exists():
             materialize_check(context, kind, workspace)
 
-    return _run_copy(context, criterion, root, artifacts, materialize, None)
+    return _run_copy(context, fact, root, artifacts, materialize, None)
 
 
 def check_snapshot(
     context: VerifierContext,
-    criterion: DeterministicCriterion,
+    fact: TaskFact,
     snapshot: WorkspaceCapture,
     deadline: float,
 ) -> tuple[CheckExecution, Path]:
-    root = context.root / "criteria" / criterion.criterion_id / "final"
+    root = context.root / "facts" / fact.fact_id / "final"
     if root.exists():
         raise InputError("Snapshot verification requires a fresh directory.")
     ensure_directory(root)
-    artifacts = ArtifactWriter(
-        root / (criterion.criterion_id + "-evidence"),
-        max(65536, 8 * criterion.command.max_output_bytes),
-    )
+    artifacts = evidence_writer(fact, root)
 
     def materialize(workspace: Path) -> None:
         materialize_files(
             workspace, snapshot.files, context.blobs, directories=snapshot.directories
         )
 
-    return _run_copy(context, criterion, root, artifacts, materialize, deadline), artifacts.root
+    return _run_copy(context, fact, root, artifacts, materialize, deadline), artifacts.root
 
 
 def _run_copy(
     context: VerifierContext,
-    criterion: DeterministicCriterion,
+    fact: TaskFact,
     root: Path,
     artifacts: ArtifactWriter,
     materialize: Callable[[Path], None],
@@ -248,7 +255,7 @@ def _run_copy(
         workspace = root / "workspace"
         materialize(workspace)
         hidden = hidden_inputs(context, root)
-        execution = execute_check(criterion, workspace, hidden, artifacts, context, deadline)
+        execution = execute_check(fact, workspace, hidden, artifacts, context, deadline)
     except (DryheaveError, OSError) as error:
         artifacts.record("error", {"type": type(error).__name__, "message": str(error)})
         execution = CheckExecution(outcome="error", error=type(error).__name__)
@@ -288,16 +295,16 @@ def materialize_check(context: VerifierContext, kind: str, workspace: Path) -> N
             )
 
 
-def grade_criterion(context: GradingContext, criterion: DeterministicCriterion) -> CriterionResult:
+def grade_fact(context: GradingContext, fact: TaskFact) -> CriterionResult:
     try:
-        final = check_copy(context, criterion, "final")
+        final = check_copy(context, fact, "final")
     except (DryheaveError, OSError) as error:
         final = CheckExecution(outcome="error", error=type(error).__name__)
     baseline = reference = None
     try:
-        baseline = check_copy(context, criterion, "baseline")
+        baseline = check_copy(context, fact, "baseline")
         if context.case.reference_patch_file:
-            reference = check_copy(context, criterion, "reference")
+            reference = check_copy(context, fact, "reference")
     except (DryheaveError, OSError) as error:
         reference = CheckExecution(outcome="error", error=type(error).__name__)
     demonstrated = (
@@ -308,9 +315,9 @@ def grade_criterion(context: GradingContext, criterion: DeterministicCriterion) 
     )
     ineffective = baseline is not None and baseline.outcome == "pass"
     return CriterionResult(
-        criterion_id=criterion.criterion_id,
+        criterion_id=fact.fact_id,
         kind="deterministic",
-        required=criterion.required,
+        required=fact.kind == "requirement",
         outcome=final.outcome,
         execution=final,
         calibration=Calibration(

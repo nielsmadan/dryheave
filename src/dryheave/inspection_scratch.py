@@ -6,7 +6,7 @@ from dryheave.errors import DryheaveError
 from dryheave.filesystem import read_bytes
 
 CLEANUP_RECORDS = (
-    "verifiers/criteria/*/final/*-evidence/[0-9][0-9][0-9][0-9][0-9][0-9]-cleanup.json",
+    "verifiers/facts/*/final/*-evidence/[0-9][0-9][0-9][0-9][0-9][0-9]-cleanup.json",
     "judge/*/[0-9][0-9][0-9][0-9][0-9][0-9]-cleanup.json",
 )
 RECORD_BYTES = 16 * 1024 * 1024

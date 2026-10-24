@@ -42,15 +42,22 @@ reasoning and a drafted case path. `problem validate REQUEST CANDIDATE
 --expect-revision N` binds the current draft and hidden files; freeze with the
 returned revision using `problem freeze REQUEST CANDIDATE --expect-revision N`.
 Any draft/hidden-file edit requires revalidation. Before subject spend, run
-`dryheave case calibrate CASE_ID --json`, save `data.id`, and inspect
-`dryheave case calibration CALIBRATION_ID --json`. Review the returned status and
-baseline/reference executions; use `--evidence PATH` from its `files` map for
-retained output. Only `demonstrated` establishes baseline failure/reference
-success for every deterministic criterion. A passing baseline is `ineffective`;
-missing references/errors are `unavailable`; judge-only cases are `not_applicable`.
-No model calls occur. Correct hidden inputs by freezing and calibrating a new case.
+`dryheave case calibrate CASE_ID [--judge MODEL[@EFFORT]] --json`, save `data.id`,
+and inspect `dryheave case calibration CALIBRATION_ID --json`. Calibration grades
+every requirement and optional fact on the baseline (it should be unmet) and on
+the reference patch (it should be met): a fact with a `verifier` runs it, and the
+facts without one are judged together in one judge call per side, so `--judge` is
+required when such facts exist. `data.flagged` lists facts met on the baseline or
+unmet on the reference. Only `demonstrated` establishes baseline failure and
+reference success for every fact; a flagged fact makes the case `ineffective`;
+unclear verdicts and missing references are `unavailable`. Use `--evidence PATH`
+from its `files` map for retained verifier output. Correct a fact by freezing and
+calibrating a new case.
 Verifier copies do not execute case setup; required tools/environment references
 must already be available.
+After calibration, pilot the case with `dryheave bench NAME --variant pilot=MODEL
+--judge MODEL --repetitions 1`, review it with `dryheave transcript RUN_ID`, iterate,
+then benchmark with `--budget-from RUN_ID`; the README walkthrough lists each step.
 Frozen cases/profiles are reusable across repetitions; changed inputs need a new
 experiment and retries retain earlier evidence.
 
@@ -60,39 +67,50 @@ collisions remain errors. Reload your operator's skill discovery as needed.
 
 ## Lower-level authoring and comparison reference
 
-Use an installed `dryheave` executable. Commands below use `bench-store` explicitly;
-keep it private and outside any source repository you are benchmarking. JSON
-responses place returned IDs under `data.id`. Save those IDs when indicated.
-Do not reuse the offline demo's synthetic model names, subject executable or prices.
+Use an installed `dryheave` executable. Section 1 assumes an initialized workspace,
+whose store is implicit; later commands name `--store bench-store` explicitly and
+work the same without it inside the workspace. Keep any explicit store private and
+outside any source repository you are benchmarking. In a workspace authored files live at
+`voices/NAME.json`, `cases/NAME/` (draft, hidden files, reference patch and metric
+scripts), `reports/` and scratch `replays/`, and checkpoint commands report
+`commit_paths`. JSON responses place returned IDs under `data.id`. Save those IDs
+when indicated. Do not reuse the offline demo's synthetic model names, subject
+executable or prices.
 
 ## 1. Curate and freeze one historical task
 
 ```sh
-dryheave --store bench-store collect scan --agent codex --root SELECTED_LOG_DIRECTORY --json
-dryheave --store bench-store collect import SELECTED_LOG.jsonl --agent codex --json
-dryheave --store bench-store collect show SESSION_ID --json
-dryheave --store bench-store case draft SESSION_ID --repo SOURCE_REPO \
-  --commit VERIFIED_FULL_START_SHA --out case.json --json
-dryheave --store bench-store persona draft SESSION_ID --out persona.json --json
+dryheave collect scan --agent codex --root SELECTED_LOG_DIRECTORY --json
+dryheave collect import SELECTED_LOG.jsonl --agent codex --json
+dryheave collect show SESSION_ID --json
+dryheave case draft SESSION_ID --repo SOURCE_REPO \
+  --commit VERIFIED_FULL_START_SHA --name my-case --json
+dryheave persona draft SESSION_ID --out persona.json --json
 ```
 
-Replace uppercase arguments with your selected paths and returned IDs. Review the
+Replace uppercase arguments with your selected paths and returned IDs. Run the case
+commands from the workspace root; the draft path is then `cases/my-case/case.json`
+and its hidden files sit beside it. Review the
 event range, exact source excerpts, intent, allowed facts and historical SHA.
 Never substitute today's HEAD for missing evidence. Complete persona policies,
 review any examples for solution text, mark `reviewed_subject_safe: true`, then
 `persona create persona.json --json`. Set the case's inline `persona` to null and
-its `persona_id` to that returned ID. Review intent/facts, resolve draft issues and
-add substantive required criteria and hidden verifier files. A verifier must emit
+its `persona_id` to that returned ID. Review intent/facts, resolve draft issues,
+declare the ordered `phases`, and give each requirement or optional fact its
+`phase` and either a precise `check` (the judge's pass condition) or a `verifier`
+naming a hidden verifier file; `context` facts carry neither. Every phase needs at
+least one requirement fact. Optional `workflow` prompt steps name the phase after
+which they are sent with `after_phase`, in phase order. A verifier must emit
 its success marker after all checks pass, and its separate failure marker only
 for known assertion failures. Leave import/setup failures outside that wrapper.
 Keep any reference patch and hidden tests curator-only.
 
 ```sh
-dryheave --store bench-store case validate case.json --json
-dryheave --store bench-store case freeze case.json --json
-dryheave --store bench-store case inspect CASE_ID --json
-dryheave --store bench-store case calibrate CASE_ID --json
-dryheave --store bench-store case calibration CALIBRATION_ID --json
+dryheave case validate cases/my-case/case.json --json
+dryheave case freeze cases/my-case/case.json --json
+dryheave case inspect my-case --json
+dryheave case calibrate my-case --judge MODEL --json
+dryheave case calibration CALIBRATION_ID --json
 ```
 
 Snapshots retain exact reachable Git ancestry through the selected commit. Later
@@ -223,7 +241,7 @@ installed copy cannot compete with the selected replacement. Inspect that list
 and the profile diff; unrelated ambient skill sources remain a fidelity limit.
 
 Save `experiment.json` using the real case ID and actual profile IDs returned
-above. The simulator is a separately authorized role with its own model calls:
+above. The stand-in is a separately authorized role with its own model calls:
 
 ```json
 {
@@ -232,18 +250,18 @@ above. The simulator is a separately authorized role with its own model calls:
   "variants": [{"name": "base", "profile": "BASE_PROFILE_ID"}, {"name": "changed", "profile": "CHANGED_PROFILE_ID"}],
   "repetitions": 2,
   "seed": 17,
-  "simulator": {
+  "stand_in": {
     "kind": "codex", "isolation": "trusted-native",
     "command": {"argv": ["/absolute/path/to/codex"]},
-    "version": "0.153.4", "model": "YOUR_SIMULATOR_MODEL", "effort": "medium",
+    "version": "0.153.4", "model": "YOUR_STAND_IN_MODEL", "effort": "medium",
     "budget": {"max_calls": 3, "call_seconds": 30, "total_seconds": 90, "max_input_bytes": 131072, "max_output_bytes": 65536}
   }
 }
 ```
 
-The simulator receives only approved facts, reviewed persona strings and current
+The stand-in receives only approved facts, reviewed persona strings and current
 dialogue. It uses explicit native authentication independently of the subject.
-A scripted simulator is suitable only when its literal matching and divergence
+A scripted stand-in is suitable only when its literal matching and divergence
 behavior are intentional. Optional judge configuration belongs in `scoring.judge`;
 it has separate budgets and usage. Assessment always prices against a table: an
 explicitly dated/versioned `scoring.prices` pins the rates used, and omitting it
@@ -272,7 +290,7 @@ Read `paired_count`, exclusions and all group counts. Compare eligible completio
 and duration/token distributions alongside unstarted/failed/retried/excluded
 attempts and all-attempt spending. `known_spend_by_currency` is an observed
 subtotal; `unknown_cost_records` and `partial_cost_attempts` prevent treating it as
-a complete total. Subject, simulator and judge roles remain separate. Missing
+a complete total. Subject, stand-in and judge roles remain separate. Missing
 telemetry is unknown, and reasoning is an output subset. Two repetitions are an
 initial check, not statistical significance or an isolated causal experiment:
 browser/device/network/model-service state can differ even with frozen inputs.

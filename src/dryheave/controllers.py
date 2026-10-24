@@ -18,17 +18,17 @@ from dryheave.controller_models import (
     FIX_IT_INSTRUCTION,
     SCREEN_FIELDS,
     SCREEN_INSTRUCTION,
-    SIMULATOR_INSTRUCTION,
+    STAND_IN_INSTRUCTION,
     ControllerRecipe,
     ControllerResponse,
     ControllerRuntime,
     DialogPrompt,
     DialogueMessage,
-    InspectionFinding,
+    RaisedFact,
     RoleCall,
     RoleObservation,
-    SimulatorDecision,
-    SimulatorInput,
+    StandInDecision,
+    StandInInput,
 )
 from dryheave.controller_runtime import prepare_runtime
 from dryheave.controller_schema import controller_schema
@@ -57,15 +57,15 @@ def is_controller_limit_error(code: str) -> bool:
     return code in CONTROLLER_LIMIT_ERRORS
 
 
-def simulator_projection(
+def stand_in_projection(
     case: FrozenCase,
     persona: Persona,
     dialogue: tuple[DialogueMessage, ...],
     seed: int,
     *,
     recipe: ControllerRecipe | None = None,
-    inspection: tuple[InspectionFinding, ...] = (),
-) -> SimulatorInput:
+    inspection: tuple[RaisedFact, ...] = (),
+) -> StandInInput:
     request = parse_model(
         json.dumps(
             {
@@ -75,7 +75,7 @@ def simulator_projection(
                 "seed": seed,
             }
         ).encode(),
-        SimulatorInput,
+        StandInInput,
     )
     if inspection:
         request = request.model_copy(
@@ -96,24 +96,24 @@ def simulator_projection(
             }
         )
     if inspection and recipe is not None:
-        request = _fit_inspection_to_budget(request, recipe.budget.max_input_bytes)
+        request = fit_inspection_to_budget(request, recipe.budget.max_input_bytes)
     return request
 
 
 def dialog_projection(
-    request: SimulatorInput,
+    request: StandInInput,
     dialog: DialogPrompt,
     answer_hint: str | None,
     max_input_bytes: int,
-) -> SimulatorInput:
-    if request.inspection or not request.instruction.startswith(SIMULATOR_INSTRUCTION):
-        raise InputError("A dialog answer request starts from a plain simulator request.")
+) -> StandInInput:
+    if request.inspection or not request.instruction.startswith(STAND_IN_INSTRUCTION):
+        raise InputError("A dialog answer request starts from a plain stand-in request.")
     asked = request.model_copy(
         update={
             "dialog": dialog,
             "answer_hint": answer_hint,
             "instruction": DIALOG_INSTRUCTION
-            + request.instruction.removeprefix(SIMULATOR_INSTRUCTION),
+            + request.instruction.removeprefix(STAND_IN_INSTRUCTION),
         }
     )
     if len(canonical_json(asked)) <= max_input_bytes:
@@ -138,23 +138,23 @@ def dialog_projection(
 
 
 def screen_projection(
-    request: SimulatorInput,
+    request: StandInInput,
     screen: str,
     answer_hint: str | None,
     max_input_bytes: int,
-) -> SimulatorInput:
-    if request.inspection or not request.instruction.startswith(SIMULATOR_INSTRUCTION):
-        raise InputError("A screen answer request starts from a plain simulator request.")
+) -> StandInInput:
+    if request.inspection or not request.instruction.startswith(STAND_IN_INSTRUCTION):
+        raise InputError("A screen answer request starts from a plain stand-in request.")
     lines = [line.rstrip() for line in screen.splitlines()]
     asked = request.model_copy(
         update={
             "answer_hint": answer_hint,
             "instruction": SCREEN_INSTRUCTION
-            + request.instruction.removeprefix(SIMULATOR_INSTRUCTION),
+            + request.instruction.removeprefix(STAND_IN_INSTRUCTION),
         }
     )
 
-    def kept(count: int) -> SimulatorInput:
+    def kept(count: int) -> StandInInput:
         return asked.model_copy(update={"screen": "\n".join(lines[len(lines) - count :]).strip()})
 
     fitted = kept(len(lines))
@@ -173,7 +173,7 @@ def screen_projection(
     return fitted
 
 
-def screen_answer(decision: SimulatorDecision) -> bool:
+def screen_answer(decision: StandInDecision) -> bool:
     if decision.screen_kind == "question":
         return (
             decision.screen_action is not None
@@ -185,12 +185,12 @@ def screen_answer(decision: SimulatorDecision) -> bool:
 
 
 def decision_schema(*, screen: bool) -> dict[str, JsonValue]:
-    schema = controller_schema(SimulatorDecision)
+    schema = controller_schema(StandInDecision)
     if screen:
         return schema
     properties = schema["properties"]
     if not isinstance(properties, dict):
-        raise InputError("Simulator decision schema has no properties.")
+        raise InputError("Stand-in decision schema has no properties.")
     for name in SCREEN_FIELDS:
         properties.pop(name, None)
     schema["required"] = list(properties)
@@ -198,7 +198,7 @@ def decision_schema(*, screen: bool) -> dict[str, JsonValue]:
     return schema
 
 
-def dialog_selection(dialog: DialogPrompt, decision: SimulatorDecision) -> DialogSelection | None:
+def dialog_selection(dialog: DialogPrompt, decision: StandInDecision) -> DialogSelection | None:
     choices, text = decision.choices, decision.text.strip()
     if (
         decision.action != "reply"
@@ -219,21 +219,30 @@ def _truncate_rationale(rationale: str, limit: int) -> str:
     return rationale[: max(limit - 1, 1)] + "…"
 
 
-def _fit_inspection_to_budget(request: SimulatorInput, max_input_bytes: int) -> SimulatorInput:
+def fit_inspection_to_budget(request: StandInInput, max_input_bytes: int) -> StandInInput:
     if len(canonical_json(request)) <= max_input_bytes:
         return request
-    fitted = request
-    low, high = 1, max(len(item.rationale) for item in request.inspection)
-    while low <= high:
-        mid = (low + high) // 2
-        candidate = request.model_copy(
+
+    def shortened(limit: int) -> StandInInput:
+        return request.model_copy(
             update={
                 "inspection": tuple(
-                    item.model_copy(update={"rationale": _truncate_rationale(item.rationale, mid)})
+                    item.model_copy(
+                        update={
+                            "text": _truncate_rationale(item.text, limit),
+                            "observation": _truncate_rationale(item.observation, limit),
+                        }
+                    )
                     for item in request.inspection
                 )
             }
         )
+
+    fitted = shortened(1)
+    low, high = 1, max(max(len(item.text), len(item.observation)) for item in request.inspection)
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = shortened(mid)
         if len(canonical_json(candidate)) <= max_input_bytes:
             fitted = candidate
             low = mid + 1
@@ -328,16 +337,16 @@ def controller_environment(
     return selected
 
 
-def native_decision(content: bytes) -> SimulatorDecision:
+def native_decision(content: bytes) -> StandInDecision:
     value = parse_json(content)
     if value.get("action") == "stop":
         value = {**value, "text": ""}
     elif value.get("action") == "reply":
         value = {**value, "stop_kind": "done"}
-    return parse_model(canonical_json(value), SimulatorDecision)
+    return parse_model(canonical_json(value), StandInDecision)
 
 
-def _scripted(recipe: ControllerRecipe, request: SimulatorInput, index: int) -> ControllerResponse:
+def _scripted(recipe: ControllerRecipe, request: StandInInput, index: int) -> ControllerResponse:
     latest = (
         request.dialog.question
         if request.dialog is not None
@@ -348,7 +357,7 @@ def _scripted(recipe: ControllerRecipe, request: SimulatorInput, index: int) -> 
         else ""
     )
     if index >= len(recipe.script):
-        decision = SimulatorDecision(
+        decision = StandInDecision(
             action="stop",
             reason="Script exhausted; no further condition-matched reply is authorized.",
             stop_kind="declined",
@@ -359,7 +368,7 @@ def _scripted(recipe: ControllerRecipe, request: SimulatorInput, index: int) -> 
         decision = (
             step.decision
             if matched
-            else SimulatorDecision(
+            else StandInDecision(
                 action="stop",
                 reason="Script divergence: latest assistant text does not match the declared condition.",
                 stop_kind="declined",
@@ -402,7 +411,7 @@ class CallContext:
 
 def invoke_controller(
     recipe: ControllerRecipe,
-    request: SimulatorInput,
+    request: StandInInput,
     artifacts: ArtifactWriter,
     context: CallContext,
 ) -> RoleCall:
@@ -412,7 +421,7 @@ def invoke_controller(
             raise InputError("Controller call budget exhausted.")
         content = canonical_json(request)
         if len(content) > recipe.budget.max_input_bytes:
-            raise InputError("Simulator projection exceeds its frozen input bound.")
+            raise InputError("Stand-in projection exceeds its frozen input bound.")
         artifacts.record("request", request)
         if context.cancelled.is_set() or started >= context.deadline:
             raise InputError("Controller cancelled or overall subject deadline exhausted.")
@@ -425,7 +434,7 @@ def invoke_controller(
         if time.monotonic() > context.deadline or context.cancelled.is_set():
             raise InputError("Controller exhausted the overall subject deadline or was cancelled.")
         if not set(response.decision.fact_ids) <= {fact.fact_id for fact in request.allowed_facts}:
-            raise InputError("Simulator response cites an unavailable allowed fact.")
+            raise InputError("Stand-in response cites an unavailable allowed fact.")
         artifacts.record("response", response)
         return RoleCall(
             call_id=context.call_id,

@@ -50,7 +50,7 @@ def _create(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue
         "id": identifier,
         "name": args.name,
         "issues": [item.model_dump(mode="json") for item in profile.issues],
-        "next": f"Derive a comparison with dryheave profile derive {args.name} --model MODEL --name VARIANT (add --effort only for supported models, or --clear-effort). Inspect with dryheave profile diff {args.name} VARIANT; freeze with dryheave experiment setup NAME --case CASE --profile base={args.name} --profile changed=VARIANT --simulator {profile.recipe.agent.value} --simulator-model MODEL.",
+        "next": f"Derive a comparison with dryheave profile derive {args.name} --model MODEL --name VARIANT (add --effort only for supported models, or --clear-effort). Inspect with dryheave profile diff {args.name} VARIANT; freeze with dryheave experiment setup NAME --case CASE --profile base={args.name} --profile changed=VARIANT --stand-in {profile.recipe.agent.value} --stand-in-model MODEL.",
     }
 
 

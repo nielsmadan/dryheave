@@ -138,7 +138,7 @@ def test_view_never_triggers_assessment_or_model_calls(
     monkeypatch.setattr(viewer_cli.webbrowser, "open", refuse)
     monkeypatch.setattr("dryheave.assessments.assess_run", refuse)
     monkeypatch.setattr("dryheave.assessments._assess_one", refuse)
-    monkeypatch.setattr("dryheave.grading.grade_criterion", refuse)
+    monkeypatch.setattr("dryheave.grading.grade_fact", refuse)
     assert _view(store, summary.run_id) == 0
     assert stub_server["served"] == 1
     capsys.readouterr()

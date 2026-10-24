@@ -50,7 +50,9 @@ SECURITY_HEADERS = (
 
 _SOURCE = r"(runs/([0-9a-f]{32})|reports/([0-9a-f]{64}))"
 _ATTEMPT = r"/attempts/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})"
-_DETAIL_ROUTE = re.compile("^/api/" + _SOURCE + _ATTEMPT + r"/(dialogue|patch|evidence|reasoning)$")
+_DETAIL_ROUTE = re.compile(
+    "^/api/" + _SOURCE + _ATTEMPT + r"/(dialogue|patch|evidence|reasoning|review)$"
+)
 _EVIDENCE_ROUTE = re.compile("^/api/" + _SOURCE + _ATTEMPT + r"/evidence/(.+)$")
 _REPORT_ROUTE = re.compile(r"^/api/reports/([0-9a-f]{64})$")
 _RUN_ROUTE = re.compile(r"^/api/runs/([0-9a-f]{32})$")
@@ -397,6 +399,8 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             return service.patch(kind, source, attempt_id)
         if detail == "reasoning":
             return service.reasoning(kind, source, attempt_id)
+        if detail == "review":
+            return service.review(kind, source, attempt_id)
         return service.evidence(kind, source, attempt_id)
 
     def _respond(self, status: int, body: bytes, content_type: str = JSON_MIME) -> None:

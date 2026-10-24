@@ -16,8 +16,7 @@ from dryheave.process_ownership import ProcessOwner
 from dryheave.runner_models import AttemptState
 from dryheave.runner_state import ExecutionJournal
 from dryheave.storage import ObjectStore
-
-INSPECTION_INTENT_EVENT = "inspection-intent"
+from dryheave.workflow import INSPECTION_INTENT_EVENT
 
 ACTIVE_STAGES = {
     TrialStage.RESERVED,

@@ -4,20 +4,20 @@ from collections.abc import Callable, Mapping, Sequence
 from dryheave.report_models import (
     AttemptReport,
     AttemptTopline,
-    CheckSummary,
     CriterionSummary,
     Distribution,
+    FactGroup,
     GroupMetrics,
     GroupTopline,
-    HelpNeededSummary,
     MetricSummary,
     ModelSetup,
     PriceBasis,
     RunReport,
     RunSetup,
 )
-from dryheave.result_models import Assessment, CheckResult
-from dryheave.viewer_models import CaseView, CheckReasoning, CriterionReasoning, JudgeReasoningView
+from dryheave.result_models import Assessment, CriterionResult, PhaseCorrections
+from dryheave.runner_models import RunBudget
+from dryheave.viewer_models import CaseFactView, CaseView, CriterionReasoning, JudgeReasoningView
 
 UNKNOWN = "unknown"
 NO_VARIANT = "(no variant)"
@@ -158,16 +158,6 @@ def _currency_suffix(group: GroupMetrics, dist: Distribution | None) -> str:
     return f" {'/'.join(currencies)}" if currencies else ""
 
 
-def _facts_disclosed_text(summary: HelpNeededSummary | None) -> str:
-    if summary is None:
-        return "not measured"
-    suffix = "" if summary.unmeasured == 0 else f" ({summary.unmeasured} attempt(s) not measured)"
-    if not summary.facts:
-        return f"none disclosed{suffix}"
-    body = ", ".join(f"{item.fact_id} ({item.kind} x{item.count})" for item in summary.facts)
-    return f"{body}{suffix}"
-
-
 def _union_case_keys(
     groups: Sequence[GroupMetrics], field: str, id_attr: str
 ) -> list[tuple[str, str]]:
@@ -187,13 +177,6 @@ def _find_criterion(
     return None
 
 
-def _find_check(items: Sequence[CheckSummary], case_id: str, check_id: str) -> CheckSummary | None:
-    for item in items:
-        if item.case_id == case_id and item.check_id == check_id:
-            return item
-    return None
-
-
 def _find_metric(
     items: Sequence[MetricSummary], case_id: str, metric_id: str
 ) -> MetricSummary | None:
@@ -206,22 +189,25 @@ def _find_metric(
 DASH = "\u2013"
 MILLION = 1_000_000
 THOUSAND = 1_000
-CHECK_MARKS = {"pass": "✓", "fail": "✗", "not_applicable": DASH, "error": "?"}
+OUTCOME_MARKS = {"pass": "✓", "fail": "✗", "indeterminate": "?"}
+OUTCOME_CLASSES = {"pass": "pass", "fail": "fail", "indeterminate": ""}
 INSPECTION_MARKS = {"passed": "✓", "failed": "✗", "unavailable": "?"}
 INSPECTION_CLASSES = {"passed": "pass", "failed": "fail", "unavailable": "unavailable"}
 TOPLINE_LEGEND = (
-    f"✓ the outcome the case wants · ✗ the opposite · {DASH} not applicable · ? no clear answer. "
-    "Turns, time, tokens and cost are the agent's alone, without the simulated user and the "
-    "judge, and time excludes inspection; tokens include cache reads and writes, and cost is "
-    "an API list-price estimate. First check is the workflow's first inspection "
-    f"(✓ passed, ✗ failed, ? unavailable, {DASH} no inspection); fix requests count fix-it "
-    f"replies; workflow shows completed over declared steps, or {DASH} without a workflow. "
-    "Variant rows average the attempts below them; retried attempts are left out."
+    "Outcome comes from final grading: ✓ every requirement met, ✗ a requirement unmet at the "
+    "end, ? indeterminate (disputed, unclear, a phase never reached, or a grading error); "
+    "variant rows count passes, independence and corrections over eligible attempts. "
+    "Independence is the mean credit over "
+    "the requirements the user did not volunteer: 1 solved on its own, 0.75 asked for, 0 "
+    "pointed out by the user or unmet. Turns, time, tokens and cost are the agent's alone, "
+    "without the user stand-in and the judge, and time excludes inspection; tokens include "
+    "cache reads and writes, and cost is an API list-price estimate. First check is the "
+    f"workflow's first inspection (✓ passed, ✗ failed, ? unavailable, {DASH} no inspection); "
+    "corrections count rounds in which the user pointed out unmet requirements; workflow "
+    f"shows delivered over declared prompt steps, or {DASH} without a workflow. Variant rows "
+    "average the attempts below them; retried attempts are left out. A floor row is the "
+    "pilot run the budget was derived from."
 )
-
-
-def check_label(check_id: str) -> str:
-    return check_id.replace("-", " ").replace("_", " ").capitalize()
 
 
 def _fmt_duration(value: float | None) -> str:
@@ -258,21 +244,6 @@ def _cell(text: str, class_name: str = "") -> str:
     return f"<td{attribute}>{_esc(text)}</td>"
 
 
-def _attempt_check_cell(checks: Sequence[CheckResult], check_id: str) -> str:
-    outcome = next((item.outcome for item in checks if item.check_id == check_id), None)
-    if outcome is None:
-        return _cell("")
-    return _cell(CHECK_MARKS[outcome], f"check {outcome}")
-
-
-def _group_check_cell(topline: GroupTopline, check_id: str) -> str:
-    tally = next((item for item in topline.checks if item.check_id == check_id), None)
-    if tally is None or tally.answered == 0:
-        return _cell(DASH)
-    tone = "pass" if tally.passes == tally.answered else "fail" if tally.passes == 0 else ""
-    return _cell(f"{tally.passes}/{tally.answered}", f"check {tone}".strip())
-
-
 def _turns_cell(turns: float | None) -> str:
     return _cell(_fmt_turns(turns), "number")
 
@@ -292,8 +263,33 @@ def _first_inspection_cell(value: str | None) -> str:
     return _cell(INSPECTION_MARKS[value], f"check {INSPECTION_CLASSES[value]}")
 
 
-def _fix_requests_cell(value: int | None) -> str:
+def _corrections_cell(value: int | None) -> str:
     return _cell(DASH) if value is None else _cell(str(value), "number")
+
+
+def _outcome_cell(outcome: str | None, reason: str | None) -> str:
+    if outcome is None:
+        return _cell(DASH)
+    text = OUTCOME_MARKS[outcome] + (f" {reason}" if reason and outcome != "pass" else "")
+    return _cell(text, f"check {OUTCOME_CLASSES[outcome]}".strip())
+
+
+def _independence_cell(value: float | None) -> str:
+    return _cell(DASH) if value is None else _cell(_fmt_number(value), "number")
+
+
+def _group_outcome_cell(passes: int, graded: int) -> str:
+    if graded == 0:
+        return _cell(DASH)
+    tone = "pass" if passes == graded else "fail" if passes == 0 else ""
+    return _cell(f"{passes}/{graded}", f"check {tone}".strip())
+
+
+def _budget_text(budget: RunBudget) -> str:
+    return (
+        f"{budget.max_turns} turns, {budget.stand_in_replies} stand-in replies, "
+        f"{budget.max_inspections} inspections"
+    )
 
 
 def _workflow_cell(value: str | None) -> str:
@@ -307,7 +303,7 @@ def _group_first_inspection_cell(passes: int, attempts: int) -> str:
     return _cell(f"{passes}/{attempts}", f"check {tone}".strip())
 
 
-def _group_fix_requests_cell(value: float | None) -> str:
+def _group_corrections_cell(value: float | None) -> str:
     return _cell(DASH) if value is None else _cell(_fmt_number(value), "number")
 
 
@@ -333,9 +329,33 @@ def _model_text(setup: ModelSetup) -> str:
     return f"{model}@{setup.effort}" if setup.effort else model
 
 
-def _group_rows(
-    report: RunReport, setup: RunSetup | None, check_ids: Sequence[str], run_column: bool
-) -> list[str]:
+def _variant_row(label: str, topline: GroupTopline, run_cell: str) -> str:
+    return (
+        '<tr class="variant">'
+        + run_cell
+        + _cell(label, "label")
+        + _group_outcome_cell(topline.passes, topline.graded)
+        + _independence_cell(topline.independence)
+        + _turns_cell(topline.turns)
+        + _group_first_inspection_cell(
+            topline.first_inspection_passes, topline.first_inspection_attempts
+        )
+        + _group_corrections_cell(topline.corrections)
+        + _group_workflow_cell(topline.workflows_completed, topline.workflow_attempts)
+        + _resource_cells(topline.seconds, topline.tokens, topline.cost, topline.currency)
+        + "</tr>"
+    )
+
+
+def _floor_row(report: RunReport, run_column: bool) -> list[str]:
+    floor = report.floor
+    if floor is None or floor.group.topline is None:
+        return []
+    label = f"{floor.label} · floor · budget {_budget_text(floor.budget)}"
+    return [_variant_row(label, floor.group.topline, "<td></td>" if run_column else "")]
+
+
+def _group_rows(report: RunReport, setup: RunSetup | None, run_column: bool) -> list[str]:
     rows = []
     for group in report.groups:
         topline = group.topline
@@ -362,35 +382,23 @@ def _group_rows(
             f'<td class="run" title="{_esc(report.run_id)}">'
             f"{_esc(_short(report.run_id, RUN_ID_CHARS))}</td>"
         )
-        rows.append(
-            '<tr class="variant">'
-            + (run_cell if run_column else "")
-            + _cell(label, "label")
-            + _turns_cell(topline.turns)
-            + _group_first_inspection_cell(
-                topline.first_inspection_passes, topline.first_inspection_attempts
-            )
-            + _group_fix_requests_cell(topline.fix_requests)
-            + _group_workflow_cell(topline.workflows_completed, topline.workflow_attempts)
-            + _resource_cells(topline.seconds, topline.tokens, topline.cost, topline.currency)
-            + "".join(_group_check_cell(topline, check_id) for check_id in check_ids)
-            + "</tr>"
-        )
+        rows.append(_variant_row(label, topline, run_cell if run_column else ""))
         rows.extend(
             "<tr>"
             + ("<td></td>" if run_column else "")
             + f'<td class="attempt" title="{_esc(attempt_id)}">'
             + f"{_esc(_short(attempt_id, ATTEMPT_ID_CHARS))}</td>"
+            + _outcome_cell(item.outcome, item.outcome_reason)
+            + _independence_cell(item.independence)
             + _turns_cell(item.turns)
             + _first_inspection_cell(item.first_inspection)
-            + _fix_requests_cell(item.fix_requests)
+            + _corrections_cell(item.corrections)
             + _workflow_cell(item.workflow)
             + _resource_cells(item.seconds, item.tokens, item.cost, item.currency)
-            + "".join(_attempt_check_cell(item.checks, check_id) for check_id in check_ids)
             + "</tr>"
             for attempt_id, item in members
         )
-    return rows
+    return [*rows, *_floor_row(report, run_column)]
 
 
 def _topline_section(entries: Sequence[tuple[RunReport, RunSetup | None]]) -> str:
@@ -399,28 +407,22 @@ def _topline_section(entries: Sequence[tuple[RunReport, RunSetup | None]]) -> st
     ]
     if not groups:
         return _section("Summary", _note("This report has no variant groups to summarize."))
-    check_ids = list(
-        dict.fromkeys(
-            check.check_id for group in groups if group.topline for check in group.topline.checks
-        )
-    )
     run_column = len(entries) > 1
     headers = [
         *(["Run"] if run_column else []),
         "Variant / attempt",
+        "Outcome",
+        "Independence",
         "Turns",
         "First check",
-        "Fix requests",
+        "Corrections",
         "Workflow",
         "Time",
         "Tokens",
         "Cost",
-        *map(check_label, check_ids),
     ]
     rows = "".join(
-        row
-        for report, setup in entries
-        for row in _group_rows(report, setup, check_ids, run_column)
+        row for report, setup in entries for row in _group_rows(report, setup, run_column)
     )
     caption = (
         "Per run, variant and attempt, agent only."
@@ -451,9 +453,9 @@ _SETUP_FIELDS: tuple[
         lambda setup: ",".join(setup.case_ids) if setup.case_ids is not None else None,
     ),
     (
-        "simulated user",
-        lambda setup: _model_text(setup.simulator),
-        lambda setup: _role_identity(setup.simulator),
+        "user stand-in",
+        lambda setup: _model_text(setup.stand_in),
+        lambda setup: _role_identity(setup.stand_in),
     ),
     ("judge", lambda setup: _model_text(setup.judge), lambda setup: _role_identity(setup.judge)),
     (
@@ -535,6 +537,14 @@ def _report_header(report: RunReport) -> str:
         ("Durable sequence", _fmt_count(report.durable_sequence)),
         ("Scheduled trials", _fmt_count(report.scheduled_trials)),
         ("Retained attempts", _fmt_count(len(report.attempts))),
+        ("Budget", _budget_text(report.budget) if report.budget else UNKNOWN),
+        (
+            "Floor",
+            f"{report.floor.label} from run {report.floor.run_id}, budget "
+            f"{_budget_text(report.floor.budget)}"
+            if report.floor
+            else "none",
+        ),
         ("Portable report", "yes" if report.portable else "no"),
         (
             "Unstarted trials",
@@ -575,8 +585,8 @@ def _results_section(report: RunReport) -> str:
             money_cell(lambda g: g.cost_by_role.get("subject")),
         ),
         (
-            f"Cost by role: simulator (API-equivalent estimate, {RETAINED})",
-            money_cell(lambda g: g.cost_by_role.get("simulator")),
+            f"Cost by role: stand-in (API-equivalent estimate, {RETAINED})",
+            money_cell(lambda g: g.cost_by_role.get("stand_in")),
         ),
         (
             f"Cost by role: judge (API-equivalent estimate, {RETAINED})",
@@ -608,8 +618,8 @@ def _results_section(report: RunReport) -> str:
             lambda g: _fmt_distribution(g.durations, _fmt_seconds),
         ),
         (
-            f"Simulator replies, help needed ({ELIGIBLE})",
-            lambda g: _fmt_distribution(g.simulator_replies, _whole),
+            f"Ordinary stand-in replies, fix requests excluded ({ELIGIBLE})",
+            lambda g: _fmt_distribution(g.stand_in_replies, _whole),
         ),
     ]
     rows = [[label, *[render(group) for group in groups]] for label, render in measures]
@@ -621,21 +631,114 @@ def _results_section(report: RunReport) -> str:
     return _section("Results", _table(caption, headers, rows))
 
 
-def _help_needed_section(report: RunReport) -> str:
+def _phase_corrections(corrections: Sequence[PhaseCorrections]) -> str:
+    return (
+        "; ".join(
+            f"{item.phase}: {item.rounds} rounds ({', '.join(item.raised) or 'none raised'})"
+            for item in corrections
+        )
+        or "none"
+    )
+
+
+def _fact_group_text(facts: FactGroup | None) -> list[str]:
+    if facts is None:
+        return [UNKNOWN] * 6
+    outcomes = ", ".join(f"{key} {value}" for key, value in sorted(facts.outcomes.items()))
+    reasons = ", ".join(f"{key} {value}" for key, value in sorted(facts.outcome_reasons.items()))
+    return [
+        f"{outcomes or 'none'}" + (f" ({reasons})" if reasons else ""),
+        UNKNOWN if facts.pass_rate is None else _fmt_rate(facts.pass_rate),
+        _fmt_distribution(facts.independence),
+        _fmt_distribution(facts.corrections, _whole),
+        _fmt_count(facts.unreached_attempts),
+        _fmt_count(facts.uncovered),
+    ]
+
+
+def _fact_cell(facts: FactGroup | None, case_id: str, fact_id: str) -> str:
+    row = next(
+        (
+            item
+            for item in (facts.facts if facts else ())
+            if item.case_id == case_id and item.fact_id == fact_id
+        ),
+        None,
+    )
+    if row is None:
+        return "not measured"
+    raised = UNKNOWN if row.raised_rate is None else _fmt_rate(row.raised_rate)
+    first = (
+        "no inspection"
+        if row.first_inspection_met_rate is None
+        else _fmt_rate(row.first_inspection_met_rate)
+    )
+    return " · ".join(
+        [
+            f"met {row.met}/{row.attempts}",
+            (
+                f"own {row.own}, asked {row.elicited}, corrected {row.corrected}, "
+                f"unmet {row.unmet}, unreached {row.unreached}"
+            ),
+            f"raised {raised}",
+            f"first check met {first}",
+            f"regressions {row.regressions}",
+            f"disputed {row.disputed}, unclear {row.unclear}",
+        ]
+    )
+
+
+def _facts_section(report: RunReport) -> str:
     groups = report.groups
     if not groups:
-        return _section("Help needed", _note("This report has no variant groups."))
-    rows = [
-        [
-            _group_label(group),
-            _fmt_distribution(group.simulator_replies, _whole),
-            _facts_disclosed_text(group.help_needed),
-        ]
-        for group in groups
+        return _section("Facts", _note("This report has no variant groups."))
+    measures = [
+        "Outcomes",
+        "Pass rate",
+        "Independence",
+        "Corrections",
+        "Phases unreached",
+        "Uncovered problems",
     ]
-    caption = "Simulator replies and facts disclosed by variant, among eligible attempts."
+    columns = [_fact_group_text(group.facts) for group in groups]
+    rows = [[label, *(column[index] for column in columns)] for index, label in enumerate(measures)]
+    keys = list(
+        dict.fromkeys(
+            (item.case_id, item.fact_id, item.kind, item.phase or DASH)
+            for group in groups
+            if group.facts
+            for item in group.facts.facts
+        )
+    )
+    fact_rows = [
+        [
+            case_id,
+            fact_id,
+            kind,
+            phase,
+            *(_fact_cell(group.facts, case_id, fact_id) for group in groups),
+        ]
+        for case_id, fact_id, kind, phase in keys
+    ]
+    headers = [_group_label(group) for group in groups]
     return _section(
-        "Help needed", _table(caption, ["Variant", "Simulator replies", "Facts disclosed"], rows)
+        "Facts",
+        _table(
+            "Outcomes over the latest attempt per trial; independence, corrections and facts "
+            "over eligible attempts.",
+            ["Measure", *headers],
+            rows,
+        )
+        + (
+            _table(
+                "Per fact: final verdicts, how each met fact was reached, how often the user "
+                "stand-in raised it, and the first inspection's verdict.",
+                ["Case", "Fact", "Kind", "Phase", *headers],
+                fact_rows,
+            )
+            if fact_rows
+            else _note("No fact results are retained for any variant.")
+        ),
     )
 
 
@@ -658,38 +761,6 @@ def _criteria_summary_section(report: RunReport) -> str:
         rows.append(row)
     caption = "Per-criterion pass rate and mean score by variant, among eligible attempts."
     return _section("Criteria", _table(caption, headers, rows))
-
-
-def _checks_summary_section(report: RunReport) -> str:
-    keys = _union_case_keys(report.groups, "checks", "check_id")
-    if not keys:
-        return _section("Checks", _note("No case checks are retained for any variant."))
-    headers = ["Case", "Check", *[_group_label(group) for group in report.groups]]
-    rows = []
-    for case_id, check_id in keys:
-        row = [case_id, check_id]
-        for group in report.groups:
-            item = _find_check(group.checks, case_id, check_id)
-            if item is None:
-                row.append("not measured")
-                continue
-            agreement = UNKNOWN if item.agreement is None else _fmt_rate(item.agreement)
-            row.append(
-                " · ".join(
-                    [
-                        f"pass {_fmt_count(item.passes)}",
-                        f"fail {_fmt_count(item.fails)}",
-                        f"n/a {_fmt_count(item.not_applicable)}",
-                        f"error {_fmt_count(item.errors)}",
-                        f"agreement {agreement}",
-                    ]
-                )
-            )
-        rows.append(row)
-    caption = (
-        "Per-check outcomes and agreement across repetitions by variant, among eligible attempts."
-    )
-    return _section("Checks", _table(caption, headers, rows))
 
 
 def _metrics_summary_section(report: RunReport) -> str:
@@ -733,7 +804,7 @@ def _attempts_table(attempts: Sequence[AttemptReport]) -> str:
                 attempt.variant or NO_VARIANT,
                 attempt.stage,
                 attempt.mode or UNKNOWN,
-                attempt.result.completion if attempt.result else "no assessment",
+                _attempt_outcome(attempt.result),
                 attempt.eligibility or UNKNOWN,
                 "none" if not exclusions else ", ".join(exclusions),
                 attempt.raw_evidence,
@@ -746,7 +817,7 @@ def _attempts_table(attempts: Sequence[AttemptReport]) -> str:
         "Variant",
         "Stage",
         "Mode",
-        "Completion",
+        "Outcome",
         "Eligibility",
         "Exclusions",
         "Raw evidence",
@@ -754,12 +825,22 @@ def _attempts_table(attempts: Sequence[AttemptReport]) -> str:
     return _table(caption, headers, rows)
 
 
+def _attempt_outcome(result: Assessment | None) -> str:
+    if result is None:
+        return "no assessment"
+    if result.outcome_reason is None or result.outcome == "pass":
+        return result.outcome
+    return f"{result.outcome} ({result.outcome_reason})"
+
+
 def _criteria_rationale(items: Sequence[CriterionReasoning]) -> dict[str, str]:
     return {item.criterion_id: item.rationale for item in items if item.rationale}
 
 
-def _checks_rationale(items: Sequence[CheckReasoning]) -> dict[str, str]:
-    return {item.check_id: item.rationale for item in items if item.rationale}
+def _criterion_role(criterion: CriterionResult) -> str:
+    if criterion.kind == "judge":
+        return "rubric"
+    return "requirement" if criterion.required else "optional"
 
 
 def _criteria_card(result: Assessment | None, reasoning_view: JudgeReasoningView | None) -> str:
@@ -779,7 +860,7 @@ def _criteria_card(result: Assessment | None, reasoning_view: JudgeReasoningView
             [
                 criterion.criterion_id,
                 criterion.kind,
-                "required" if criterion.required else "optional",
+                _criterion_role(criterion),
                 criterion.outcome,
                 UNKNOWN if criterion.score is None else _fmt_number(criterion.score, 3),
                 criterion.error or "none",
@@ -787,26 +868,8 @@ def _criteria_card(result: Assessment | None, reasoning_view: JudgeReasoningView
             ]
         )
     caption = "Criterion outcomes with the judge's reasoning."
-    headers = ["Criterion", "Kind", "Required", "Outcome", "Score", "Error", "Rationale"]
+    headers = ["Criterion", "Kind", "Role", "Outcome", "Score", "Error", "Rationale"]
     return _section("Criteria", _table(caption, headers, rows))
-
-
-def _checks_card(result: Assessment | None, reasoning_view: JudgeReasoningView | None) -> str:
-    checks = result.checks if result else ()
-    if not checks:
-        return _section("Checks", _note("No case checks are retained for this attempt."))
-    rationale = _checks_rationale(reasoning_view.checks if reasoning_view else ())
-    rows = [
-        [
-            check.check_id,
-            check.outcome,
-            check.answer or UNKNOWN,
-            rationale.get(check.check_id, "reasoning not included"),
-        ]
-        for check in checks
-    ]
-    caption = "Case-declared check outcomes with the judge's reasoning."
-    return _section("Checks", _table(caption, ["Check", "Outcome", "Answer", "Rationale"], rows))
 
 
 def _metrics_card(result: Assessment | None) -> str:
@@ -841,23 +904,57 @@ def _metrics_card(result: Assessment | None) -> str:
     return _section("Metrics", "".join(parts))
 
 
-def _help_needed_card(result: Assessment | None) -> str:
-    help_needed = result.help_needed if result else None
-    if help_needed is None:
-        return _section(
-            "Help needed", _note("No help-needed accounting is retained for this attempt.")
-        )
-
-    def listed(values: Sequence[str]) -> str:
-        return "none" if not values else ", ".join(values)
-
+def _facts_card(result: Assessment | None) -> str:
+    if result is None or (not result.facts and result.fact_account is None):
+        return _section("Facts", _note("No fact results are retained for this attempt."))
+    account = result.fact_account
+    progress = {item.fact_id: item for item in account.facts} if account else {}
+    graded = {item.fact_id: item for item in result.facts}
     rows = [
-        ("Simulator replies", _fmt_count(help_needed.simulator_replies)),
-        ("Facts disclosed", listed(help_needed.facts_disclosed)),
-        ("Disclosed proactively", listed(help_needed.proactive_facts)),
-        ("Disclosed on request", listed(help_needed.on_request_facts)),
+        [
+            fact_id,
+            graded[fact_id].verdict if fact_id in graded else "not graded",
+            progress[fact_id].credit if fact_id in progress else UNKNOWN,
+            _fmt_count(progress[fact_id].raised) if fact_id in progress else UNKNOWN,
+            (progress[fact_id].first_inspection or DASH) if fact_id in progress else UNKNOWN,
+            graded[fact_id].observation if fact_id in graded else "",
+            graded[fact_id].evidence if fact_id in graded else "",
+        ]
+        for fact_id in dict.fromkeys((*graded, *progress))
     ]
-    return _section("Help needed", _definitions(rows))
+    summary = [
+        ("Outcome", _attempt_outcome(result)),
+        (
+            "Independence",
+            UNKNOWN
+            if account is None or account.independence is None
+            else _fmt_number(account.independence),
+        ),
+        ("Corrections", _fmt_count(account.fix_rounds) if account else UNKNOWN),
+        ("Corrections by phase", _phase_corrections(account.corrections) if account else UNKNOWN),
+        ("Ordinary stand-in replies", _fmt_count(account.stand_in_replies) if account else UNKNOWN),
+        (
+            "Phases reached",
+            ", ".join(account.reached_phases) if account and account.reached_phases else "none",
+        ),
+        (
+            "Phases unreached",
+            ", ".join(account.unreached_phases) if account and account.unreached_phases else "none",
+        ),
+    ]
+    uncovered = (
+        "<h3>Problems no fact covers</h3>" + _bullets(result.uncovered) if result.uncovered else ""
+    )
+    return _section(
+        "Facts",
+        _definitions(summary)
+        + _table(
+            "Final verdict, credit, times raised and first inspection per fact.",
+            ["Fact", "Verdict", "Credit", "Raised", "First check", "Observation", "Evidence"],
+            rows,
+        )
+        + uncovered,
+    )
 
 
 def _workflow_card(result: Assessment | None) -> str:
@@ -869,9 +966,11 @@ def _workflow_card(result: Assessment | None) -> str:
         ("Completed steps", _fmt_count(workflow.completed_steps)),
         ("Inspections", _fmt_count(workflow.inspections)),
         ("Fix requests", _fmt_count(workflow.fix_requests)),
+        ("Fallback replies", _fmt_count(workflow.fallbacks)),
         ("Dialogs answered", _fmt_count(workflow.dialogs_answered)),
         ("First inspection", workflow.first_inspection),
         ("Final inspection", workflow.final_inspection),
+        ("Completed", "yes" if workflow.completed else "no"),
         ("Inspection time", _fmt_seconds(workflow.inspection_seconds)),
     ]
     events = (
@@ -879,7 +978,7 @@ def _workflow_card(result: Assessment | None) -> str:
         if not workflow.events
         else _table(
             "Workflow events in order.",
-            ["Step", "Kind", "Outcome", "Turn", "Failed criteria"],
+            ["Step", "Kind", "Outcome", "Turn", "Unmet facts"],
             [
                 [
                     event.step_id,
@@ -905,10 +1004,9 @@ def _attempts_section(report: RunReport, reasoning: Mapping[str, JudgeReasoningV
         )
         detail = "".join(
             [
+                _facts_card(attempt.result),
                 _criteria_card(attempt.result, reasoning_view),
-                _checks_card(attempt.result, reasoning_view),
                 _metrics_card(attempt.result),
-                _help_needed_card(attempt.result),
                 _workflow_card(attempt.result),
             ]
         )
@@ -916,6 +1014,47 @@ def _attempts_section(report: RunReport, reasoning: Mapping[str, JudgeReasoningV
             f'<details class="attempt"><summary>{_esc(summary_text)}</summary>{detail}</details>'
         )
     return _section("Attempts", "".join(children))
+
+
+FACTS_CAPTION = (
+    "Requirements gate pass and fail, optional facts are graded but never gate, and context "
+    "is background the stand-in may mention. The stand-in sees the text; only the inspector "
+    "and judge see the check, and a verifier's hidden entrypoint is never shown."
+)
+
+
+def _fact_check(fact: CaseFactView) -> str:
+    if fact.verifier is not None:
+        return "verifier: " + " ".join(fact.verifier.argv)
+    if fact.kind == "context":
+        return "not graded"
+    return fact.check or "judged against the text"
+
+
+def _case_facts(view: CaseView) -> str:
+    if not view.facts:
+        return _section("Facts", _note("No allowed facts are recorded for this case."))
+    rows = [
+        [fact.fact_id, fact.kind, fact.phase or DASH, fact.disclosure, fact.text, _fact_check(fact)]
+        for fact in view.facts
+    ]
+    headers = ["Fact", "Kind", "Phase", "Disclosure", "Text", "Check"]
+    return _section("Facts", _table(FACTS_CAPTION, headers, rows))
+
+
+def _case_prompt_steps(view: CaseView) -> str:
+    if not view.workflow:
+        return _section("Prompt steps", _note("No prompt steps are declared for this case."))
+    rows = [
+        [item.step_id, item.after_phase, "slash command" if item.slash else "chat", item.prompt]
+        for item in view.workflow
+    ]
+    caption = (
+        "Prompts the user stand-in sends once no phase up to the step's after-phase has an "
+        "unmet requirement."
+    )
+    headers = ["Step", "After phase", "Sent as", "Prompt"]
+    return _section("Prompt steps", _table(caption, headers, rows))
 
 
 def _case_section(case_id: str, view: CaseView | None) -> str:
@@ -927,7 +1066,7 @@ def _case_section(case_id: str, view: CaseView | None) -> str:
         ("Persona", view.persona_id),
         ("Baseline commit", view.baseline_commit or UNKNOWN),
         ("Reference patch", "present" if view.reference_patch else "none"),
-        ("Max turns", _fmt_count(view.budgets.max_turns)),
+        ("Phases", " \u2192 ".join(view.phases) if view.phases else "none"),
         ("Subject seconds", _fmt_seconds(view.budgets.subject_seconds)),
         ("Setup seconds", _fmt_seconds(view.budgets.setup_seconds)),
         (
@@ -939,92 +1078,26 @@ def _case_section(case_id: str, view: CaseView | None) -> str:
         _definitions(rows),
         "<h3>Initial prompt</h3>",
         f"<pre>{_esc(view.initial_prompt)}</pre>",
+        _case_facts(view),
+        _case_prompt_steps(view),
     ]
-    if not view.facts:
-        children.append(_section("Facts", _note("No allowed facts are recorded for this case.")))
-    else:
-        fact_rows = [[fact.fact_id, fact.disclosure, fact.text] for fact in view.facts]
-        children.append(
-            _section(
-                "Facts",
-                _table(
-                    "Facts the subject may be given, and how they may be disclosed.",
-                    ["Fact", "Disclosure", "Text"],
-                    fact_rows,
-                ),
-            )
-        )
-    rubric_children = []
-    rubric_children.append(
+    rubric_children = [
         _note("No default rubrics are disabled for this case.")
         if not view.disabled_rubrics
         else _note(f"Disabled default rubrics: {', '.join(view.disabled_rubrics)}.")
-    )
+    ]
     if not view.rubrics:
         rubric_children.append(_note("No rubric criteria are retained for this case."))
     else:
-        rubric_rows = [
-            [
-                item.criterion_id,
-                item.origin,
-                "required" if item.required else "optional",
-                item.rubric,
-            ]
-            for item in view.rubrics
-        ]
+        rubric_rows = [[item.criterion_id, item.origin, item.rubric] for item in view.rubrics]
         rubric_children.append(
             _table(
-                "Effective judge rubrics, marking case-authored, default and overridden criteria.",
-                ["Criterion", "Origin", "Required", "Rubric"],
+                "Quality rubrics scored by the judge; they never gate the outcome.",
+                ["Criterion", "Origin", "Rubric"],
                 rubric_rows,
             )
         )
     children.append(_section("Rubrics", "".join(rubric_children)))
-    if not view.deterministic:
-        children.append(
-            _section(
-                "Deterministic criteria",
-                _note("No deterministic (hidden-verifier) criteria are retained for this case."),
-            )
-        )
-    else:
-        det_rows = [
-            [
-                item.criterion_id,
-                "required" if item.required else "optional",
-                " ".join(item.command.argv),
-                item.description,
-            ]
-            for item in view.deterministic
-        ]
-        caption = (
-            "Hidden-verifier criteria, by description, required flag and command argv; "
-            "the hidden entrypoint's content is never shown."
-        )
-        children.append(
-            _section(
-                "Deterministic criteria",
-                _table(caption, ["Criterion", "Required", "Command", "Description"], det_rows),
-            )
-        )
-    if not view.checks:
-        children.append(_section("Checks", _note("No case-declared checks are retained.")))
-    else:
-        check_rows = [
-            [
-                item.check_id,
-                item.expect,
-                f"{item.only_if.check_id} = {item.only_if.answer}" if item.only_if else "none",
-                item.question,
-            ]
-            for item in view.checks
-        ]
-        caption = "Case-declared yes/no checks the judge answers from the transcript and files."
-        children.append(
-            _section(
-                "Checks", _table(caption, ["Check", "Expect", "Only if", "Question"], check_rows)
-            )
-        )
     if not view.metrics:
         children.append(
             _section("Metrics commands", _note("No case metrics commands are retained."))
@@ -1116,9 +1189,8 @@ def _run_sections(report: RunReport, reasoning: Mapping[str, JudgeReasoningView]
         [
             _report_header(report),
             _results_section(report),
-            _help_needed_section(report),
+            _facts_section(report),
             _criteria_summary_section(report),
-            _checks_summary_section(report),
             _metrics_summary_section(report),
             _attempts_section(report, reasoning),
         ]

@@ -2,8 +2,16 @@ from typing import Literal
 
 from pydantic import Field, SerializerFunctionWrapHandler, model_serializer
 
+from dryheave.cases import FactKind
 from dryheave.models import Name, ObjectId, RunId, StrictModel
-from dryheave.result_models import Assessment, CheckResult, InspectionVerdict, RoleMetrics
+from dryheave.result_models import (
+    Assessment,
+    AttemptOutcome,
+    InspectionVerdict,
+    OutcomeReason,
+    RoleMetrics,
+)
+from dryheave.runner_models import RunBudget
 
 
 class Distribution(StrictModel):
@@ -27,16 +35,38 @@ class PriceBasis(StrictModel):
     dates: tuple[str, ...] = ()
 
 
-class FactDisclosure(StrictModel):
+class FactRow(StrictModel):
+    case_id: ObjectId
     fact_id: Name
-    kind: Literal["proactive", "on request", "unknown"]
-    count: int = Field(ge=1)
+    kind: FactKind
+    phase: Name | None
+    attempts: int = Field(ge=0)
+    met: int = Field(ge=0)
+    unmet: int = Field(ge=0)
+    unclear: int = Field(ge=0)
+    disputed: int = Field(ge=0)
+    own: int = Field(ge=0)
+    elicited: int = Field(ge=0)
+    corrected: int = Field(ge=0)
+    unreached: int = Field(ge=0)
+    raised: int = Field(ge=0)
+    raised_rate: float | None = Field(ge=0, le=1)
+    first_inspection_met: int = Field(ge=0)
+    first_inspected: int = Field(ge=0)
+    first_inspection_met_rate: float | None = Field(ge=0, le=1)
+    regressions: int = Field(ge=0)
 
 
-class HelpNeededSummary(StrictModel):
-    measured: int = Field(ge=1)
-    unmeasured: int = Field(ge=0)
-    facts: tuple[FactDisclosure, ...] = ()
+class FactGroup(StrictModel):
+    attempts: int = Field(ge=0)
+    outcomes: dict[str, int] = Field(default_factory=dict)
+    outcome_reasons: dict[str, int] = Field(default_factory=dict)
+    pass_rate: float | None = Field(ge=0, le=1)
+    independence: Distribution
+    corrections: Distribution
+    unreached_attempts: int = Field(default=0, ge=0)
+    uncovered: int = Field(default=0, ge=0)
+    facts: tuple[FactRow, ...] = ()
 
 
 class AttemptTopline(StrictModel):
@@ -46,17 +76,14 @@ class AttemptTopline(StrictModel):
     tokens: int | None
     cost: float | None
     currency: str | None
-    checks: tuple[CheckResult, ...]
+    outcome: AttemptOutcome | None = None
+    outcome_reason: OutcomeReason | None = None
+    independence: float | None = None
+    corrections: int | None = None
     first_inspection: InspectionVerdict | None = None
-    fix_requests: int | None = None
     workflow: str | None = None
     workflow_completed: bool | None = None
-
-
-class ToplineCheck(StrictModel):
-    check_id: Name
-    passes: int = Field(ge=0)
-    answered: int = Field(ge=0)
+    eligible: bool = False
 
 
 class GroupTopline(StrictModel):
@@ -66,10 +93,12 @@ class GroupTopline(StrictModel):
     tokens: float | None
     cost: float | None
     currency: str | None
-    checks: tuple[ToplineCheck, ...]
+    passes: int = 0
+    graded: int = 0
+    independence: float | None = None
+    corrections: float | None = None
     first_inspection_passes: int = 0
     first_inspection_attempts: int = 0
-    fix_requests: float | None = None
     workflows_completed: int = 0
     workflow_attempts: int = 0
 
@@ -108,16 +137,6 @@ class CriterionSummary(StrictModel):
     scores: Distribution
 
 
-class CheckSummary(StrictModel):
-    case_id: ObjectId
-    check_id: Name
-    passes: int = Field(ge=0)
-    fails: int = Field(ge=0)
-    not_applicable: int = Field(ge=0)
-    errors: int = Field(default=0, ge=0)
-    agreement: float | None = Field(default=None, ge=0, le=1)
-
-
 class MetricSummary(StrictModel):
     case_id: ObjectId
     metric_id: Name
@@ -151,28 +170,34 @@ class GroupMetrics(StrictModel):
     cache_write_tokens: Distribution | None = None
     total_input_tokens: Distribution | None = None
     criteria: tuple[CriterionSummary, ...] = ()
-    checks: tuple[CheckSummary, ...] = ()
     metrics: tuple[MetricSummary, ...] = ()
-    simulator_replies: Distribution | None = None
+    stand_in_replies: Distribution | None = None
     cost_by_role: dict[str, Distribution] = Field(default_factory=dict)
     price_basis: PriceBasis | None = None
-    help_needed: HelpNeededSummary | None = None
+    facts: FactGroup | None = None
     topline: GroupTopline | None = None
 
     @model_serializer(mode="wrap")
     def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         value: dict[str, object] = handler(self)
-        for name in ("criteria", "checks", "metrics"):
+        for name in ("criteria", "metrics"):
             if not getattr(self, name):
                 value.pop(name, None)
-        for name in ("simulator_replies", "price_basis", "help_needed", "topline"):
+        for name in ("stand_in_replies", "price_basis", "facts", "topline"):
             if getattr(self, name) is None:
                 value.pop(name, None)
         return value
 
 
+class FloorVariant(StrictModel):
+    run_id: RunId
+    label: str = Field(min_length=1, max_length=200)
+    budget: RunBudget
+    group: GroupMetrics
+
+
 class RunReport(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     kind: Literal["run-report"] = "run-report"
     run_id: RunId
     experiment_id: ObjectId
@@ -183,6 +208,8 @@ class RunReport(StrictModel):
     input_error: str | None
     attempts: tuple[AttemptReport, ...]
     groups: tuple[GroupMetrics, ...]
+    budget: RunBudget | None = None
+    floor: FloorVariant | None = None
     portable: bool = False
     omissions: tuple[str, ...] = ()
     limitations: tuple[str, ...] = (
@@ -210,7 +237,7 @@ class RunSetup(StrictModel):
     run_id: RunId
     case_ids: tuple[ObjectId, ...] | None = None
     variants: dict[str, ModelSetup] = Field(default_factory=dict)
-    simulator: ModelSetup = Field(default_factory=_unavailable)
+    stand_in: ModelSetup = Field(default_factory=_unavailable)
     judge: ModelSetup = Field(default_factory=_unavailable)
     inspector: ModelSetup = Field(default_factory=_unavailable)
     price_versions: tuple[str, ...] = ()
@@ -222,9 +249,10 @@ class PairChange(StrictModel):
     repetition: int
     before_attempt: Name
     after_attempt: Name
-    before_completion: str
-    after_completion: str
+    before_outcome: str
+    after_outcome: str
     criterion_changes: dict[str, tuple[str, str]]
+    fact_changes: dict[str, tuple[str, str]] = Field(default_factory=dict)
 
 
 class Comparison(StrictModel):
@@ -246,6 +274,6 @@ class Comparison(StrictModel):
     before_metrics: tuple[GroupMetrics, ...]
     after_metrics: tuple[GroupMetrics, ...]
     limitations: tuple[str, ...] = (
-        "Pairs require identical case, criterion, simulator, scoring, repetition, seed and execution mode identities.",
+        "Pairs require identical case, fact, criterion, stand-in, scoring, repetition, seed and execution mode identities.",
         "The latest retained attempt per compatible trial is selected; retries never erase prior spend.",
     )

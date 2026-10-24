@@ -126,12 +126,12 @@ def test_assessor_persists_descendants_and_recovers_after_parent_disappears(
             assert stdout == b""
             assert not _alive(child)
         monkeypatch.setattr(
-            "dryheave.assessments.grade_criterion",
+            "dryheave.assessments.grade_fact",
             lambda *_args: pytest.fail("Interrupted verifier calls must not be repeated."),
         )
         result = load_assessment(store, assess_run(store, summary.run_id)[0])
         assert result.criteria[0].error == "interrupted_verifier"
-        assert result.completion == "indeterminate"
+        assert result.outcome == "indeterminate"
         assert not _alive(child)
         assert (
             run_status(store, summary.run_id).attempts[0].capture_id

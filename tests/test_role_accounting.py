@@ -100,7 +100,7 @@ def test_failed_roles_retain_observed_metadata_through_durable_report_pricing(
     )
     scoring = ScoringConfig(prices=prices, judge=recipe if invalid == "judge-ids" else None)
     benchmark = benchmark.model_copy(
-        update={"scoring": scoring, **({"simulator": recipe} if invalid != "judge-ids" else {})}
+        update={"scoring": scoring, **({"stand_in": recipe} if invalid != "judge-ids" else {})}
     )
     summary = run_experiment(
         store,

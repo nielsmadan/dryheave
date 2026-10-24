@@ -13,7 +13,7 @@ from dryheave.controller_models import (
     DialogPrompt,
     DialogueMessage,
     RoleBudget,
-    SimulatorDecision,
+    StandInDecision,
 )
 from dryheave.controllers import (
     CallContext,
@@ -26,7 +26,7 @@ from dryheave.controllers import (
     native_decision,
     screen_answer,
     screen_projection,
-    simulator_projection,
+    stand_in_projection,
 )
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.models import DialogSelection
@@ -38,7 +38,7 @@ from dryheave.serialization import canonical_json
 
 def request_for(store):
     case = load_frozen_case(store, "task")
-    return simulator_projection(
+    return stand_in_projection(
         case,
         load_frozen_persona(store, case.persona_id),
         (DialogueMessage(role="assistant", text="Which punctuation?"),),
@@ -50,12 +50,12 @@ def test_approval_authority_comes_only_from_frozen_policy(store, benchmark):
     case = load_frozen_case(store, "task")
     persona = load_frozen_persona(store, case.persona_id)
     dialogue = (DialogueMessage(role="assistant", text="Please approve my design."),)
-    original = simulator_projection(case, persona, dialogue, 17)
+    original = stand_in_projection(case, persona, dialogue, 17)
     for policy, text in (
         ("facts-only", "Provide only factual clarification; stop when asked to approve a design"),
         ("design-approval", "You may give ordinary conversational approval"),
     ):
-        request = simulator_projection(
+        request = stand_in_projection(
             case, persona, dialogue, 17, recipe=ControllerRecipe(conversation_policy=policy)
         )
         assert text in request.instruction
@@ -114,7 +114,7 @@ def test_projection_has_only_approved_input(store, benchmark):
 
 def test_script_condition_and_divergence(store, benchmark, tmp_path):
     request = request_for(store)
-    result, identities = invoke(benchmark.simulator, request, tmp_path)
+    result, identities = invoke(benchmark.stand_in, request, tmp_path)
     assert (result.status, result.decision.action, result.decision.fact_ids) == (
         "completed",
         "reply",
@@ -124,7 +124,7 @@ def test_script_condition_and_divergence(store, benchmark, tmp_path):
     diverged = request.model_copy(
         update={"dialogue": (DialogueMessage(role="assistant", text="What database?"),)}
     )
-    result, _ = invoke(benchmark.simulator, diverged, tmp_path / "different")
+    result, _ = invoke(benchmark.stand_in, diverged, tmp_path / "different")
     assert result.decision.action == "stop"
     assert "divergence" in result.decision.reason
     assert result.decision.stop_kind == "declined"
@@ -132,36 +132,37 @@ def test_script_condition_and_divergence(store, benchmark, tmp_path):
 
 def test_script_exhaustion_is_not_a_done_point(store, benchmark, tmp_path):
     request = request_for(store)
-    exhausted = benchmark.simulator.model_copy(update={"script": benchmark.simulator.script[:0]})
+    exhausted = benchmark.stand_in.model_copy(update={"script": benchmark.stand_in.script[:0]})
     result, _ = invoke(exhausted, request, tmp_path)
     assert result.decision.action == "stop"
     assert "exhausted" in result.decision.reason
     assert result.decision.stop_kind == "declined"
 
 
-def test_fix_it_findings_shrink_to_fit_the_simulator_input_bound(store, benchmark):
-    from dryheave.controller_models import InspectionFinding, RoleBudget
+def test_raised_facts_shrink_to_fit_the_stand_in_input_bound(store, benchmark):
+    from dryheave.controller_models import RaisedFact, RoleBudget
     from dryheave.serialization import canonical_json
 
     case = load_frozen_case(store, "task")
     persona = load_frozen_persona(store, case.persona_id)
     dialogue = (DialogueMessage(role="assistant", text="Done."),)
-    findings = (InspectionFinding(criterion_id="greeting", rationale="x" * 4000),)
-    oversized = simulator_projection(case, persona, dialogue, 17, inspection=findings)
+    raised = (RaisedFact(fact_id="greeting", text="x" * 4000, observation="y" * 600),)
+    oversized = stand_in_projection(case, persona, dialogue, 17, inspection=raised)
     assert len(canonical_json(oversized)) > 3000
     recipe = ControllerRecipe(budget=RoleBudget(max_input_bytes=3000))
-    fitted = simulator_projection(case, persona, dialogue, 17, recipe=recipe, inspection=findings)
+    fitted = stand_in_projection(case, persona, dialogue, 17, recipe=recipe, inspection=raised)
     assert len(canonical_json(fitted)) <= 3000
-    assert fitted.inspection[0].criterion_id == "greeting"
-    assert len(fitted.inspection[0].rationale) < 4000
+    assert fitted.inspection[0].fact_id == "greeting"
+    assert len(fitted.inspection[0].text) < 4000
+    assert fitted.inspection[0].observation.startswith("y")
 
 
 @pytest.mark.parametrize(
     "text", ["/permissions", "!ls", "$skill", "\x1b[A", "hi\rthere", "\t!command"]
 )
-def test_rejects_simulator_native_authority(text):
+def test_rejects_stand_in_native_authority(text):
     with pytest.raises(ValidationError):
-        SimulatorDecision(action="reply", text=text, reason="answer")
+        StandInDecision(action="reply", text=text, reason="answer")
 
 
 @pytest.mark.integration
@@ -360,30 +361,35 @@ def test_a_stop_decision_drops_any_explanation_text():
 
 
 def test_decision_serialization_drops_default_stop_kind_and_choices(benchmark):
-    done = SimulatorDecision(action="stop", reason="The work is reported done.")
+    done = StandInDecision(action="stop", reason="The work is reported done.")
     assert set(json.loads(done.model_dump_json())) == {"action", "text", "fact_ids", "reason"}
     declined = done.model_copy(update={"stop_kind": "declined"})
     assert json.loads(declined.model_dump_json())["stop_kind"] == "declined"
-    assert "stop_kind" not in benchmark.simulator.model_dump_json()
+    assert "stop_kind" not in benchmark.stand_in.model_dump_json()
 
 
-def test_findings_switch_the_projection_to_a_fix_request(store, benchmark):
-    from dryheave.controller_models import FIX_IT_INSTRUCTION, InspectionFinding
+def test_raised_facts_switch_the_projection_to_a_fix_request(store, benchmark):
+    from dryheave.controller_models import FIX_IT_INSTRUCTION, RaisedFact
 
     case = load_frozen_case(store, "task")
     persona = load_frozen_persona(store, case.persona_id)
     dialogue = (DialogueMessage(role="assistant", text="Done."),)
-    plain = simulator_projection(case, persona, dialogue, 17)
-    finding = InspectionFinding(criterion_id="greeting", rationale="The comma is missing.")
-    fix = simulator_projection(case, persona, dialogue, 17, inspection=(finding,))
+    plain = stand_in_projection(case, persona, dialogue, 17)
+    raised = RaisedFact(
+        fact_id="greeting", text="Use a comma.", observation="It printed Hello Niels."
+    )
+    fix = stand_in_projection(case, persona, dialogue, 17, inspection=(raised,))
     assert "Stop instead of replying" in plain.instruction
     assert "inspection" not in plain.model_dump()
     assert fix.instruction == FIX_IT_INSTRUCTION
     assert "Stop instead of replying" not in fix.instruction
-    assert "symptoms not code" in fix.instruction
-    assert "never mention criteria, rubrics, judges or tests" in fix.instruction
+    assert "describe what you saw, in this user's words" in fix.instruction
+    assert "never mention facts, criteria, rubrics, inspections, judges or tests" in (
+        fix.instruction
+    )
+    assert "fixed" not in fix.instruction
     assert fix.model_dump()["inspection"] == (
-        {"criterion_id": "greeting", "rationale": "The comma is missing."},
+        {"fact_id": "greeting", "text": "Use a comma.", "observation": "It printed Hello Niels."},
     )
     assert fix.model_dump(exclude={"instruction", "inspection"}) == plain.model_dump(
         exclude={"instruction"}
@@ -417,7 +423,7 @@ FEATURE_DIALOG = DialogPrompt(
 
 
 def answer(choices=(), text=""):
-    return SimulatorDecision(action="reply", choices=choices, text=text, reason="As the user.")
+    return StandInDecision(action="reply", choices=choices, text=text, reason="As the user.")
 
 
 @pytest.mark.parametrize(
@@ -429,7 +435,7 @@ def answer(choices=(), text=""):
         (AUTH_DIALOG, answer(("OAuth", "API key")), None),
         (AUTH_DIALOG, answer(("OAuth",), text="Because it is standard."), None),
         (AUTH_DIALOG, answer(text="Use TLS\nand rotate keys"), None),
-        (AUTH_DIALOG, SimulatorDecision(action="stop", reason="Nothing to add."), None),
+        (AUTH_DIALOG, StandInDecision(action="stop", reason="Nothing to add."), None),
         (
             FEATURE_DIALOG,
             answer(("Search", "Export")),
@@ -455,7 +461,7 @@ def test_dialog_projection_asks_for_an_answer_guided_by_the_hint(store, benchmar
     case = load_frozen_case(store, "task")
     persona = load_frozen_persona(store, case.persona_id)
     dialogue = (DialogueMessage(role="user", text="Add login."),)
-    plain = simulator_projection(case, persona, dialogue, 17)
+    plain = stand_in_projection(case, persona, dialogue, 17)
     asked = dialog_projection(plain, AUTH_DIALOG, "Prefer what we already use.", 128 * 1024)
     assert {"dialog", "answer_hint"}.isdisjoint(json.loads(canonical_json(plain)))
     assert asked.instruction == DIALOG_INSTRUCTION
@@ -470,7 +476,7 @@ def test_dialog_projection_asks_for_an_answer_guided_by_the_hint(store, benchmar
     assert asked.model_dump(exclude={"instruction", "dialog", "answer_hint"}) == plain.model_dump(
         exclude={"instruction"}
     )
-    policy = simulator_projection(
+    policy = stand_in_projection(
         case, persona, dialogue, 17, recipe=ControllerRecipe(conversation_policy="facts-only")
     )
     guarded = dialog_projection(policy, AUTH_DIALOG, None, 128 * 1024)
@@ -488,7 +494,7 @@ def test_dialog_projection_fits_the_question_to_the_input_bound(store, benchmark
     assert fitted.dialog.options == long.options
 
 
-def test_scripted_simulator_matches_the_dialog_question(store, benchmark, tmp_path):
+def test_scripted_stand_in_matches_the_dialog_question(store, benchmark, tmp_path):
     from dryheave.controller_models import ScriptStep
 
     decision = answer(("OAuth",))
@@ -506,7 +512,7 @@ FIX_SCOPE = Path("tests/fixtures/claude-2.1.296-fix-scope.txt").read_text()
 def screen_reply(key=None, text=None, target="Fix all Should Fix"):
     from dryheave.drivers.models import ScreenAction
 
-    return SimulatorDecision(
+    return StandInDecision(
         action="reply",
         reason="Picking what this user wants.",
         screen_kind="question",
@@ -565,13 +571,11 @@ def test_the_decision_schema_has_screen_fields_only_for_screen_requests():
         (screen_reply(text="Only the prefix bug"), True),
         (screen_reply(text="2 files only"), False),
         (screen_reply(text=" 3"), False),
-        (SimulatorDecision(action="stop", reason="Still working.", screen_kind="busy"), True),
-        (SimulatorDecision(action="stop", reason="A permission.", screen_kind="approval"), True),
-        (SimulatorDecision(action="stop", reason="No screen judgement."), False),
+        (StandInDecision(action="stop", reason="Still working.", screen_kind="busy"), True),
+        (StandInDecision(action="stop", reason="A permission.", screen_kind="approval"), True),
+        (StandInDecision(action="stop", reason="No screen judgement."), False),
         (
-            SimulatorDecision(
-                action="reply", text="Fix all", reason="Text.", screen_kind="question"
-            ),
+            StandInDecision(action="reply", text="Fix all", reason="Text.", screen_kind="question"),
             False,
         ),
         (screen_reply(key="Enter").model_copy(update={"choices": ("Fix all",)}), False),
@@ -613,11 +617,11 @@ def test_screen_actions_are_one_allowed_key_or_one_bounded_line(action):
 def test_screen_fields_are_dropped_from_serialization_when_absent():
     reply = screen_reply(key="3")
     assert json.loads(reply.model_dump_json())["screen_action"] == {"key": "3"}
-    plain = SimulatorDecision(action="reply", text="Use a comma.", reason="Answering.")
+    plain = StandInDecision(action="reply", text="Use a comma.", reason="Answering.")
     assert set(json.loads(plain.model_dump_json())) == {"action", "text", "fact_ids", "reason"}
 
 
-def test_scripted_simulator_matches_the_screen_text(store, benchmark, tmp_path):
+def test_scripted_stand_in_matches_the_screen_text(store, benchmark, tmp_path):
     from dryheave.controller_models import ScriptStep
 
     decision = screen_reply(key="Enter")

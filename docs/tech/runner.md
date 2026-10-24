@@ -1,7 +1,8 @@
 # Experiments and captured trials
 
 The design decisions behind case workflows, inspections, fix-it replies and dialog
-answering are in docs/decisions/0003-case-workflows.md.
+answering are in docs/decisions/0003-case-workflows.md, amended by
+docs/decisions/0004-feedback-only-inspection.md.
 
 The runner freezes an experiment, executes bounded interactive trials, stops its
 known writers and captures evidence. A capture has `assessment: "pending"` and
@@ -11,9 +12,9 @@ fabricated verifier result. Assessment resumes from that immutable capture.
 ## Public commands
 
 Use the case and profile authoring commands to create the `task` and `subject`
-aliases before this example. The simulator below is adaptive through literal
+aliases before this example. The user stand-in below is adaptive through literal
 condition matching. Changing the observed question makes it stop on divergence.
-The two fixture prompts must equal the frozen case prompt and simulated answer.
+The two fixture prompts must equal the frozen case prompt and stand-in answer.
 
 ```json
 {
@@ -22,7 +23,7 @@ The two fixture prompts must equal the frozen case prompt and simulated answer.
   "variants": [{"name": "base", "profile": "subject"}],
   "repetitions": 1,
   "seed": 17,
-  "simulator": {
+  "stand_in": {
     "kind": "scripted",
     "script": [
       {
@@ -71,15 +72,17 @@ remain distinguishable from native runs. Fixture writes are limited to the
 owned workspace and cannot name Git metadata. Empty scripts stop when exhausted.
 
 `validate` is read-only. `create` resolves aliases once and publishes immutable
-simulator, scoring and experiment objects. Optional variant `model`, `effort`
+stand-in, scoring and experiment objects. Optional variant `model`, `effort`
 and `workflow` fields derive a new profile from its pinned parent. No-op overrides
 are errors. Cases, variant names and repetitions define at most 10,000 trials.
 SHA-256 ordering of the frozen seed and trial identity is deterministic; paired
 variants share a case/repetition seed. Moving an alias cannot change saved trials.
 Validation, creation and frozen experiment loading reject any scripted judge recipe.
-Cases with required judge rubrics need a JSON-command, Codex or Claude judge with
-`budget.max_calls` greater than zero before execution can begin. Optional rubrics
-can remain without a judge.
+Cases with judged facts (facts without a verifier) need a JSON-command, Codex or
+Claude judge with `budget.max_calls` greater than zero before execution can begin.
+Quality rubric criteria never gate: `experiment create` and `run` accept them
+without a judge and grading records them `not_run`, while `bench` and
+`assess --regrade` refuse a case with rubric criteria or judged facts and no judge.
 
 ## Native execution
 
@@ -108,13 +111,13 @@ setting creates a `projects."ABSOLUTE_OWNED_WORKSPACE".trust_level` command-line
 override and appears in `LaunchPlan.workspace_trust`. It does not copy a trust
 store or change permission/sandbox settings. Only Codex supports these explicit
 choices; other harnesses reject them. Permission, trust and other recognized
-blockers stop as `needs_input`; the runner never asks the simulator to approve them.
+blockers stop as `needs_input`; the runner never asks the stand-in to approve them.
 Claude selection dialogs and question-tool screens the parsers cannot read are
 answered as described below.
 
 ## Controller protocol and budgets
 
-A `simulator` can instead contain:
+A `stand_in` can instead contain:
 
 ```json
 {
@@ -126,7 +129,7 @@ A `simulator` can instead contain:
 }
 ```
 
-The command runs in a new owned role directory and receives one `SimulatorInput`
+The command runs in a new owned role directory and receives one `StandInInput`
 JSON object on stdin. It emits one JSON object on stdout:
 
 ```json
@@ -151,7 +154,7 @@ and `effort`, plus `isolation: "trusted-native"`. The adapter verifies its versi
 and adds `exec --ephemeral --ignore-user-config --ignore-rules
 --skip-git-repo-check --json --color never --output-schema PATH
 --output-last-message PATH --model MODEL --config model_reasoning_effort=... -`.
-The schema describes `SimulatorDecision`; the final JSON is read from the bounded
+The schema describes `StandInDecision`; the final JSON is read from the bounded
 output file. Stdout retains native JSONL, including cumulative thread usage.
 Codex's all-zero usage fallback remains unknown. This controller can still have
 native tools and host access. It preserves explicit launcher/auth/environment
@@ -178,7 +181,7 @@ Codex sandbox/auth-file fields. The adapter verifies `2.1.278 (Claude Code)` and
 adds print/JSON/schema/model flags, `--tools ''`, empty setting sources,
 strict empty MCP configuration, disabled hooks/plugins and session persistence.
 Haiku omits effort; supported Sonnet/Opus settings may specify it. Native subjects
-remain TUI and receive none of these simulator-only print flags.
+remain TUI and receive none of these stand-in-only print flags.
 
 The Claude result envelope must be a successful `type: "result"` with a valid
 `structured_output`; prose `result` is never treated as a substitute. Unknown
@@ -186,7 +189,7 @@ envelope fields, native permission denials and reported server tool use fail the
 call. Provider usage is retained independently of decision validity and exit
 status. Only a single measured modelUsage identity becomes observed_model;
 observed_effort stays unknown. A judge uses the same transport and lifecycle but
-validates judgments rather than simulator decisions. Model output cannot
+validates judgments rather than stand-in decisions. Model output cannot
 self-report usage or effective settings through the structured decision payload.
 New protocol fixtures are explicitly synthetic, not live compatibility evidence.
 
@@ -213,7 +216,7 @@ cleanup unresolved. A terminal close is retried once. A close whose
 acknowledgement is lost still counts if the daemon exits by itself within the cleanup
 bound; a daemon that has to be killed, or whose identity no longer matches the owned
 launch, records `terminal_close_failed`.
-The subject's overall deadline covers all simulator time, with independent role
+The subject's overall deadline covers all stand-in time, with independent role
 call/count/total budgets. A parent deadline can end a call before its own budget.
 SIGINT and SIGTERM request cancellation and cleanup. No new subject input follows
 a stop, cancellation, budget exhaustion or unresolved delivery.
@@ -223,7 +226,7 @@ recipe, and an optional version/date/currency price table with per-million-token
 rates. A rate may carry a `long_prompt` tier that applies to a single request whose
 total input (uncached input, cache reads and cache writes) exceeds
 `above_total_input_tokens`, and the charge's reason says when it applied. A record
-not known to cover a single request of such a model, including every simulator,
+not known to cover a single request of such a model, including every stand-in,
 judge and inspector call, stays unpriced. These are saved
 assessment inputs, interpreted by explicit `assess` or
 `run --assess`, and are not current market pricing. The convenience flag rejects
@@ -234,17 +237,30 @@ capture-only. See [results.md](results.md).
 ## Case workflows
 
 `RunOptions.workflow` (default false, dropped from the frozen options when false)
-turns on the case's workflow; see authoring.md for steps and the default inspect
-step. `run --workflow` sets it for a plain `run`; `bench` sets it by default and
-`--no-workflow` turns it off, so the launch check also skips probing slash steps
-(bench.py). The setting is not part of the experiment ID, so `bench` resumes or
-reports only an earlier run of the same experiment whose frozen
-`RunOptions.workflow` matches this invocation. `bench --inspector MODEL[@EFFORT]` sets `ScoringConfig.inspector`;
-without it, inspection falls back to the judge. A run with workflows on is
-refused before launch when a case has an inspect
-step but the scoring config has no inspector or judge with `max_calls` above zero,
-or when a slash prompt step targets an agent other than Claude or Codex on its live
-config. A new run is also refused, before it is reserved, when a Codex variant's
+turns on fact inspection, raising and the case's prompt steps. `run --workflow` sets
+it for a plain `run`; `bench` sets it by default and `--no-workflow` turns it off, so
+the launch check also skips probing slash steps (bench.py).
+
+`RunOptions.budget` (`RunBudget`, always recorded) holds the attempt budgets:
+`max_turns` (60) caps accepted subject turns, `stand_in_replies` (40) caps stand-in
+calls and `max_inspections` (20) caps inspections. `bench --max-turns`,
+`--stand-in-replies` and `--max-inspections` set them; a plain `run` uses the
+defaults. `bench --budget-from PILOT_RUN` instead derives each figure as
+ceil(used × 1.5) + 5 (capped at the field's maximum) from the pilot's single attempt,
+refuses unless that attempt passed, prints the derivation, and records the pilot in
+`RunOptions.pilot_run`; it cannot be combined with the three flags. Exhausting one ends the attempt with `turn_budget`, `stand_in_budget` or
+`inspection_budget`; the stand-in recipe's own call and time limits still end it
+with `controller_budget`. `bench` freezes its stand-in recipe with a fixed ceiling
+of 100 calls, so the reply budget is not part of the experiment ID. Neither the
+workflow setting nor the budget is part of the experiment ID: `bench` resumes or
+reports only an earlier run of the same experiment whose frozen `RunOptions.workflow`
+and `RunOptions.budget` both match this invocation.
+
+`bench --inspector MODEL[@EFFORT]` sets `ScoringConfig.inspector`; without it,
+inspection falls back to the judge. Experiment creation already refuses facts
+without a verifier when there is no judge. A run with workflows on is refused before
+launch when a slash prompt step targets an agent other than Claude or Codex on its
+live config. A new run is also refused, before it is reserved, when a Codex variant's
 slash step names a skill with no `skills/<name>/SKILL.md` (or bundled
 `skills/.system/<name>/SKILL.md`) in the live Codex config. Once
 `_prepare_live_config` returns the run's manifests, `run_experiment` repeats that
@@ -266,46 +282,75 @@ to either error when it was resuming a run. With workflows off,
 or a case with no effective workflow, the loop below never runs.
 
 A decision may carry `stop_kind` (`"done"`, the default, or `"declined"` when the
-simulated user will not approve what was asked) and `choices` (dialog answers). Both
+user stand-in will not approve what was asked) and `choices` (dialog answers). Both
 are dropped from serialization at their defaults, so existing
-scripts and recorded calls keep their bytes. A simulator `stop` with `stop_kind:
+scripts and recorded calls keep their bytes. A stand-in `stop` with `stop_kind:
 "done"` is a done point; script exhaustion and script divergence are not — they
-carry `stop_kind: "declined"` and end the run with `stop_reason: "simulator_stop"`
-as today. At a done point the runner asks `next_workflow_action` what to do:
+carry `stop_kind: "declined"` and end the run with `stop_reason: "stand_in_stop"`
+as today. Without workflows every stop ends the run as `stand_in_stop`.
 
-- `deliver_prompt`: send the prompt step; it advances once the subject accepts it.
+At a done point the runner inspects the live workspace (inspection.py): every
+requirement and optional fact gets a `FactJudgment` (`met`, `unmet` or `unclear`,
+an observation of at most 600 characters and evidence). Facts with a verifier run
+it on a snapshot and share final grading's classifier (`result_models.verifier_verdict`):
+a pass is met; a failure, crash, import or syntax error, signal, kill at its output
+bound or timeout before the inspection deadline is unmet; a verifier that could not be
+launched or restored is unclear, and an inspection that leaves a requirement verifier
+unclear without raising is journaled as an `unavailable` step (the run continues, but
+it never counts as a first-inspection pass); an unconfirmed cleanup, changed hidden inputs or the
+inspection deadline make the inspection unavailable. The other facts go to one inspector call whose output bound grows
+with the fact count (`fact_judge_recipe`); a malformed call or a missing fact ID is
+retried once, then the inspection is unavailable. A judgment without evidence counts
+as unclear, and unclear facts are judged once more in a second call holding only
+them; still unclear, they are neither raised nor counted as met. An inspection is
+reused, without calls, only when its `input_digest` (snapshot digest, the
+inspector's transcript and the fact set) equals that of an earlier completed
+inspection in the attempt. Then `next_workflow_action` (workflow.py) decides:
+
+- The blocking phase is the earliest declared phase with an `unmet` requirement, so
+  a regression in an earlier phase blocks again. Unclear facts never block.
+- `deliver_prompt`: the next prompt step fires once no phase up to its `after_phase`
+  blocks. It advances once the subject accepts it.
   Prompts starting with `/` use the `curated-native-command` submission policy; the
   rest use `conversation`. Claude gets the prompt verbatim. A Codex subject gets
   `/name args` as the skill mention `$name args` (`drivers.dialogs.delivered_prompt`); that text
   is typed, matched against the accepted `UserMessage` and kept as the prompt
   event's `delivered_text` field, which is dropped when the prompt went out verbatim.
-- `inspect`: inspect the live workspace against the step's criteria (inspection.py).
-  A pass advances and the loop continues at the same done point. A failure stays on
-  the step and asks the simulator for a fix-it reply: `SimulatorInput.inspection`
-  carries the findings and the instruction replaces "stop when the work is done"
-  with the user-voice fix-it rules. A `stop` returned with findings is recorded as a
-  failed call with error `stop_with_findings` and retried once with
-  `SimulatorInput.correction` saying why the stop was rejected. A second such stop
-  does not end the attempt: the runner sends a fixed, neutral fix-it reply
+  Every later done point inspects again, so the last prompt step is always followed
+  by a closing inspection.
+- `raise`: the stand-in gets a fix-it request. `StandInInput.inspection` holds the
+  blocking phase's unmet requirement and optional facts as `RaisedFact`s (fact text
+  and the inspector's observation, never the `check`), and the instruction replaces
+  "stop when the work is done" with the describe-what-you-saw fix-it rules. Citations
+  outside the handed set are kept, not rejected. A `stop` returned with raised facts
+  is recorded as a failed call with error `stop_with_findings` and retried once with
+  `StandInInput.correction` saying why the stop was rejected. A second such stop
+  does not end the attempt: the runner sends a fixed, neutral reply
   (`FALLBACK_FIX_REPLY`, which quotes nothing from the inspection) and records it as a
-  `simulator-fallback` journal event.
-- `complete`: stop with `stop_reason: "workflow_complete"`.
+  `stand-in-fallback` journal event.
+  Pacing belongs to the harness, not the voice: a fix-it request hands over one
+  phase's facts and carries no message-count or one-fact-at-a-time rule, so a voice
+  profile must not tell the stand-in how many facts to share.
+- `complete`: no phase blocks and no prompt step is pending; stop with
+  `stop_reason: "workflow_complete"`.
 
-A `declined` stop ends the run as `simulator_stop`. Native events are ingested before
+A `declined` stop ends the run as `stand_in_stop`. Native events are ingested before
 and after each inspection and terminal-owned processes are published. If events
-arrived meanwhile, the inspection reruns once and is then unavailable. The judge
+arrived meanwhile, the inspection reruns once and is then unavailable. The inspector
 transcript comes from the driver's native events so far, falling back to the
 dialogue. An unavailable inspection stops with `inspection_unavailable`, unless the
-run was cancelled (`cancelled`) or its deadline passed (`timeout`). Inspections per
-attempt are capped at the case's `max_turns` (`turn_budget`); every other budget
-keeps its existing stop reason and the progress made so far.
+run was cancelled (`cancelled`). Inspection wall time does not count against the
+subject: the subject deadline and the driver deadline move by it and
+`subject_seconds` excludes it. An inspection has its own deadline of
+`max(600 s, inspector total_seconds)`.
 
-Simulator budgets, elapsed time and call indexes count only `role: "simulator"`
+Stand-in budgets, elapsed time and call indexes count only `role: "stand_in"`
 calls, so scripted fixtures stay aligned. Inspection judge calls join the attempt's
 calls as `role: "judge"`, with their own per-inspection index (shared by an
-`events_arrived` rerun, so one inspection stays within `max_calls`) and a deadline of
-`min(subject deadline, now + call_seconds)`; assessment prices them with the
-inspector (or judge) recipe under the judge role. Private inspection material lives
+`events_arrived` rerun and the unclear re-judge, so one inspection stays within
+`max_calls`) and a deadline of `min(inspection deadline, now + call_seconds)`;
+assessment prices them with the inspector (or judge) recipe under the judge role.
+Private inspection material lives
 in a fresh directory under the store's `scratch/`. Recovery removes a kept
 directory once dryheave's own judge and verifier cleanup records in it report every
 writer stopped or every recorded writer has since exited; it never reads the copied
@@ -314,22 +359,29 @@ only; links and special files are skipped) live under
 `runs/RUN_ID/inspections/ATTEMPT_ID/`, outside the attempt tree, and are copied into
 the capture's `evidence/inspection/` once the subject has stopped.
 
-Journal events: `workflow-step` (one `WorkflowEvent` and the position after it),
-`inspection-intent` and `inspection-result`. They never reuse assessment event
-names, so grading after an inspected run still invokes its own judge.
-`AttemptState.workflow_position` (dropped when None) is the only workflow field in
-the attempt state. Inspect events record `passed`, `failed`, `reused` (unchanged
-snapshot, previous failed verdict, no call) or `unavailable`, with the judge call
-IDs and inspection wall time; each fix-it reply adds a `fix_requested` event naming
-its simulator calls. The capture's `workflow` (`WorkflowProgress`: step IDs,
-position, events) is rebuilt from `workflow-step` events at capture, including when
-recovery captures an interrupted attempt. Interrupted attempts are never resumed
-mid-interaction.
+Journal events: `inspection-intent` (inspection ID, turn and private paths) before
+each inspection and `fact-inspection` (`FactInspection`: ID, turn, snapshot and input
+digests, `completed` or `unavailable`, the judgments) after it; `raise` (`RaiseEvent`:
+the stand-in call, phase, handed fact IDs, the stand-in's own citations, cause
+`fix_request` or `fallback`, and the turn: accepted turns before the reply was sent,
+the same count its `fix_requested` workflow step records) once the subject accepts a fix-it reply;
+and `workflow-step` (one `WorkflowEvent` and the position after it). An intent with
+no result is unknown (`workflow.inspection_records`). None of them reuse assessment
+event names, so grading after an inspected run still invokes its own judge.
+`AttemptState.workflow_position` (dropped when None) counts delivered prompt steps
+and is the only workflow field in the attempt state. Inspect `WorkflowEvent`s use the
+inspection ID as `step_id` and record `passed`, `failed` (an unmet requirement) or
+`unavailable`, the unmet requirement IDs, the judge call IDs and the inspection wall
+time; each accepted fix-it reply adds a `fix_requested` event whose `step_id` is the
+raised phase, naming its stand-in calls. The capture's `workflow` (`WorkflowProgress`:
+prompt step IDs, position, events) is rebuilt from `workflow-step` events at capture,
+including when recovery captures an interrupted attempt. Interrupted attempts are
+never resumed mid-interaction.
 
 ### Selection dialogs
 
 When a Claude turn shows a question dialog (`structured_input`), the runner asks the
-simulator to answer it whether or not workflows are on. `SimulatorInput.dialog`
+stand-in to answer it whether or not workflows are on. `StandInInput.dialog`
 carries the parsed question, option labels, `multi_select` and `allows_text`;
 `answer_hint` is the hint of the prompt step being delivered or, failing that, of
 the most recent prompt step before the current position. The dialogue ends with the
@@ -343,7 +395,7 @@ stops with `needs_input`. A plain reply with empty text is likewise a failed
 a dialog it cannot parse or cannot verify on screen stops with `needs_input`.
 
 Each verified answer journals a `workflow-step` event with kind `dialog`, outcome
-`answered`, the accepted turn count and its simulator call IDs. Its `step_id` is the
+`answered`, the accepted turn count and its stand-in call IDs. Its `step_id` is the
 hint's prompt step, or `dialog` when there is none. Recording does not move
 `workflow_position`. Without a workflow the capture keeps `workflow` None unless a
 dialog was answered; then it holds a `WorkflowProgress` with no steps, position 0 and
@@ -355,8 +407,8 @@ When a turn stops on a Claude AskUserQuestion or Codex `request_user_input`
 screen that the driver cannot parse (`DriverSession.screen()` is not `None`; the
 allow-list is in drivers.md), the runner enters a screen loop instead of stopping.
 Any other unrecognised screen, and every Droid screen, stops with `needs_input`.
-Each step sends one simulator
-request with `SimulatorInput.screen` (the raw screen, trailing whitespace trimmed;
+Each step sends one stand-in
+request with `StandInInput.screen` (the raw screen, trailing whitespace trimmed;
 when the request exceeds `max_input_bytes` only the bottom lines that fit are
 kept), the persona, the dialogue so far and the same `answer_hint` as a selection
 dialog, under `SCREEN_INSTRUCTION`. Only these requests carry the screen fields in
@@ -371,18 +423,18 @@ keystrokes and a digit there selects an option. Anything else is a failed
 `invalid_screen_answer` call, retried once, then `needs_input`. The three fields
 are dropped from serialization when absent.
 
-Mode and permission prompts are kept from the simulator by the allow-list: such a
+Mode and permission prompts are kept from the stand-in by the allow-list: such a
 prompt does not carry the question-tool chrome, so it never enters the loop. Two
 backstops sit behind it. The normalised `permission_like` wording check rejects a
 qualifying screen that also shows permission or mode wording. The option guard
 refuses any `Enter`, `Space` or digit whose chosen option or target names a mode
-or permission choice from its fixed vocabulary, whatever the simulator judged; it
+or permission choice from its fixed vocabulary, whatever the stand-in judged; it
 does not recognise every such option (one-shot "Yes"/"Allow" rows or session
 grants, for example). A refusal stops with `needs_input` and an `approval`
 observation (`SCREEN_ACTION_REFUSED`).
 
-The driver applies one action per call (`act`) to the screen the simulator saw;
-if the screen changed while the simulator was deciding, nothing is sent and the
+The driver applies one action per call (`act`) to the screen the stand-in saw;
+if the screen changed while the stand-in was deciding, nothing is sent and the
 loop asks again with the new screen. `busy` waits for the screen to change or the
 turn to end (`await_change`), bounded by `SCREEN_WAIT_SECONDS` (60 s) in total per
 screen; on expiry the loop stops with `needs_input` (`SCREEN_WAIT_EXPIRED`).
@@ -398,12 +450,12 @@ actions and `SCREEN_WAITS` (4) busy waits, and the whole loop at most
 `SCREEN_STEPS` (32) steps; exceeding either stops with `needs_input`. Each step
 journals a `screen-step` event (call ID, kind, action, target, resulting state and
 reason). A screen left after at least one sent key records its own `dialog`
-`answered` workflow event with that screen's simulator call IDs, like a selection
+`answered` workflow event with that screen's stand-in call IDs, like a selection
 dialog, as soon as the next screen appears, even if that one is then judged an
 approval; leaving through cancellation, timeout, subject exit or a lost key
 acknowledgement records none, and a lost acknowledgement stops with `needs_input`.
-Help-needed never counts screen decisions as conversational replies, answered or
-not. Calls count against the simulator budget as usual. Screens that appear before
+Screen decisions never count as stand-in exchanges for elicited credit, answered or
+not. Calls count against the stand-in budget as usual. Screens that appear before
 Enter was sent, or at startup, still stop as before.
 
 ## Durable recovery and assessment integration
@@ -482,5 +534,5 @@ grading and finished. `capture_id` is immutable across these transitions;
 `assessment_id` names the retained result object. Its service must validate its own
 assessment objects before saving the result ID. `run --resume` skips all those
 stages, and pending assessment excludes finished attempts. These transitions
-require no subject or simulator call. The journal remains the source of truth;
+require no subject or stand-in call. The journal remains the source of truth;
 checkpoint/result files are derived snapshots.

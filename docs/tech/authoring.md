@@ -2,7 +2,9 @@
 
 For the selected-log workflow, see [the user guide](../user/selected-log-authoring.md).
 `authoring_catalog.py` owns a strict version-1 bounded catalog at the initialized
-workspace's authoring directory. Directory flock serializes writers; every write
+workspace's authoring directory (`.dryheave/authoring`, catalog state only;
+authored voices, cases and reports live in the visible `voices/`, `cases/` and
+`reports/` folders, see [workspace setup](../user/workspaces.md)). Directory flock serializes writers; every write
 checks the expected catalog revision and atomically publishes the next one.
 Malformed, stale or symlinked content is preserved as an error. Selection membership
 pins immutable session IDs and cannot be replaced. Requests retain policy, typed
@@ -107,8 +109,8 @@ exists to offer something to read, not to claim a finding.
 Merge commits are excluded: a merge records no single starting state, so the parent join
 has no defined key, and `collect commit` refuses one outright. Commits touching only
 documentation or only configuration are excluded as well. That is a deliberate decision,
-not an oversight: a benchmark case needs a behavior change a hidden deterministic
-verifier can execute and a calibration can show failing at the baseline, and a commit
+not an oversight: a benchmark case needs a behavior change a hidden verifier
+can execute and a calibration can show failing at the baseline, and a commit
 that only edits Markdown or a settings file leaves nothing to verify. Exclusions are
 counted and listed with their reason in `excluded`, so a documentation-heavy window
 reads as excluded work rather than as an empty repository. Classification is by path
@@ -223,6 +225,11 @@ The shipped authoring commands use the same global `--store PATH` and `--json`
 options as the storage commands. Development examples below use `.dryheave`,
 which is ignored. Draft files are editable JSON; creation refuses to overwrite an
 existing file. `validate` and `freeze` return nonzero for unresolved inputs.
+In a workspace, freezing a draft at `cases/NAME/case.json` (by `case freeze` or
+`problem freeze`) then sets store alias `NAME` to the new case ID with
+`ObjectStore.set_alias(..., replace=True)` and reports `alias`; a failed alias write
+is reported as `alias_error` and leaves the frozen case in place. Other drafts set
+no alias.
 
 ```sh
 uv run dryheave --store .dryheave collect scan --agent codex --root LOG_DIRECTORY --json
@@ -248,13 +255,16 @@ the curator still determines intent, task boundaries and grading.
 ## Authoring and visibility
 
 The draft needs `intent_confirmed: true`, `facts_reviewed: true`, at least one
-required grading criterion, and an empty `unresolved_issues` list after those
-issues are resolved. The reviewed `allowed_facts` list may be empty when the
-initial prompt fully specifies the task. Facts contain stable `fact_id`, text,
-`disclosure` (`on_request` or `proactive`) and source evidence, or the explicit
-`curator_authored: true` declaration. A persona needs instructions, disclosure
-and unknown-answer policies and `reviewed_subject_safe: true`. Persona examples
-and fact evidence must be classified `subject` after reviewing for solution text.
+declared phase, at least one requirement fact, a requirement fact in every phase,
+and an empty `unresolved_issues` list after those issues are resolved. These rules
+run in `case validate`, `case freeze` and `FrozenCase`; a draft with no phases yet
+still parses. Facts contain stable `fact_id`, `kind`, `phase`, `text`, `check`,
+`disclosure` (`on_request` or `proactive`), an optional `verifier` and source
+evidence, or the explicit `curator_authored: true` declaration. See
+[Facts, phases, checks and verifiers](#facts-phases-checks-and-verifiers). A persona
+needs instructions, disclosure and unknown-answer policies and
+`reviewed_subject_safe: true`. Persona examples and fact evidence must be classified
+`subject` after reviewing for solution text.
 
 A draft selects exactly one inline `persona` or immutable `persona_id`. Standalone
 `persona create` freezes a curated JSON file; `persona draft` makes an editable
@@ -273,58 +283,96 @@ For replay, call `cases.load_frozen_case(store, reference)`,
 `personas.load_frozen_persona(store, reference)` and
 `repositories.load_repository(store, reference)`. These validate domain invariants,
 manifest blob maps and reference closure without consulting original sessions.
-`FrozenCase` itself rejects unreviewed facts, unresolved intent and missing or
-nonunique required grading criteria. Generic `ObjectStore.get` checks storage
+`FrozenCase` itself rejects unreviewed facts, unresolved intent, undeclared phases,
+phases without a requirement and duplicate fact IDs. Generic `ObjectStore.get` checks storage
 integrity; callers must still use these domain validators for runtime inputs.
 
-`cases.subject_context(case)` returns only initial prompt and allowed facts.
+`cases.subject_context(case)` returns only initial prompt and each fact's ID, text and
+disclosure; `check` and `verifier` never leave curator, inspector and judge code.
 `personas.subject_persona(persona)` returns only communication policies and
-reviewed example strings. The full case, snapshot provenance, grading criteria,
+reviewed example strings. The full case, snapshot provenance, fact checks, rubrics,
 reference patch and store paths belong to curator/judge code. These projections
 are intentional visibility boundaries; they do not prove semantic non-leakage.
 
-## Setup and grading handoff
+## Facts, phases, checks and verifiers
 
-`CaseContent.setup` contains ordinary `CommandSpec` values with argv, relative cwd,
-timeout/output bounds and inherited environment-name references. It does not run
-commands during authoring. `CaseBudgets` separates subject duration, accepted-turn
-budget and setup duration. `CapturePolicy` freezes file/byte/depth limits and
-explicit relative-path exclusions and ignored-file inclusions for the runner.
-
-A deterministic criterion looks like this in draft JSON:
+A case declares `phases`, an ordered tuple of names, and `allowed_facts`, the
+requirements the user knew they wanted:
 
 ```json
 {
-  "criterion_id": "greeting",
-  "kind": "deterministic",
-  "description": "The greeting includes the requested punctuation and name.",
-  "required": true,
-  "entrypoint": "check.py",
-  "command": {
-    "argv": ["python3", "{verifier}/check.py"],
-    "timeout_seconds": 30,
-    "max_output_bytes": 65536
-  },
-  "expected_stdout": "GREETING_CHECK_EXECUTED",
-  "expected_failure_stdout": "GREETING_ASSERTION_FAILED",
-  "suite_id": null,
-  "calibration": "uncalibrated"
+  "phases": ["fix"],
+  "allowed_facts": [
+    {
+      "fact_id": "empty-name",
+      "kind": "requirement",
+      "phase": "fix",
+      "text": "An empty name should still greet with a trailing space.",
+      "check": "Calling greet with an empty name returns 'Hello, ' and does not raise.",
+      "disclosure": "on_request",
+      "curator_authored": true
+    },
+    {
+      "fact_id": "greeting-punctuation",
+      "kind": "requirement",
+      "phase": "fix",
+      "text": "The greeting uses a comma after Hello.",
+      "verifier": {
+        "entrypoint": "check.py",
+        "command": {
+          "argv": ["python3", "{verifier}/check.py"],
+          "timeout_seconds": 30,
+          "max_output_bytes": 65536
+        },
+        "expected_stdout": "GREETING_CHECK_EXECUTED",
+        "expected_failure_stdout": "GREETING_ASSERTION_FAILED"
+      },
+      "curator_authored": true
+    }
+  ]
 }
 ```
 
+`kind` is `requirement` (gates the outcome and the independence score), `optional`
+(graded and raised in its phase, never gating) or `context` (background the user
+user stand-in may share; no phase, check or verifier). Requirement and optional facts name
+a declared phase and carry a `check`, a `verifier`, or both. `text` is what the user
+knows and is the only part the stand-in sees. `check` is the precise pass condition
+for the inspector and judge; it must be substantive (placeholders are rejected) and
+is never shown to the stand-in or the subject. `disclosure: "proactive"` marks a
+fact the user would volunteer; it is graded but excluded from the independence score.
+Fact IDs must be unique and cannot collide with a rubric criterion ID.
+
+A fact without a verifier is judged: the judge answers `met`, `unmet` or `unclear`
+with an observation of what a user would see (at most 600 characters) and evidence
+(a file and lines, or command output; empty evidence counts as unclear), from the
+final files and the transcript. A fact with a verifier is decided by running the
+hidden command instead; a model never overrides it.
+
 The draft's `hidden_files` maps verifier-relative targets to explicitly selected
-source paths, resolved relative to the draft JSON directory. Frozen cases map
-those targets to immutable blob names such as `verifiers/check.py`. A deterministic
-command must name its hidden entrypoint as the exact argv element
-`{verifier}/ENTRYPOINT`; the grader substitutes its private verifier directory
-without shell interpolation. It must execute from an independent final-workspace
-copy, use the trusted entrypoint bytes, and require both a successful exit and the
-expected stdout sentinel. Positive nonzero exits require `expected_failure_stdout`,
-or the common `expected_stdout` marker when no separate failure marker is configured.
-Missing evidence and signal termination are errors, so syntax/import/setup failures
-cannot become task failures or demonstrated baseline calibration. Emit success only
-after all checks pass, and catch only expected assertion failures around the bounded
-checks:
+source paths, resolved relative to the draft JSON directory (so keep them in
+`cases/NAME/`). Frozen cases map those targets to immutable blob names such as
+`verifiers/check.py`. A verifier command must name its hidden entrypoint as the
+exact argv element `{verifier}/ENTRYPOINT`; the grader substitutes its private
+verifier directory without shell interpolation. It must execute from an independent
+final-workspace copy, use the trusted entrypoint bytes, and require both a
+successful exit and the expected stdout sentinel. Positive nonzero exits require
+`expected_failure_stdout`, or the common `expected_stdout` marker when no separate
+failure marker is configured. Missing markers and signal termination are execution
+errors. Calibration is stricter than grading: only a marker-confirmed failure
+demonstrates the baseline, so a verifier that crashes during calibration is broken
+and calibration is `unavailable`. On an agent's tree, inspection and final grading
+share one classifier (`result_models.verifier_verdict`): a verifier that started and
+exited without its success marker (a crash, an import or syntax error, a signal, a
+kill at its output bound, or a timeout short of the inspection deadline) is `unmet`,
+because calibration already showed it runs on the baseline and the reference. Only a
+harness-side failure gives no result (`unclear` during inspection, `grading_error` at
+the end): the verifier could not be launched, its workspace copy could not be
+restored, its cleanup could not be confirmed, its hidden inputs changed, or the
+inspection deadline cut it short. An attempt where a requirement
+verifier crashed while its assessment's own reference run did not pass is excluded as
+`verifier_uncalibrated`, so a broken verifier cannot produce false fails. Emit success only after all checks pass, and catch only
+expected assertion failures around the bounded checks:
 
 ```python
 import runpy
@@ -340,73 +388,30 @@ print("GREETING_CHECK_EXECUTED", flush=True)
 ```
 
 Keep verifier imports and setup outside that assertion wrapper. A success marker
-printed before the checks does not establish their execution.
+printed before the checks does not establish their execution. Default
+`suite_id: null` means an independent copy per fact; a shared non-null suite ID runs
+those verifier facts in saved order on the same copy. `reference_patch` optionally
+names a curator-only source file; freeze stores it as `reference.patch`. Authoring
+validation rejects empty entrypoints, missing files, blank sentinels and obvious
+placeholders; it cannot prove that a curator's program tests the intended behavior.
 
-Default `suite_id: null` means an independent copy per criterion. A shared non-null
-suite ID declares a suite whose criteria execute in saved order on the same copy.
-A judge criterion has `criterion_id`, `kind: "judge"`, `required` and a substantive
-`rubric`. `reference_patch` optionally names a curator-only source file; freeze
-stores it as `reference.patch`. `case calibrate CASE_REF` executes baseline/reference
-checks before a subject run; setup belongs to later runner execution. Authoring validation rejects empty entrypoints,
-missing files, blank sentinels, obvious placeholders and empty rubrics; it cannot
-prove that a curator's program tests the intended behavior. Criteria remain
-explicitly uncalibrated in immutable case objects. Standalone calibration records
-and later assessment records establish observed calibration without mutating inputs.
+`CaseContent.setup` contains ordinary `CommandSpec` values with argv, relative cwd,
+timeout/output bounds and inherited environment-name references. It does not run
+commands during authoring. `CaseBudgets` separates subject duration and setup
+duration; turn, stand-in reply and inspection budgets are run options (`bench
+--max-turns`, `--stand-in-replies`, `--max-inspections`, or `--budget-from`), not
+case fields. `CapturePolicy` freezes file/byte/depth limits and explicit
+relative-path exclusions and ignored-file inclusions for the runner.
 
-A case can also declare `checks` and `metrics` commands, both optional; checks
-are graded only when the experiment has a judge:
-
-```json
-{
-  "checks": [
-    {
-      "check_id": "error-path-handled",
-      "question": "Does the final code handle a malformed input without raising?",
-      "expect": "yes"
-    },
-    {
-      "check_id": "tests-cover-error-path",
-      "question": "Do the added tests exercise the malformed input?",
-      "expect": "yes",
-      "only_if": {"check_id": "error-path-handled", "answer": "yes"}
-    }
-  ],
-  "metrics": [
-    {
-      "metrics_id": "test-run",
-      "description": "Runs the project's test command and parses pass/fail counts.",
-      "entrypoint": "metrics.py",
-      "command": {"argv": ["python3", "{verifier}/metrics.py"], "timeout_seconds": 1800}
-    }
-  ],
-  "disabled_rubrics": ["test-quality"]
-}
-```
-
-Each `CaseCheck` needs a unique `check_id` and a substantive yes/no `question`
-(10-4000 characters); `expect` is the answer that counts as a pass. An
-optional `only_if` names an earlier check's `check_id` and expected `answer`;
-validation rejects a duplicate ID or an `only_if` that references a check not
-already declared earlier in the list. The judge is sent only `check_id` and
-`question` for every check — never `expect` or `only_if` — and judges the
-journey from a transcript of the subject's turns and tool actions plus the
-end state from the final files. The transcript carries every user and
-assistant message, but each tool action only as its tool name, target path
-and at most the first 600 characters of its input, so intermediate file
-contents cannot be reconstructed from it. When the projection exceeds the
-judge's input bound, actions are dropped from the middle of the session; if
-the messages alone still do not fit, the transcript is sent empty. Either way
-`transcript_truncated` is true. Its answer maps to a `CheckResult`: when
-`only_if` is declared and the earlier check was `not_applicable` or answered
-anything other than the named `answer` (including `unclear` or no answer),
-the outcome is `not_applicable`; otherwise `answer == expect` is `pass`,
-`unclear` is `error`, and anything else is `fail`.
+`criteria` holds non-gating quality rubrics: a `RubricCriterion` has `criterion_id`,
+`kind: "judge"` and a substantive `rubric`. They are scored when the experiment has
+a judge and never change the outcome. `metrics` commands count what a script can.
 
 A `MetricsCommand` measures things a script can count instead of judging
 them, e.g. a test run, a coverage diff or a line count. `metrics_id` must be
 unique among metrics entries, `description` must be substantive (not a
 placeholder), `entrypoint` is mapped in `hidden_files` exactly like a
-deterministic verifier's, and `command.argv` must contain the exact element
+fact verifier's, and `command.argv` must contain the exact element
 `{verifier}/ENTRYPOINT`. The frozen command runs once, on its own copy of the
 captured final files with a separate read-only baseline copy. Paths the case's
 `capture_policy` excludes are absent from that copy, so a script that needs
@@ -436,34 +441,44 @@ non-zero exit, timeout, invalid JSON or any contract violation produces a
 `MetricsResult` with `outcome: "error"` and a reason instead of raising, so a
 script can deliberately report a failed build as a metric value rather than
 erroring, and a crash never aborts the rest of the assessment. Metrics never
-affect `completion` or eligibility.
+affect the outcome or eligibility.
 
 Three default rubrics — `code-quality`, `codebase-consistency` and
 `test-quality` (`rubrics.DEFAULT_RUBRIC_SET`, currently `default-v1`) — are
 applied to every case automatically, but only when the experiment has a
 judge; without one, no default criteria are added. A case overrides one by
 declaring a `RubricCriterion` whose `criterion_id` matches a default id: its
-`rubric` text replaces the default's, and the case's own `required` applies
-instead of the default's. `disabled_rubrics` lists default ids to drop
+`rubric` text replaces the default's. `disabled_rubrics` lists default ids to drop
 entirely for this case; validation rejects any id there that is not one of
 the three default ids. `Assessment.rubric_set` records which default version
 graded a given attempt.
 
-`calibrations.calibrate_case` uses the neutral `VerifierContext` and shared
-`grading.check_copy`/`execute_check` operations. Each baseline/reference side is an
-independent repository copy. Non-null suite IDs share a copy only within that side,
-with criteria in frozen order. Neither calibration nor assessment runs `case.setup`
-on verifier copies; dependencies must be available through trusted executables and
-explicit inherited environment references. No grading model is called.
+`calibrations.calibrate_case` grades every requirement and optional fact on the
+baseline (it must be unmet) and on the reference patch (it must be met) using the
+neutral `VerifierContext` and shared `grading.check_copy`/`execute_check`
+operations. Each side is an independent repository copy; verifier facts sharing a
+`suite_id` share a copy within that side, in frozen order. Facts without a verifier
+are judged together, one judge call per side, so `case calibrate --judge
+MODEL[@EFFORT]` is required when such facts exist (a case of verifier-only facts
+needs none). Neither calibration nor assessment runs `case.setup` on verifier
+copies; dependencies must be available through trusted executables and explicit
+inherited environment references. A fact is `ineffective` (flagged
+`met_on_baseline` or `unmet_on_reference`), `demonstrated` (unmet then met) or
+`unavailable` (unclear verdicts, a missing reference, verifier errors); the case
+status is `demonstrated` only when every fact is, `ineffective` when any is flagged,
+`unavailable` otherwise, and `not_applicable` without graded facts. `flagged` in the
+command result lists each flagged `fact_id` with its flags. A judge verdict is not
+an executed check, and calibration records say so in their limitations.
 
-The standalone `calibration` object stores exact `case_id`, ordered `criteria_id`,
-per-criterion `verifier_id` (criterion definition plus all hidden byte hashes),
-execution results, evidence hashes and cleanup. It references only the exact case;
-no run, capture or Assessment is synthesized. `load_calibration` checks these
-identities against the frozen case, verifies retained result/output hashes and
-observed pass/fail markers, and requires stopped owned writers. Explicit omissions
-prevent demonstrated status. Export/import requires `calibration-evidence` and
-preserves the exact record/input closure; source sessions are still optional.
+The standalone `case-calibration` object stores the exact `case_id`, a `facts_id`
+digest over the graded facts and hidden byte hashes, each fact's verdicts,
+verifier executions or judgments, the judge calls, evidence hashes and cleanup. It
+references only the exact case; no run, capture or Assessment is synthesized.
+`load_calibration` checks these identities against the frozen case, verifies
+retained result/output hashes and observed pass/fail markers, and requires stopped
+owned writers. Explicit omissions prevent demonstrated status. Export/import
+requires `calibration-evidence` and preserves the exact record/input closure;
+source sessions are still optional.
 
 `case calibration ID [--evidence PATH --offset N --limit N]` validates the record
 and reads bounded output slices. The service holds the store native lock and an
@@ -477,53 +492,58 @@ fresh copies; it does not infer results from interrupted work.
 ## Workflows
 
 A case is personal: it captures one person's real workflow, including the
-reviews, manual testing, QA and documentation habits they actually followed, not
-an idealized task stripped of those habits. `CaseContent.workflow` is an ordered
-tuple of `InspectStep` and `PromptStep` entries (`cases.WorkflowStep`), each with
-a unique `step_id`. A `PromptStep` sends its `prompt` text once: a skill
-invocation such as `/code-review --quick`, or a plain instruction such as
-"update the docs". Claude gets it verbatim; a Codex variant on its live config
-gets a `/name args` prompt as the skill mention `$name args`, and the run is
-refused unless its Codex config has `skills/name/SKILL.md`. A `PromptStep` may
-carry an `answer_hint` guiding how the simulated user answers any dialog that step
-triggers; a prompt cannot be one of the built-in commands that produce no model
-turn (`cases.NO_TURN_COMMANDS`: `/clear`, `/compact`, `/exit`, `/quit`, `/resume`,
+reviews, QA and documentation habits they actually followed, not an idealized task
+stripped of those habits. `CaseContent.workflow` is an ordered tuple of
+`PromptStep` entries, each with a unique `step_id`, a `prompt` and an `after_phase`
+naming a declared phase; steps must be ordered by phase. A step sends its `prompt`
+once: a skill invocation such as `/code-review --quick`, or a plain instruction such
+as "update the docs". Claude gets it verbatim; a Codex variant on its live config
+gets a `/name args` prompt as the skill mention `$name args`, and the run is refused
+unless its Codex config has `skills/name/SKILL.md`. A step may carry an
+`answer_hint` guiding how the stand-in answers any dialog that step triggers. A
+prompt cannot be one of the built-in commands that produce no model turn
+(`cases.NO_TURN_COMMANDS`: `/clear`, `/compact`, `/exit`, `/quit`, `/resume`,
 `/rewind`, `/login`, `/logout`), and cannot start with `$` or `!`: a skill step is
-written `/name` for every agent, and Codex receives it as `$name`. An
-`InspectStep` names the criteria the user would check at that point — case
-criterion IDs or non-disabled default rubric IDs — and represents the user
-looking at the work and judging it against what they can observe.
+written `/name` for every agent, and Codex receives it as `$name`.
 
-Steps advance only at a simulator "done" stop. At that point, a `prompt` step is
-delivered and the workflow advances to the next step; an `inspect` step is
-checked, and on failure the run receives a user-voice fix-it reply and the same
-step is retried at the next done point, while on success the workflow silently
-advances and continues evaluating the next step at the same done point. The
-workflow completes, and the run stops with `stop_reason="workflow_complete"`,
-once every step has passed or been delivered. `cases.effective_workflow(case,
-enabled=..., inspected=...)` computes the workflow actually run: the empty
-tuple when workflows are disabled for the run; the case's declared `workflow`
-when it has one; otherwise, when the run has an inspector and the case declares
-at least one required criterion, a single default `InspectStep` named
-`inspect-required` over those required criteria IDs; otherwise the empty tuple
-(today's behaviour, no workflow). `workflow.next_workflow_action(steps,
-position)` is the pure step-transition function the runner drives this loop
-with, returning `"deliver_prompt"`, `"inspect"` or `"complete"` for a given
-position.
+The runner inspects at each done point (the stand-in says the work is done, or a
+prompt step comes due). One inspector call judges every requirement and optional
+fact on the current snapshot; verifier facts run their verifier instead. Facts that
+come back `unclear` are re-judged once, and unclear facts that are the only blockers
+do not stop the run advancing. An earlier inspection is reused only when the digest
+of snapshot, transcript and fact set matches. Every inspection is journaled with its
+intent first and its result after, and only feeds feedback and workflow metrics: it
+never decides pass or fail, and its snapshot is never graded.
 
-Authors write inspect criteria as a dedicated, observable judge or deterministic
-criterion — what a user sees using the result, such as a UI behaving correctly
-or a command printing the right thing — and keep their correctness criterion
-held out, graded only at final assessment as every criterion already is.
-`CaseContent.workflow` is dropped from serialization when empty, so cases
-without one keep their existing object ID.
+`workflow.next_workflow_action(case, position, verdicts)` is the pure transition
+function. The blocking phase is the earliest phase with an unmet requirement
+(`blocking_phase`, which also catches regressions in earlier phases). A pending
+prompt step is delivered once its `after_phase` precedes the blocking phase, that
+is, once every requirement of phases up to and including `after_phase` is met;
+otherwise a blocker means `raise`, and no blocker with no pending step means
+`complete`. To raise, the stand-in is handed that phase's unmet requirement facts
+(plus its unmet optional facts), as `text` and the observation, never the `check`,
+and asked to describe what it saw in the user's own words. When the agent accepts
+the resulting fix-request turn the run journals a `raise` event with the handed set;
+a fallback reply is journaled the same way with cause `fallback`. After the last
+prompt step a closing inspection always runs. All requirements met with no pending
+steps ends the attempt with `stop_reason="workflow_complete"`.
 
-`dryheave run --workflow` turns this on for a plain `run`. `bench` turns it on
-by default; `--no-workflow` disables it for a first-shot comparison against the
-full workflow, and also skips the launch check's slash-step probe. `bench
---inspector MODEL[@EFFORT]` sets `ScoringConfig.inspector` for inspect steps,
-defaulting to the judge's model when omitted; `bench` refuses, before any spend,
-a workflow-enabled run whose case has an inspect step but no judge or inspector.
+Budgets come from `RunOptions.budget` (`RunBudget`): `max_turns` (default 60) caps
+accepted subject turns, `stand_in_replies` (40) caps stand-in calls and
+`max_inspections` (20) caps inspections, which no longer count against turns or
+subject time. Exhaustion ends the attempt with its own stop reason and grades as
+`fail` with reason `budget_exhausted`. `bench --budget-from PILOT_RUN` derives
+ceil(used x 1.5) + 5 for each figure from a passed single-attempt pilot and records
+the pilot in `RunOptions.pilot_run`; the pilot must share the benchmark's case,
+stand-in, scoring and workflow identities.
+
+`CaseContent.workflow` is dropped from serialization when empty. `dryheave run
+--workflow` turns the workflow on for a plain `run`. `bench` turns it on by default;
+`--no-workflow` sends only the initial prompt and disables inspection, raising and
+prompt steps, and also skips the launch check's slash-step probe. `bench --inspector
+MODEL[@EFFORT]` sets `ScoringConfig.inspector` for the inspections, defaulting to the
+judge's model when omitted.
 
 ## Historical repository snapshots
 

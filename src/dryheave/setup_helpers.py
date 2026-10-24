@@ -25,7 +25,7 @@ def runtime_references(
 ) -> tuple[RuntimeFileReference, ...]:
     if bool(source_environment) != acknowledge:
         raise InputError(
-            "Auth-file binding requires both --auth-file-env and --acknowledge-auth-source-writes (use simulator-prefixed flags for an experiment)."
+            "Auth-file binding requires both --auth-file-env and --acknowledge-auth-source-writes (use stand-in-prefixed flags for an experiment)."
         )
     if source_environment is None:
         return ()

@@ -377,7 +377,7 @@ def call_metrics(
     for call in calls:
         if recipe is not None and recipe.kind == "scripted" and call.status == "completed":
             charges.append(
-                fixture_charge(call.call_id, "Explicit scripted simulator made no model call.")
+                fixture_charge(call.call_id, "Explicit scripted stand-in made no model call.")
             )
             continue
         usage = call_usage_with_raw_split(call.usage, (raw_stdout or {}).get(call.call_id))

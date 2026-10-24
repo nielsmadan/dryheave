@@ -192,11 +192,11 @@ def test_corrupt_available_secondary_session_is_an_export_error(store, multi_sou
 @pytest.mark.parametrize(
     "selection, present, absent",
     [
-        (("captures",), "simulator requests and responses", "judge requests and responses"),
+        (("captures",), "stand-in requests and responses", "judge requests and responses"),
         (
             ("assessment-evidence",),
             "judge requests and responses",
-            "simulator requests and responses",
+            "stand-in requests and responses",
         ),
     ],
 )
@@ -220,7 +220,7 @@ def test_individual_sensitive_classes_disclose_their_actual_boundaries(
     kinds = {target.get(identifier).kind for identifier in restored.objects}
     expected = ObjectKind.CAPTURE if selection == ("captures",) else ObjectKind.ASSESSMENT_EVIDENCE
     assert expected in kinds
-    assert report_run(target, restored.roots[0]).attempts[0].result.completion == "pass"
+    assert report_run(target, restored.roots[0]).attempts[0].result.outcome == "pass"
 
 
 def test_bundle_mutation_and_path_traversal_publish_no_objects(store, benchmark, tmp_path):

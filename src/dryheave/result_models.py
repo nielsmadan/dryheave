@@ -9,11 +9,33 @@ from pydantic import (
     model_validator,
 )
 
+from dryheave.cases import FactKind
 from dryheave.models import Name, ObjectId, RunId, StrictModel, TokenUsage
 from dryheave.runner_models import WorkflowEvent
 
 Outcome = Literal["pass", "fail", "error", "not_run"]
 InspectionVerdict = Literal["passed", "failed", "unavailable", "none"]
+FinalInspection = Literal["passed", "failed", "unavailable", "unknown", "none"]
+AttemptOutcome = Literal["pass", "fail", "indeterminate"]
+OutcomeReason = Literal[
+    "all_met",
+    "unmet",
+    "budget_exhausted",
+    "disputed",
+    "unclear",
+    "phase_unreached",
+    "grading_error",
+]
+FactCredit = Literal["own", "elicited", "corrected", "unmet", "unreached"]
+FinalVerdict = Literal["met", "unmet", "unclear", "disputed"]
+VerifierVerdict = Literal["met", "unmet"]
+VERIFIER_HARNESS_ERRORS = frozenset(
+    {"verifier_cleanup_failed", "hidden_verifier_changed", "deadline_exhausted"}
+)
+VERIFIER_PROCESS_ENDINGS = frozenset({"exited", "timeout", "output_limit"})
+FACT_TEXT_CHARACTERS = 600
+FACT_EVIDENCE_CHARACTERS = 8000
+MAX_UNCOVERED = 20
 
 
 class AuditFinding(StrictModel):
@@ -52,6 +74,16 @@ class CheckExecution(StrictModel):
     error: str | None = None
 
 
+def verifier_verdict(execution: CheckExecution) -> VerifierVerdict | None:
+    if (
+        execution.returncode is None
+        or execution.process_outcome not in VERIFIER_PROCESS_ENDINGS
+        or execution.error in VERIFIER_HARNESS_ERRORS
+    ):
+        return None
+    return "met" if execution.outcome == "pass" else "unmet"
+
+
 class Calibration(StrictModel):
     status: Literal["demonstrated", "ineffective", "unavailable"] = "unavailable"
     baseline: CheckExecution | None = None
@@ -70,20 +102,41 @@ class CriterionResult(StrictModel):
     error: str | None = None
 
 
-Answer = Literal["yes", "no", "unclear"]
+class FactResult(StrictModel):
+    fact_id: Name
+    kind: FactKind
+    phase: Name
+    verdict: FinalVerdict
+    observation: str = Field(max_length=FACT_TEXT_CHARACTERS)
+    evidence: str = Field(max_length=FACT_EVIDENCE_CHARACTERS)
+    source: Literal["verifier", "judge"]
 
 
-class CheckResult(StrictModel):
-    check_id: Name
-    outcome: Literal["pass", "fail", "not_applicable", "error"]
-    answer: Answer | None = None
+class FactProgress(StrictModel):
+    fact_id: Name
+    kind: FactKind
+    phase: Name
+    credit: FactCredit
+    raised: int = Field(ge=0)
+    elicited: bool
+    first_inspection: Literal["met", "unmet", "unclear"] | None = None
+    regressions: int = Field(default=0, ge=0)
 
 
-class HelpNeeded(StrictModel):
-    simulator_replies: int = Field(ge=0)
-    facts_disclosed: tuple[Name, ...]
-    proactive_facts: tuple[Name, ...]
-    on_request_facts: tuple[Name, ...]
+class PhaseCorrections(StrictModel):
+    phase: Name
+    rounds: int = Field(ge=0)
+    raised: tuple[Name, ...] = ()
+
+
+class FactAccount(StrictModel):
+    independence: float | None = Field(ge=0, le=1)
+    stand_in_replies: int = Field(ge=0)
+    fix_rounds: int = Field(ge=0)
+    reached_phases: tuple[Name, ...]
+    unreached_phases: tuple[Name, ...] = ()
+    corrections: tuple[PhaseCorrections, ...] = ()
+    facts: tuple[FactProgress, ...] = ()
 
 
 class WorkflowOutcome(StrictModel):
@@ -91,9 +144,11 @@ class WorkflowOutcome(StrictModel):
     completed_steps: int = Field(ge=0)
     inspections: int = Field(ge=0)
     fix_requests: int = Field(ge=0)
+    fallbacks: int = Field(default=0, ge=0)
     dialogs_answered: int = Field(ge=0)
     first_inspection: InspectionVerdict
-    final_inspection: Literal["passed", "failed", "unavailable", "not_reached", "none"]
+    final_inspection: FinalInspection
+    completed: bool = False
     inspection_seconds: float = Field(ge=0)
     events: tuple[WorkflowEvent, ...] = ()
 
@@ -150,7 +205,7 @@ class UsageCharge(StrictModel):
 
 
 class RoleMetrics(StrictModel):
-    role: Literal["subject", "simulator", "judge"]
+    role: Literal["subject", "stand_in", "judge"]
     records: tuple[UsageCharge, ...]
     known_tokens: TokenUsage
     known_cost: float | None = Field(default=None, ge=0)
@@ -160,7 +215,7 @@ class RoleMetrics(StrictModel):
 
 
 class Assessment(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     kind: Literal["assessment"] = "assessment"
     run_id: RunId
     experiment_id: ObjectId
@@ -170,7 +225,7 @@ class Assessment(StrictModel):
     quarantine_id: ObjectId | None = None
     case_id: ObjectId | None
     profile_id: ObjectId | None
-    simulator_id: ObjectId | None
+    stand_in_id: ObjectId | None
     scoring_id: ObjectId | None
     criteria_id: ObjectId | None
     variant: Name | None
@@ -181,9 +236,11 @@ class Assessment(StrictModel):
     phase: Literal["audited", "finished"]
     audit: AuditReport
     reviews: tuple[AuditReview, ...] = ()
+    facts: tuple[FactResult, ...] = ()
     criteria: tuple[CriterionResult, ...] = ()
-    deterministic_completion: Literal["pass", "fail", "indeterminate"] = "indeterminate"
-    completion: Literal["pass", "fail", "indeterminate"] = "indeterminate"
+    outcome: AttemptOutcome = "indeterminate"
+    outcome_reason: OutcomeReason | None = None
+    uncovered: tuple[str, ...] = Field(default=(), max_length=MAX_UNCOVERED)
     eligible: bool = False
     exclusion_reasons: tuple[str, ...]
     stop_reason: str
@@ -195,9 +252,8 @@ class Assessment(StrictModel):
     evidence_id: ObjectId | None = None
     evidence_complete: bool = True
     previous_id: ObjectId | None = None
-    checks: tuple[CheckResult, ...] = ()
     metrics: tuple[MetricsResult, ...] = ()
-    help_needed: HelpNeeded | None = None
+    fact_account: FactAccount | None = None
     workflow: WorkflowOutcome | None = None
     rubric_set: str | None = None
     graded_case_id: ObjectId | None = None
@@ -220,7 +276,7 @@ class Assessment(StrictModel):
         if self.eligible and (
             self.phase != "finished"
             or self.exclusion_reasons
-            or self.completion == "indeterminate"
+            or self.outcome == "indeterminate"
             or self.audit.input_integrity != "verified"
             or self.audit.capture_integrity != "verified"
             or self.audit.cleanup != "stopped"
@@ -230,21 +286,30 @@ class Assessment(StrictModel):
             raise ValueError("eligible assessments require finished, scorable, unexcluded results")
         if len({item.criterion_id for item in self.criteria}) != len(self.criteria):
             raise ValueError("criterion results must be distinct")
-        if len({item.check_id for item in self.checks}) != len(self.checks):
-            raise ValueError("check results must be distinct")
+        if len({item.fact_id for item in self.facts}) != len(self.facts):
+            raise ValueError("fact results must be distinct")
+        if any(len(item) > FACT_TEXT_CHARACTERS for item in self.uncovered):
+            raise ValueError(f"uncovered problems are at most {FACT_TEXT_CHARACTERS} characters")
         if len({item.metrics_id for item in self.metrics}) != len(self.metrics):
             raise ValueError("metrics results must be distinct")
-        if tuple(item.role for item in self.roles) != ("subject", "simulator", "judge"):
-            raise ValueError("role accounting must cover subject, simulator and judge")
+        if tuple(item.role for item in self.roles) != ("subject", "stand_in", "judge"):
+            raise ValueError("role accounting must cover subject, stand-in and judge")
         return self
 
     @model_serializer(mode="wrap")
     def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         value: dict[str, object] = handler(self)
-        for name in ("checks", "metrics"):
+        for name in ("metrics", "uncovered"):
             if not getattr(self, name):
                 value.pop(name, None)
-        for name in ("rubric_set", "help_needed", "workflow", "graded_case_id", "regrade_id"):
+        for name in (
+            "rubric_set",
+            "fact_account",
+            "workflow",
+            "graded_case_id",
+            "regrade_id",
+            "outcome_reason",
+        ):
             if getattr(self, name) is None:
                 value.pop(name, None)
         return value

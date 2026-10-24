@@ -448,7 +448,8 @@ td {
   overflow-wrap: anywhere;
 }
 
-.dialogue {
+.dialogue,
+.lane-log {
   display: grid;
   gap: 0.5rem;
   list-style: none;
@@ -471,6 +472,24 @@ td {
   text-transform: uppercase;
 }
 
+.lanes {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.lane {
+  min-width: 0;
+}
+
+.turn.scene {
+  border-left-color: var(--warn);
+}
+
+.turn.gap {
+  border-left-color: var(--bad);
+}
+
 .block {
   background: light-dark(#f2f4f7, #12151a);
   border: 1px solid var(--line);
@@ -491,6 +510,10 @@ td {
   }
 
   .definitions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lanes {
     grid-template-columns: minmax(0, 1fr);
   }
 

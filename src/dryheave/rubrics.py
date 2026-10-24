@@ -3,9 +3,9 @@ from pydantic import JsonValue
 from dryheave.cases import (
     DEFAULT_RUBRIC_IDS,
     CaseContent,
-    DeterministicCriterion,
     FrozenCase,
     RubricCriterion,
+    graded_facts,
 )
 from dryheave.serialization import canonical_json, digest
 
@@ -50,14 +50,12 @@ _DEFAULT_TEXTS = {
 
 def default_rubrics() -> tuple[RubricCriterion, ...]:
     return tuple(
-        RubricCriterion(criterion_id=name, required=False, rubric=_DEFAULT_TEXTS[name])
+        RubricCriterion(criterion_id=name, rubric=_DEFAULT_TEXTS[name])
         for name in DEFAULT_RUBRIC_IDS
     )
 
 
-def graded_criteria(
-    case: CaseContent, *, judged: bool
-) -> tuple[DeterministicCriterion | RubricCriterion, ...]:
+def graded_criteria(case: CaseContent, *, judged: bool) -> tuple[RubricCriterion, ...]:
     if not judged:
         return case.criteria
     declared = {item.criterion_id for item in case.criteria}
@@ -79,17 +77,17 @@ def uses_default_rubrics(case: CaseContent) -> bool:
 
 
 def effective_rubrics(case: FrozenCase) -> tuple[RubricCriterion, ...]:
-    return tuple(
-        item for item in graded_criteria(case, judged=True) if isinstance(item, RubricCriterion)
-    )
+    return graded_criteria(case, judged=True)
 
 
 def grading_identity(case: CaseContent, *, judged: bool) -> str:
     payload: dict[str, JsonValue] = {
-        "criteria": [item.model_dump(mode="json") for item in graded_criteria(case, judged=judged)]
+        "facts": [
+            item.model_dump(mode="json", include={"fact_id", "kind", "phase", "check", "verifier"})
+            for item in graded_facts(case)
+        ],
+        "criteria": [item.model_dump(mode="json") for item in graded_criteria(case, judged=judged)],
     }
-    if case.checks:
-        payload["checks"] = [item.model_dump(mode="json") for item in case.checks]
     if case.metrics:
         payload["metrics"] = [item.model_dump(mode="json") for item in case.metrics]
     return digest(canonical_json(payload))

@@ -9,23 +9,23 @@ from dryheave.reports import group_metrics, with_derived
 from dryheave.result_models import (
     Assessment,
     AuditReport,
-    CheckResult,
     CriterionResult,
-    HelpNeeded,
+    FactAccount,
+    FactProgress,
+    FactResult,
     MetricsResult,
     MetricValue,
+    PhaseCorrections,
     RoleMetrics,
     WorkflowOutcome,
 )
 from dryheave.runner_models import WorkflowEvent
 from dryheave.viewer_models import (
-    CaseCheckView,
-    CaseDeterministicView,
     CaseFactView,
     CaseMetricsView,
+    CasePromptStepView,
     CaseRubricView,
     CaseView,
-    CheckReasoning,
     CriterionReasoning,
     JudgeReasoningView,
 )
@@ -62,7 +62,7 @@ def _assessment(**overrides: object) -> Assessment:
         capture_id=None,
         case_id=CASE_ID,
         profile_id=None,
-        simulator_id=None,
+        stand_in_id=None,
         scoring_id=None,
         criteria_id=None,
         variant="base",
@@ -70,12 +70,13 @@ def _assessment(**overrides: object) -> Assessment:
         created_at=datetime.now(UTC),
         phase="finished",
         audit=audit,
-        completion="pass",
+        outcome="pass",
+        outcome_reason="all_met",
         eligible=True,
         exclusion_reasons=(),
         stop_reason="completed",
         subject_observation="completed",
-        roles=(_role("subject", tokens), _role("simulator", tokens), _role("judge", tokens)),
+        roles=(_role("subject", tokens), _role("stand_in", tokens), _role("judge", tokens)),
     )
     return base.model_copy(update=overrides)
 
@@ -97,29 +98,37 @@ def _case_view(title: str = "Case title") -> CaseView:
         case_id=CASE_ID,
         title=title,
         initial_prompt="Do the thing.",
-        facts=(CaseFactView(fact_id="fact-1", text="A fact.", disclosure="proactive"),),
-        rubrics=(
-            CaseRubricView(
-                criterion_id="code-quality", required=False, rubric="Be good.", origin="default"
+        phases=("fix", "docs"),
+        facts=(
+            CaseFactView(
+                fact_id="builds",
+                kind="requirement",
+                phase="fix",
+                disclosure="on_request",
+                text="It builds.",
+                verifier=CommandSpec(argv=("make", "build")),
+            ),
+            CaseFactView(
+                fact_id="readme",
+                kind="optional",
+                phase="docs",
+                disclosure="proactive",
+                text="Document it.",
+                check="README names the flag.",
+            ),
+            CaseFactView(
+                fact_id="team",
+                kind="context",
+                phase=None,
+                disclosure="on_request",
+                text="The team uses make.",
             ),
         ),
+        workflow=(
+            CasePromptStepView(step_id="review", after_phase="fix", prompt="/review", slash=True),
+        ),
+        rubrics=(CaseRubricView(criterion_id="code-quality", rubric="Be good.", origin="default"),),
         disabled_rubrics=(),
-        deterministic=(
-            CaseDeterministicView(
-                criterion_id="builds",
-                description="Builds cleanly.",
-                required=True,
-                command=CommandSpec(argv=("make", "build")),
-            ),
-        ),
-        checks=(
-            CaseCheckView(
-                check_id="right-view",
-                question="Did it touch the right view?",
-                expect="yes",
-                only_if=None,
-            ),
-        ),
         metrics=(
             CaseMetricsView(
                 metrics_id="coverage",
@@ -136,14 +145,50 @@ def _case_view(title: str = "Case title") -> CaseView:
     )
 
 
-def _build_report(check_outcome: str = "pass") -> RunReport:
+def _fact(fact_id: str = "right-view", verdict: str = "met") -> FactResult:
+    return FactResult(
+        fact_id=fact_id,
+        kind="requirement",
+        phase="fix",
+        verdict=verdict,
+        observation="The view shows the right branch.",
+        evidence="View.swift:12",
+        source="judge",
+    )
+
+
+def _account(
+    fact_id: str = "right-view", independence: float = 0.75, fix_rounds: int = 0
+) -> FactAccount:
+    return FactAccount(
+        independence=independence,
+        stand_in_replies=1,
+        fix_rounds=fix_rounds,
+        reached_phases=("fix",),
+        corrections=(PhaseCorrections(phase="fix", rounds=fix_rounds, raised=(fact_id,)),),
+        facts=(
+            FactProgress(
+                fact_id=fact_id,
+                kind="requirement",
+                phase="fix",
+                credit="elicited",
+                raised=0,
+                elicited=True,
+                first_inspection="unmet",
+            ),
+        ),
+    )
+
+
+def _build_report(verdict: str = "met") -> RunReport:
     result = _assessment(
         criteria=(
             CriterionResult(
                 criterion_id="code-quality", kind="judge", required=False, outcome="pass", score=0.8
             ),
         ),
-        checks=(CheckResult(check_id="right-view", outcome=check_outcome, answer="yes"),),
+        facts=(_fact(verdict=verdict),),
+        uncovered=("The empty state shows no message.",),
         metrics=(
             MetricsResult(
                 metrics_id="coverage",
@@ -155,12 +200,7 @@ def _build_report(check_outcome: str = "pass") -> RunReport:
                 ),
             ),
         ),
-        help_needed=HelpNeeded(
-            simulator_replies=1,
-            facts_disclosed=("fact-1",),
-            proactive_facts=("fact-1",),
-            on_request_facts=(),
-        ),
+        fact_account=_account(),
     )
     attempts = (_attempt("attempt-1", result),)
     groups = group_metrics(attempts)
@@ -185,11 +225,37 @@ def test_render_report_html_has_no_script_and_no_external_resource_references() 
         assert match.group(1).startswith("#") or match.group(1) == ""
 
 
-def test_render_report_html_shows_backend_derived_help_needed_and_eligibility() -> None:
+def test_render_report_html_shows_backend_derived_facts_and_eligibility() -> None:
     html = render_report_html([(_build_report(), None)], {CASE_ID: _case_view()})
-    assert "<td>fact-1 (proactive x1)</td>" in html
+    facts = html[html.index("<h2>Facts</h2>") :]
+    assert (
+        f"<td>{CASE_ID}</td><td>right-view</td><td>requirement</td><td>fix</td><td>met 1/1 · own 0, asked 1"
+        in facts
+    )
+    assert "first check met 0.0%" in facts
+    assert "<td>Independence</td><td>n=1 · min 0.75" in facts
+    assert "<td>Uncovered problems</td><td>1</td>" in facts
+    assert "<dt>Corrections by phase</dt><dd>fix: 0 rounds (right-view)</dd>" in html
+    assert "<li>The empty state shows no message.</li>" in html
+    assert "<td>right-view</td><td>met</td><td>elicited</td><td>0</td><td>unmet</td>" in html
     assert "<td>finished</td><td>unknown</td><td>pass</td><td>eligible</td>" in html
     assert "cost kinds none · model basis none · currencies unrecorded" in html
+
+
+def test_case_section_shows_phases_fact_kinds_checks_and_prompt_steps() -> None:
+    html = render_report_html([(_build_report(), None)], {CASE_ID: _case_view()})
+    case = html[html.index("<h2>Case Case title</h2>") :]
+    assert "<dt>Phases</dt><dd>fix \u2192 docs</dd>" in case
+    assert (
+        "<td>builds</td><td>requirement</td><td>fix</td><td>on_request</td><td>It builds.</td>"
+        "<td>verifier: make build</td>"
+    ) in case
+    assert "<td>optional</td><td>docs</td><td>proactive</td><td>Document it.</td>" in case
+    assert "<td>README names the flag.</td>" in case
+    assert f"<td>team</td><td>context</td><td>{DASH}</td>" in case
+    assert "<td>not graded</td>" in case
+    assert "<td>review</td><td>fix</td><td>slash command</td><td>/review</td>" in case
+    assert "<td>code-quality</td><td>default</td><td>Be good.</td>" in case
 
 
 def test_render_report_html_escapes_hostile_values_across_interpolation_paths() -> None:
@@ -205,13 +271,21 @@ def test_render_report_html_escapes_hostile_values_across_interpolation_paths() 
         evidence_hash=None,
         error=None,
     )
-    check = CheckResult.model_construct(check_id=hostile, outcome="pass", answer="yes")
+    fact = FactResult.model_construct(
+        fact_id=hostile,
+        kind="requirement",
+        phase="fix",
+        verdict="met",
+        observation=hostile,
+        evidence="",
+        source="judge",
+    )
     metric = MetricsResult(
         metrics_id="coverage",
         outcome="completed",
         values=(MetricValue(metric_id="tests_passed", label=hostile, value=1),),
     )
-    result = _assessment(criteria=(criterion,), checks=(check,), metrics=(metric,))
+    result = _assessment(criteria=(criterion,), facts=(fact,), metrics=(metric,))
     attempt = AttemptReport.model_construct(
         attempt_id=hostile,
         trial_id=hostile,
@@ -238,7 +312,14 @@ def test_render_report_html_escapes_hostile_values_across_interpolation_paths() 
         attempts=attempts,
         groups=(),
     )
-    case = _case_view(title=hostile).model_copy(update={"initial_prompt": hostile})
+    base = _case_view(title=hostile)
+    case = base.model_copy(
+        update={
+            "initial_prompt": hostile,
+            "facts": (base.facts[1].model_copy(update={"text": hostile, "check": hostile}),),
+            "workflow": (base.workflow[0].model_copy(update={"prompt": hostile, "slash": False}),),
+        }
+    )
     reasoning_view = JudgeReasoningView.model_construct(
         attempt_id=hostile,
         assessment_id=None,
@@ -246,14 +327,15 @@ def test_render_report_html_escapes_hostile_values_across_interpolation_paths() 
         reason=None,
         reason_code=None,
         criteria=(CriterionReasoning.model_construct(criterion_id=hostile, rationale=hostile),),
-        checks=(CheckReasoning.model_construct(check_id=hostile, rationale=hostile),),
     )
     html = render_report_html(
         [(report, None)], {CASE_ID: case}, reasoning={report.run_id: {hostile: reasoning_view}}
     )
     escaped = "&lt;img src=x onerror=alert(1)&gt;&quot;hostile&quot;"
     assert "<img src=x onerror=alert(1)>" not in html
-    assert html.count(escaped) >= 7
+    assert html.count(escaped) >= 10
+    assert f"<td>{escaped}</td><td>{escaped}</td>" in html
+    assert f"<td>review</td><td>fix</td><td>chat</td><td>{escaped}</td>" in html
 
 
 def _variant_attempt(attempt_id: str, variant: str) -> AttemptReport:
@@ -266,7 +348,8 @@ def _variant_attempt(attempt_id: str, variant: str) -> AttemptReport:
                 criterion_id="code-quality", kind="judge", required=False, outcome="pass"
             ),
         ),
-        checks=(CheckResult(check_id="right-view", outcome="pass", answer="yes"),),
+        facts=(_fact(),),
+        fact_account=_account(),
     )
     return AttemptReport(
         attempt_id=attempt_id,
@@ -279,7 +362,7 @@ def _variant_attempt(attempt_id: str, variant: str) -> AttemptReport:
     )
 
 
-def test_render_report_html_contains_each_variant_column_and_check_row() -> None:
+def test_render_report_html_contains_each_variant_column_and_fact_row() -> None:
     attempts = (
         _variant_attempt("attempt-1", "base"),
         _variant_attempt("attempt-2", "treatment"),
@@ -302,14 +385,15 @@ def test_render_report_html_contains_each_variant_column_and_check_row() -> None
     assert results_thead is not None
     assert "base" in results_thead.group(0)
     assert "treatment" in results_thead.group(0)
-    assert "right-view" in html
-    assert html.count("pass 1") >= 2
+    assert "<td>right-view</td><td>requirement</td><td>fix</td>" in html
+    assert html.count("met 1/1") >= 2
 
 
 def test_render_report_html_includes_reasoning_only_when_provided() -> None:
     report = _build_report()
     html_without = render_report_html([(report, None)], {CASE_ID: _case_view()})
     assert "reasoning not included" in html_without
+    assert "<td>code-quality</td><td>judge</td><td>rubric</td>" in html_without
     assert "the judge decided this because" not in html_without
 
     reasoning = {
@@ -322,17 +406,15 @@ def test_render_report_html_includes_reasoning_only_when_provided() -> None:
                     criterion_id="code-quality", rationale="the judge decided this because of X"
                 ),
             ),
-            checks=(CheckReasoning(check_id="right-view", rationale="checked the transcript"),),
         )
     }
     html_with = render_report_html(
         [(report, None)], {CASE_ID: _case_view()}, reasoning={report.run_id: reasoning}
     )
     assert "the judge decided this because of X" in html_with
-    assert "checked the transcript" in html_with
 
 
-def test_render_report_html_opens_with_an_agent_summary_of_measures_and_checks() -> None:
+def test_render_report_html_opens_with_an_agent_summary_of_outcome_and_independence() -> None:
     subject = _role(
         "subject",
         TokenUsage(
@@ -349,14 +431,11 @@ def test_render_report_html_opens_with_an_agent_summary_of_measures_and_checks()
         subject_seconds=269.5,
         roles=(
             subject,
-            _role("simulator", TokenUsage(provenance="x")),
+            _role("stand_in", TokenUsage(provenance="x")),
             _role("judge", TokenUsage(provenance="x")),
         ),
-        checks=(
-            CheckResult(check_id="final-right-view", outcome="pass", answer="yes"),
-            CheckResult(check_id="branch-moves-up", outcome="fail", answer="no"),
-            CheckResult(check_id="recovered-after-collapse", outcome="not_applicable"),
-        ),
+        facts=(_fact(),),
+        fact_account=_account(fix_rounds=2),
     )
     attempts = (_attempt("a-4ff975651a324a13893fb9edf14b4bef", result),)
     report = with_derived(
@@ -375,29 +454,29 @@ def test_render_report_html_opens_with_an_agent_summary_of_measures_and_checks()
     assert html.index("<h2>Summary</h2>") < html.index("<h2>Report</h2>")
     assert '<div class="scroller"><table class="topline">' in html
     assert (
-        "<th>Variant / attempt</th><th>Turns</th><th>First check</th><th>Fix requests</th>"
-        "<th>Workflow</th><th>Time</th><th>Tokens</th><th>Cost</th>"
-        "<th>Final right view</th><th>Branch moves up</th><th>Recovered after collapse</th>"
+        "<th>Variant / attempt</th><th>Outcome</th><th>Independence</th><th>Turns</th>"
+        "<th>First check</th><th>Corrections</th><th>Workflow</th><th>Time</th><th>Tokens</th>"
+        "<th>Cost</th>"
     ) in html
     turns = '<td class="number">2</td>'
-    no_workflow = "<td>\u2013</td><td>\u2013</td><td>\u2013</td>"
     resources = (
         '<td class="number">4m 30s</td><td class="number">1.55M</td><td class="number">$0.91</td>'
     )
     assert (
         '<tr class="variant"><td class="label">base · mean of 1</td>'
+        '<td class="check pass">1/1</td><td class="number">0.75</td>'
         + turns
-        + no_workflow
+        + f'<td>{DASH}</td><td class="number">2.00</td><td>{DASH}</td>'
         + resources
-        + '<td class="check pass">1/1</td><td class="check fail">0/1</td><td>\u2013</td></tr>'
+        + "</tr>"
     ) in html
     assert (
         '<tr><td class="attempt" title="a-4ff975651a324a13893fb9edf14b4bef">a-4ff97565</td>'
+        '<td class="check pass">✓</td><td class="number">0.75</td>'
         + turns
-        + no_workflow
+        + f'<td>{DASH}</td><td class="number">2</td><td>{DASH}</td>'
         + resources
-        + '<td class="check pass">✓</td><td class="check fail">✗</td>'
-        '<td class="check not_applicable">\u2013</td></tr>'
+        + "</tr>"
     ) in html
 
 
@@ -410,6 +489,7 @@ def test_render_report_html_renders_workflow_topline_cells_and_the_per_attempt_c
         dialogs_answered=0,
         first_inspection="passed",
         final_inspection="passed",
+        completed=True,
         inspection_seconds=5.0,
         events=(
             WorkflowEvent(step_id="review", kind="prompt", outcome="sent", turn=1),
@@ -430,6 +510,7 @@ def test_render_report_html_renders_workflow_topline_cells_and_the_per_attempt_c
         accepted_turns=2,
         subject_seconds=20.0,
         workflow=workflow,
+        fact_account=_account(fix_rounds=1),
     )
     attempts = (_attempt("attempt-workflow", result),)
     report = with_derived(
@@ -446,7 +527,7 @@ def test_render_report_html_renders_workflow_topline_cells_and_the_per_attempt_c
     )
     html = render_report_html([(report, None)], {CASE_ID: _case_view()})
     assert '<td class="check pass">✓</td><td class="number">1</td><td>2/2</td>' in html
-    assert '<td class="number">15s</td>' in html
+    assert '<td class="number">20s</td>' in html
     assert (
         '<td class="check pass">1/1</td><td class="number">1.00</td><td class="check pass">1/1</td>'
     ) in html
@@ -477,13 +558,13 @@ def _configured(model: str | None, effort: str | None = None, identity: str = "x
     )
 
 
-def _setup(run_id: str, variant_model: str, simulator: ModelSetup, **fields: object) -> RunSetup:
+def _setup(run_id: str, variant_model: str, stand_in: ModelSetup, **fields: object) -> RunSetup:
     return RunSetup.model_validate(
         {
             "run_id": run_id,
             "case_ids": (CASE_ID,),
             "variants": {"sonnet-low": _configured(variant_model, "low", "p" + run_id)},
-            "simulator": simulator,
+            "stand_in": stand_in,
             "judge": _configured("claude-opus-5-5", "high", "judge"),
             "inspector": ModelSetup(status="none"),
             **fields,
@@ -529,21 +610,21 @@ def test_render_report_html_puts_several_runs_in_one_summary_labelled_by_model()
     assert "<td>opus-5-5@high</td>" in runs
     assert "<td>sonnet-low (sonnet-5-5@low)</td>" in runs
     assert "<td>anthropic-2026-10-14</td>" in runs
-    assert "Highlighted settings differ between runs (simulated user)" in runs
+    assert "Highlighted settings differ between runs (user stand-in)" in runs
     assert f'<h2 class="run">Run {OLD_RUN}</h2>' in html
     assert "<title>dryheave report 11111111, 22222222</title>" in html
 
 
 def test_render_report_html_says_runs_match_only_when_every_compared_setting_is_known() -> None:
-    simulator = _configured("claude-sonnet-4-6", "low", "sim")
+    stand_in = _configured("claude-sonnet-4-6", "low", "sim")
     same = render_report_html(
         [
-            (_variant_report(OLD_RUN, "a-old"), _setup(OLD_RUN, "claude-sonnet-4-6", simulator)),
-            (_variant_report(NEW_RUN, "a-new"), _setup(NEW_RUN, "claude-sonnet-5-5", simulator)),
+            (_variant_report(OLD_RUN, "a-old"), _setup(OLD_RUN, "claude-sonnet-4-6", stand_in)),
+            (_variant_report(NEW_RUN, "a-new"), _setup(NEW_RUN, "claude-sonnet-5-5", stand_in)),
         ],
         {},
     )
-    assert "Every run used the same case, simulated user, judge and inspector." in same
+    assert "Every run used the same case, user stand-in, judge and inspector." in same
     assert f"<td>{DASH}</td>" in same
 
     unavailable = render_report_html(
@@ -560,7 +641,7 @@ def test_render_report_html_says_runs_match_only_when_every_compared_setting_is_
         {},
     )
     assert (
-        "Could not compare the case, simulated user, judge and inspector: some runs&#x27; "
+        "Could not compare the case, user stand-in, judge and inspector: some runs&#x27; "
         "frozen settings are unavailable."
     ) in unavailable
     assert "Every run used the same" not in unavailable
@@ -612,16 +693,15 @@ def _judged(attempt_id: str, rationale: str) -> JudgeReasoningView:
         assessment_id="d" * 64,
         status="ok",
         criteria=(CriterionReasoning(criterion_id="code-quality", rationale=rationale),),
-        checks=(),
     )
 
 
 def test_render_report_html_shows_each_runs_own_reasoning_for_a_shared_attempt_id() -> None:
-    simulator = _configured("m", identity="sim")
+    stand_in = _configured("m", identity="sim")
     html = render_report_html(
         [
-            (_variant_report(OLD_RUN, "a-shared"), _setup(OLD_RUN, "m", simulator)),
-            (_variant_report(NEW_RUN, "a-shared"), _setup(NEW_RUN, "m", simulator)),
+            (_variant_report(OLD_RUN, "a-shared"), _setup(OLD_RUN, "m", stand_in)),
+            (_variant_report(NEW_RUN, "a-shared"), _setup(NEW_RUN, "m", stand_in)),
         ],
         {},
         reasoning={
@@ -633,3 +713,28 @@ def test_render_report_html_shows_each_runs_own_reasoning_for_a_shared_attempt_i
     new_section = html[html.index(f"Run {NEW_RUN}</h2>") :]
     assert "before the regrade" in old_section
     assert "after the regrade" in new_section
+
+
+def test_render_report_html_shows_the_pilot_floor_row_with_its_budget() -> None:
+    from dryheave.report_models import FloorVariant
+    from dryheave.runner_models import RunBudget
+
+    pilot = _variant_report(OLD_RUN, "a-pilot", variant="pilot")
+    report = _variant_report(NEW_RUN, "a-new").model_copy(
+        update={
+            "budget": RunBudget(max_turns=11, stand_in_replies=8, max_inspections=8),
+            "floor": FloorVariant(
+                run_id=OLD_RUN,
+                label="pilot (n=1)",
+                budget=RunBudget(),
+                group=pilot.groups[0],
+            ),
+        }
+    )
+    html = render_report_html([(report, None)], {})
+    summary = html[html.index("<h2>Summary</h2>") : html.index("<h2>Report</h2>")]
+    assert (
+        '<td class="label">pilot (n=1) · floor · budget 60 turns, 40 stand-in replies, '
+        "20 inspections</td>"
+    ) in summary
+    assert "<dd>11 turns, 8 stand-in replies, 8 inspections</dd>" in html

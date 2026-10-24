@@ -34,7 +34,7 @@ class AssessmentInputs:
     capture: CapturedAttempt | None = None
     files: dict[str, bytes] = field(default_factory=dict)
     scoring: ScoringConfig | None = None
-    simulator: ControllerRecipe | None = None
+    stand_in: ControllerRecipe | None = None
     requested_model: str | None = None
     error: str | None = None
 
@@ -82,8 +82,8 @@ def load_assessment_inputs(
         inputs.scoring = load_role(
             store, inputs.experiment.scoring_id, ScoringConfig, ObjectKind.SCORING
         )
-        inputs.simulator = load_role(
-            store, inputs.experiment.simulator_id, ControllerRecipe, ObjectKind.SIMULATOR
+        inputs.stand_in = load_role(
+            store, inputs.experiment.stand_in_id, ControllerRecipe, ObjectKind.STAND_IN
         )
         inputs.requested_model = load_profile(store, inputs.trial.profile_id).recipe.model
         if state.capture_id:
@@ -103,8 +103,8 @@ def load_assessment_inputs(
                     store, inputs.experiment.scoring_id, ScoringConfig, ObjectKind.SCORING
                 )
             with suppress(DryheaveError):
-                inputs.simulator = load_role(
-                    store, inputs.experiment.simulator_id, ControllerRecipe, ObjectKind.SIMULATOR
+                inputs.stand_in = load_role(
+                    store, inputs.experiment.stand_in_id, ControllerRecipe, ObjectKind.STAND_IN
                 )
             if inputs.trial:
                 with suppress(DryheaveError):
@@ -158,9 +158,9 @@ def role_metrics(
     return (
         subject_metrics(inputs.capture, table, events, inputs.requested_model),
         call_metrics(
-            "simulator",
-            tuple(call for call in calls if call.role == "simulator"),
-            inputs.simulator,
+            "stand_in",
+            tuple(call for call in calls if call.role == "stand_in"),
+            inputs.stand_in,
             table,
             _controller_raw_stdout(inputs.files),
         ),

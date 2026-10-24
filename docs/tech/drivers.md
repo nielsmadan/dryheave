@@ -2,7 +2,7 @@
 
 `drivers/` provides a persistent terminal owner, incremental native-event sources,
 submission transactions, usage attribution and separate cleanup observations.
-It does not acquire run/store locks, launch simulators, snapshot repositories or
+It does not acquire run/store locks, launch user stand-ins, snapshot repositories or
 grade tasks. The runner must acquire its run lock followed by the store native
 lock and persist attempt/launch identity before constructing a native session.
 
@@ -64,8 +64,8 @@ profile fidelity or successful task completion.
 Conversation input normalizes CRLF/CR to LF and trims outer whitespace, matching
 the pinned Codex composer. Control bytes and generated native command/skill
 prefixes `/`, `!` and `$` are rejected. The explicit `curated-native-command`
-submission policy allows selected curator commands but grants no simulator
-authority; it must be recorded by the runner. The simulator still needs its own
+submission policy allows selected curator commands but grants no stand-in
+authority; it must be recorded by the runner. The stand-in still needs its own
 bounded reply/fact validation in the later controller service.
 
 The transport sends bracketed paste via `type -- TEXT`, then the driver polls
@@ -189,7 +189,7 @@ evidence.
 Native Codex logs omit approval, request-user-input and MCP elicitation dialogs.
 Pinned terminal anchors therefore distinguish `approval`, `structured_input` and
 `unsupported` observations; auth/trust/hooks/permission dialogs never become
-ordinary simulator questions. Approval and unsupported states stop for caller
+ordinary stand-in questions. Approval and unsupported states stop for caller
 policy; Codex `structured_input` and unrecognized dialogs can instead be answered
 through the screen seam below. Unknown UI or missing completion
 reaches a bounded visible blocker/timeout. Terminal exit code `0` means exited,
@@ -198,12 +198,12 @@ never still running. Terminal readiness/silence is not model completion.
 Codex's startup trust screen is pinned to both its older anchor ("Do you trust
 the contents of this directory?") and 0.162.1's ("Trust this folder?", with
 "Trust and continue" / "Open restricted" options); both are `approval`
-observations the simulated user never answers.
+observations the user stand-in never answers.
 
 Claude 2.1.296 startup prompts ("Accessing workspace:" folder trust and "Allow
 external CLAUDE.md file imports?") render unnumbered `❯` option lists with an
 "Enter to confirm · Esc to cancel" footer. They are `approval` observations, so a
-run stops with `needs_input` before any simulator call. Any other unnumbered
+run stops with `needs_input` before any stand-in call. Any other unnumbered
 Claude list with that footer is `unsupported`, never a composer.
 
 ## Claude question dialogs
@@ -307,7 +307,7 @@ from the previous turn's screen.
 `Enter`, `1`-`9`) or one bounded line of text typed with `paste`. It re-reads the
 screen and sends nothing when the screen no longer qualifies, when the subject has
 exited (an `exited` observation, or the completed turn), or when the normalised
-screen differs from `shown`, the text the simulator judged; the stale case records
+screen differs from `shown`, the text the stand-in judged; the stale case records
 a `screen-stale` artifact and returns the new screen's classification so the
 caller can ask again. Before `Enter`, `Space` or a digit, `escalation()` reads the
 option the key would choose (the highlighted row and its continuation lines, the
@@ -321,7 +321,7 @@ artifact is recorded and the result is an `approval` observation with
 `SCREEN_ACTION_REFUSED`. This guard is independent of `permission_like` and is a
 backstop: its vocabulary does not cover every mode or permission option (one-shot
 "Yes" rows, for example), so the
-allow-list is what keeps those prompts away from the simulator. After a
+allow-list is what keeps those prompts away from the stand-in. After a
 sent action it waits up to `command_seconds` for the screen to change and then
 read the same on two polls, records `screen-intent` (screen before, action) and
 `screen-result` (changed flag, screen after; both the last 8000 characters)

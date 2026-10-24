@@ -8,7 +8,7 @@ from statistics import median_low
 from tempfile import TemporaryDirectory
 from typing import Literal
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, TypeAdapter, ValidationError
 
 from dryheave.authoring_catalog import (
     MAX_VOICE_CANDIDATES,
@@ -47,16 +47,17 @@ from dryheave.errors import ConflictError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.logs.base import EvidenceExcerpt, ImportLimits, LogEvent, Session, recorded_cwd
 from dryheave.logs.service import import_session, verify_evidence
-from dryheave.models import AgentKind, ObjectKind, StrictModel
+from dryheave.models import AgentKind, Name, ObjectKind, StrictModel
 from dryheave.personas import freeze_persona, load_frozen_persona
 from dryheave.repositories import load_repository
-from dryheave.serialization import canonical_json, digest
+from dryheave.serialization import canonical_json, digest, validation_message
 from dryheave.storage import ObjectStore
 
 MAX_SELECTED_SESSIONS = 24
 MAX_VOICE_EXAMPLES = 32
 VOICE_EVIDENCE_THRESHOLD = 8
 DEFAULT_VOICE_NAME = "default"
+VOICE_NAME = TypeAdapter(Name)
 HARNESS_WRAPPERS: tuple[tuple[InjectionReason, re.Pattern[str]], ...] = (
     ("system_reminder", re.compile(r"<system-reminder>.*?(?:</system-reminder>|\Z)", re.DOTALL)),
     (
@@ -307,6 +308,7 @@ def record_decision(
     decision: ProblemDecision,
     *,
     expected_revision: int,
+    draft_root: Path,
 ) -> AuthoringCatalog:
     if (
         decision.state == "frozen"
@@ -323,7 +325,7 @@ def record_decision(
             )
         _verify_range(store, selection_for(catalog, request.selection_id), decision)
         if decision.state == "drafted":
-            _check_draft(store, decision, read_draft(_draft_path(root, decision)), request)
+            _check_draft(store, decision, read_draft(_draft_path(draft_root, decision)), request)
         request = _revise(request)
         request = request.model_copy(
             update={"decisions": request.decisions | {decision.name: decision}}
@@ -339,10 +341,10 @@ def record_gap(root: Path, reference: str, gap: str, *, expected_revision: int) 
         )
 
 
-def _draft_path(root: Path, decision: ProblemDecision) -> Path:
+def _draft_path(draft_root: Path, decision: ProblemDecision) -> Path:
     if decision.draft_path is None:
         raise InputError("Candidate has no case draft; record a drafted decision first.")
-    return root / decision.draft_path
+    return draft_root / decision.draft_path
 
 
 def _check_draft(
@@ -378,8 +380,10 @@ def _check_draft(
 
 
 @contextmanager
-def _snapshot(root: Path, decision: ProblemDecision) -> Iterator[tuple[CaseDraft, Path, str]]:
-    path = _draft_path(root, decision)
+def _snapshot(
+    root: Path, draft_root: Path, decision: ProblemDecision
+) -> Iterator[tuple[CaseDraft, Path, str]]:
+    path = _draft_path(draft_root, decision)
     original = read_draft(path)
     contents = {
         name: read_bytes(path.parent / source, limit=16 * 1024 * 1024)
@@ -418,13 +422,14 @@ def _snapshot(root: Path, decision: ProblemDecision) -> Iterator[tuple[CaseDraft
         yield draft, target, fingerprint
 
 
-def validate_problem(
+def validate_problem(  # noqa: PLR0913
     store: ObjectStore,
     root: Path,
     reference: str,
     name: str,
     *,
     expected_revision: int,
+    draft_root: Path,
     freeze: bool = False,
 ) -> AuthoringCatalog:
     with edit_catalog(root, expected_revision) as catalog:
@@ -434,7 +439,7 @@ def validate_problem(
             raise InputError("Select a drafted candidate from problem inspect.")
         selection = selection_for(catalog, request.selection_id)
         _verify_range(store, selection, decision)
-        with _snapshot(root, decision) as (draft, directory, fingerprint):
+        with _snapshot(root, draft_root, decision) as (draft, directory, fingerprint):
             _check_draft(store, decision, draft, request)
             persona = draft.persona or load_frozen_persona(store, draft.persona_id or "")
             verify_voice(store, selection, persona.examples)
@@ -681,7 +686,10 @@ def triage_evidence(
 
 def resolve_voice_name(catalog: AuthoringCatalog, name: str | None) -> str:
     if name is not None:
-        return name
+        try:
+            return VOICE_NAME.validate_python(name)
+        except ValidationError as error:
+            raise InputError(f"Invalid voice name {name!r}: {validation_message(error)}") from error
     if DEFAULT_VOICE_NAME in catalog.voices:
         raise InputError(
             f"A voice named {DEFAULT_VOICE_NAME} already exists; name this voice explicitly."

@@ -95,7 +95,7 @@ fixtures for repeating those behaviors are in:
 - [assessment tests](../../../tests/test_assessments.py): retained calibration, future-object contamination and interrupted grading suites.
 - [bundle tests](../../../tests/test_bundles.py): malformed input, explicit evidence selection, atomic publication and alias collisions.
 - [report tests](../../../tests/test_reports.py): latest-attempt selection, unassessed retries, unknown spending and attrition.
-- [role accounting tests](../../../tests/test_role_accounting.py): independently retained settings and native usage when simulator or judge responses fail validation.
+- [role accounting tests](../../../tests/test_role_accounting.py): independently retained settings and native usage when stand-in or judge responses fail validation.
 
 Run these through `uv run pytest PATH -q` as needed; use `just check` for the
 required complete check. Just recipes keep pytest's unique temporary directories
@@ -110,18 +110,18 @@ and [profile reference](../../tech/profiles.md). Pin the installed Codex version
 tui-test version, frozen case/profile/experiment IDs, and the exact native argv.
 Use a small generated repository with a known baseline and future reference,
 a calibrated hidden verifier, and an initial prompt requiring one clarification.
-The scripted simulator may answer only that reviewed fact.
+The scripted stand-in may answer only that reviewed fact.
 
 Native execution consumes model usage. Set a finite subject deadline and
-simulator budget in the frozen inputs before launching, and keep an explicit
+stand-in budget in the frozen inputs before launching, and keep an explicit
 attempt allocation. A failed launch counts; retry is a new attempt. This build's
-allocation was two attempts, 180 seconds and three simulated replies each.
+allocation was two attempts, 180 seconds and three stand-in replies each.
 
 Supply existing login only through the profile's explicit runtime reference.
 Record the reference name and acknowledgement of possible native refresh writes;
 never inspect or copy authentication contents. Keep ordinary native permission
 settings. A permission or unsupported dialog is a retained stop, not a prompt for
-the simulator to approve.
+the stand-in to approve.
 
 ```sh
 dryheave --store STORE --json run EXPERIMENT_ID --mode native \
@@ -131,7 +131,7 @@ dryheave --store STORE --json report RUN_ID
 ```
 
 Expect fresh acceptance of the initial message, an ordinary clarification,
-acceptance of the approved simulated answer, and matching native completion.
+acceptance of the approved stand-in answer, and matching native completion.
 After terminal and known-writer cleanup, inspect deterministic check outcomes,
 audit eligibility, requested versus observed model/effort, per-role usage and
 unknown costs. A successful driver exit alone does not establish task completion.

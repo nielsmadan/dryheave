@@ -82,7 +82,7 @@ which is exactly the degraded case the spec requires to stay viewable. Entering 
 portable report ID in the sidebar form loads it: `Portable report: yes`, durable
 sequence 137, 4 scheduled trials, 4 retained attempts, and an explicit omissions
 list naming every withheld sensitive class — raw terminal/native logs and screens,
-final files and patches, raw Git metadata, simulator requests and responses, judge
+final files and patches, raw Git metadata, stand-in requests and responses, judge
 requests and responses, verifier stdout/stderr, full source transcripts, standalone
 calibration verifier. Nothing is guessed or silently blank.
 
@@ -93,7 +93,7 @@ fix holds in the installed build.
 ### Not covered here
 
 The live Claude walkthrough — authoring session, Haiku and Sonnet subject trials and
-the adaptive simulator — did not run. Authentication is unavailable in this
+the adaptive stand-in — did not run. Authentication is unavailable in this
 environment; see the ledger's blocked check for the diagnosis and the resume
 commands. Everything above is offline and synthetic or historical, and is labelled
 as such; none of it establishes live model behaviour.

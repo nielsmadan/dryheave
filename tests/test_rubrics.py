@@ -12,21 +12,25 @@ from dryheave.rubrics import (
 from dryheave.serialization import canonical_json, digest
 
 
-def test_default_rubrics_are_optional_and_versioned():
+def test_default_rubrics_are_versioned():
     assert DEFAULT_RUBRIC_SET == "default-v1"
-    assert [(item.criterion_id, item.required) for item in default_rubrics()] == [
-        ("code-quality", False),
-        ("codebase-consistency", False),
-        ("test-quality", False),
+    assert [item.criterion_id for item in default_rubrics()] == [
+        "code-quality",
+        "codebase-consistency",
+        "test-quality",
     ]
 
 
 @pytest.mark.integration
 def test_defaults_apply_only_with_a_judge(store, graded_benchmark):
     case = load_frozen_case(store, graded_benchmark.cases[0])
-    assert [item.criterion_id for item in graded_criteria(case, judged=False)] == ["greeting"]
+    quality = RubricCriterion(
+        criterion_id="quality", rubric="The greeting keeps its public interface."
+    )
+    case = case.model_copy(update={"criteria": (quality,)})
+    assert graded_criteria(case, judged=False) == (quality,)
     assert [item.criterion_id for item in graded_criteria(case, judged=True)] == [
-        "greeting",
+        "quality",
         "code-quality",
         "codebase-consistency",
         "test-quality",
@@ -38,7 +42,6 @@ def test_case_override_and_disable_shape_effective_rubrics(store, graded_benchma
     case = load_frozen_case(store, graded_benchmark.cases[0])
     override = RubricCriterion(
         criterion_id="test-quality",
-        required=True,
         rubric="Tests must cover the empty-name greeting edge case.",
     )
     changed = case.model_copy(
@@ -77,39 +80,34 @@ def test_uses_default_rubrics_is_false_once_every_default_is_overridden_or_disab
 
 
 @pytest.mark.integration
-def test_grading_identity_keeps_the_criteria_only_hash_and_covers_defaults_and_checks(
-    store, graded_benchmark
-):
-    from dryheave.cases import CaseCheck
-
-    case = load_frozen_case(store, graded_benchmark.cases[0])
-    legacy = digest(
-        canonical_json({"criteria": [item.model_dump(mode="json") for item in case.criteria]})
-    )
-    checked = case.model_copy(
-        update={
-            "checks": (
-                CaseCheck(check_id="asked", question="Did the agent ask first?", expect="yes"),
-            )
-        }
-    )
-    identities = {
-        grading_identity(case, judged=False),
-        grading_identity(case, judged=True),
-        grading_identity(checked, judged=False),
-    }
-    assert grading_identity(case, judged=False) == legacy
-    assert len(identities) == 3
-
-
-@pytest.mark.integration
-def test_grading_identity_separates_metrics_commands_and_keeps_metricless_identity(
-    store, graded_benchmark
-):
+def test_grading_identity_covers_graded_facts_defaults_and_metrics(store, graded_benchmark):
     from dryheave.cases import MetricsCommand
     from dryheave.models import CommandSpec
 
     case = load_frozen_case(store, graded_benchmark.cases[0])
+    punctuation = case.allowed_facts[0]
+    expected = digest(
+        canonical_json(
+            {
+                "facts": [
+                    punctuation.model_dump(
+                        mode="json", include={"fact_id", "kind", "phase", "check", "verifier"}
+                    )
+                ],
+                "criteria": [],
+            }
+        )
+    )
+    reworded = case.model_copy(
+        update={"allowed_facts": (punctuation.model_copy(update={"text": "Add a comma."}),)}
+    )
+    rechecked = case.model_copy(
+        update={
+            "allowed_facts": (
+                punctuation.model_copy(update={"check": "greet('Ada') returns 'Hello, Ada'."}),
+            )
+        }
+    )
 
     def measured(argv: tuple[str, ...]):
         command = MetricsCommand(
@@ -120,12 +118,16 @@ def test_grading_identity_separates_metrics_commands_and_keeps_metricless_identi
         )
         return case.model_copy(update={"metrics": (command,)})
 
-    legacy = digest(
-        canonical_json({"criteria": [item.model_dump(mode="json") for item in case.criteria]})
-    )
-    first = measured(("/bin/sh", "{verifier}/metrics.sh"))
-    second = measured(("/bin/sh", "{verifier}/metrics.sh", "--coverage"))
-    assert case.metrics == ()
-    assert grading_identity(case, judged=False) == legacy
-    assert grading_identity(first, judged=False) != legacy
-    assert len({grading_identity(item, judged=False) for item in (case, first, second)}) == 3
+    assert grading_identity(case, judged=False) == expected
+    assert grading_identity(reworded, judged=False) == expected
+    identities = {
+        grading_identity(item, judged=judged)
+        for item, judged in (
+            (case, False),
+            (case, True),
+            (rechecked, False),
+            (measured(("/bin/sh", "{verifier}/metrics.sh")), False),
+            (measured(("/bin/sh", "{verifier}/metrics.sh", "--coverage")), False),
+        )
+    }
+    assert len(identities) == 5

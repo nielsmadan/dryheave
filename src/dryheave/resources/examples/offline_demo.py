@@ -168,25 +168,28 @@ class Demo:
             unresolved_issues=[],
             persona=None,
             persona_id=persona_id,
-            allowed_facts=[{"fact_id": "punctuation", "text": ANSWER, "curator_authored": True}],
-            hidden_files={"check.py": "check.py"},
-            reference_patch="reference.patch",
-            criteria=[
+            phases=["fix"],
+            allowed_facts=[
                 {
-                    "criterion_id": "greeting",
-                    "kind": "deterministic",
-                    "description": "Check punctuation and correct name handling.",
-                    "required": True,
-                    "entrypoint": "check.py",
-                    "command": {
-                        "argv": [sys.executable, "{verifier}/check.py"],
-                        "timeout_seconds": 30,
-                        "max_output_bytes": 65536,
+                    "fact_id": "punctuation",
+                    "kind": "requirement",
+                    "phase": "fix",
+                    "text": ANSWER,
+                    "curator_authored": True,
+                    "verifier": {
+                        "entrypoint": "check.py",
+                        "command": {
+                            "argv": [sys.executable, "{verifier}/check.py"],
+                            "timeout_seconds": 30,
+                            "max_output_bytes": 65536,
+                        },
+                        "expected_stdout": "GREETING_CHECK_PASSED",
+                        "expected_failure_stdout": "GREETING_ASSERTION_FAILED",
                     },
-                    "expected_stdout": "GREETING_CHECK_PASSED",
-                    "expected_failure_stdout": "GREETING_ASSERTION_FAILED",
                 }
             ],
+            hidden_files={"check.py": "check.py"},
+            reference_patch="reference.patch",
         )
         write_json(case_path, case)
         (self.output / "check.py").write_text(
@@ -275,7 +278,7 @@ class Demo:
             ],
             "repetitions": REPETITIONS,
             "seed": 17,
-            "simulator": {
+            "stand_in": {
                 "kind": "scripted",
                 "script": [
                     {
@@ -387,7 +390,7 @@ class Demo:
         if self.git(repo, "rev-parse", "HEAD") != future or self.git(repo, "status", "--porcelain"):
             raise ValueError("Synthetic source repository changed after preparation.")
         summary = {
-            "evidence": "synthetic logs, scripted simulator and offline-fixture subject; no model calls",
+            "evidence": "synthetic logs, scripted stand-in and offline-fixture subject; no model calls",
             "pricing": "synthetic saved rates, not current model prices; fixture roles incur no model spend",
             "version": version,
             "python": sys.version,

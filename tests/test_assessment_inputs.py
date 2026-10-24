@@ -33,11 +33,11 @@ def test_role_metrics_falls_back_to_the_builtin_price_table_when_scoring_has_non
     )
     inputs = AssessmentInputs()
     roles = role_metrics(inputs, _state(call), ())
-    simulator = next(role for role in roles if role.role == "simulator")
-    assert simulator.records[0].price_version == builtin_price_table().version
+    stand_in = next(role for role in roles if role.role == "stand_in")
+    assert stand_in.records[0].price_version == builtin_price_table().version
 
 
-def test_role_metrics_derives_1h_split_for_a_saved_simulator_call_from_raw_evidence():
+def test_role_metrics_derives_1h_split_for_a_saved_stand_in_call_from_raw_evidence():
     call = RoleCall(
         call_id="c-old",
         status="completed",
@@ -49,8 +49,8 @@ def test_role_metrics_derives_1h_split_for_a_saved_simulator_call_from_raw_evide
     ).encode()
     inputs = AssessmentInputs(files={"evidence/controller/c-old/stdout.bin": raw_stdout})
     roles = role_metrics(inputs, _state(call), ())
-    simulator = next(role for role in roles if role.role == "simulator")
-    assert simulator.known_tokens.cache_write_1h == 40
+    stand_in = next(role for role in roles if role.role == "stand_in")
+    assert stand_in.known_tokens.cache_write_1h == 40
 
 
 def test_role_metrics_does_not_derive_a_1h_split_that_exceeds_cache_write():
@@ -65,5 +65,5 @@ def test_role_metrics_does_not_derive_a_1h_split_that_exceeds_cache_write():
     ).encode()
     inputs = AssessmentInputs(files={"evidence/controller/c-old/stdout.bin": raw_stdout})
     roles = role_metrics(inputs, _state(call), ())
-    simulator = next(role for role in roles if role.role == "simulator")
-    assert simulator.known_tokens.cache_write_1h is None
+    stand_in = next(role for role in roles if role.role == "stand_in")
+    assert stand_in.known_tokens.cache_write_1h is None

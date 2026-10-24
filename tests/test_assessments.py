@@ -4,9 +4,9 @@ from pathlib import Path
 import pytest
 
 from conftest import HOST
-from dryheave.assessments import assess_run
-from dryheave.cases import DeterministicCriterion, load_frozen_case
-from dryheave.errors import IntegrityError
+from dryheave.assessments import assess_run, uncalibrated_verifiers
+from dryheave.cases import FactVerifier, TaskFact, load_frozen_case
+from dryheave.errors import InputError, IntegrityError
 from dryheave.experiments import create_experiment
 from dryheave.integrity import load_assessment
 from dryheave.journals import RunStore
@@ -16,123 +16,202 @@ from dryheave.runner import load_capture, run_experiment, run_status
 from dryheave.runner_models import RunOptions, WorkflowEvent, WorkflowProgress
 
 
+def with_verifier(fact, **changes):
+    return fact.model_copy(update={"verifier": fact.verifier.model_copy(update=changes)})
+
+
+def as_context(fact):
+    return fact.model_copy(update={"kind": "context", "phase": None, "verifier": None})
+
+
+def phased_case():
+    from dryheave.cases import CaseContent, PromptStep
+
+    return CaseContent(
+        schema_version=2,
+        title="Greeting",
+        initial_prompt="Fix the greeting.",
+        phases=("fix", "polish"),
+        allowed_facts=(
+            TaskFact(
+                fact_id="comma",
+                phase="fix",
+                text="Use a comma after Hello.",
+                check="greet returns Hello, NAME.",
+                curator_authored=True,
+            ),
+            TaskFact(
+                fact_id="tests",
+                phase="polish",
+                text="Add a test.",
+                check="A test covers greet.",
+                curator_authored=True,
+            ),
+        ),
+        workflow=(PromptStep(step_id="review", prompt="Review your work.", after_phase="fix"),),
+    )
+
+
+def inspected(identifier, turn, digest="d1", **verdicts):
+    from dryheave.judges import FactInspection, FactJudgment
+    from dryheave.workflow import InspectionRecord
+
+    result = FactInspection(
+        inspection_id=identifier,
+        turn=turn,
+        snapshot_digest=digest,
+        input_digest=digest + identifier,
+        status="completed",
+        judgments=tuple(
+            FactJudgment(fact_id=fact_id, verdict=verdict, observation="seen", evidence="greet.py")
+            for fact_id, verdict in verdicts.items()
+        ),
+    )
+    return InspectionRecord(identifier, turn, result)
+
+
+def journal_of(*records, raises=()):
+    from dryheave.assessments import JournalFacts
+
+    return JournalFacts(
+        inspections=tuple(item.result for item in records if item.result is not None),
+        records=records,
+        raises=raises,
+    )
+
+
 def test_workflow_outcome_is_none_without_a_workflow() -> None:
-    from dryheave.assessments import _workflow_outcome
-
-    assert _workflow_outcome(None, {}) is None
-
-
-def test_workflow_outcome_for_a_completed_workflow() -> None:
-    from dryheave.assessments import _workflow_outcome
-
-    progress = WorkflowProgress(
-        steps=("review", "check"),
-        position=2,
-        events=(
-            WorkflowEvent(step_id="review", kind="prompt", outcome="sent", turn=1),
-            WorkflowEvent(step_id="check", kind="inspect", outcome="passed", turn=2, seconds=1.5),
-        ),
-    )
-    outcome = _workflow_outcome(progress, {"review": "prompt", "check": "inspect"})
-    assert outcome is not None
-    assert (outcome.steps, outcome.completed_steps, outcome.inspections) == (2, 2, 1)
-    assert (outcome.fix_requests, outcome.dialogs_answered) == (0, 0)
-    assert (outcome.first_inspection, outcome.final_inspection) == ("passed", "passed")
-    assert outcome.inspection_seconds == 1.5
-    assert outcome.events == progress.events
-
-
-def test_workflow_outcome_for_a_failed_final_inspection_counts_reused_as_failed() -> None:
-    from dryheave.assessments import _workflow_outcome
-
-    progress = WorkflowProgress(
-        steps=("check",),
-        position=0,
-        events=(
-            WorkflowEvent(step_id="check", kind="inspect", outcome="failed", turn=1, seconds=1.0),
-            WorkflowEvent(step_id="check", kind="inspect", outcome="fix_requested", turn=1),
-            WorkflowEvent(step_id="check", kind="inspect", outcome="reused", turn=2, seconds=0.0),
-            WorkflowEvent(step_id="check", kind="inspect", outcome="fix_requested", turn=2),
-        ),
-    )
-    outcome = _workflow_outcome(progress, {"check": "inspect"})
-    assert outcome is not None
-    assert (outcome.inspections, outcome.fix_requests) == (2, 2)
-    assert (outcome.first_inspection, outcome.final_inspection) == ("failed", "failed")
-
-
-def test_workflow_outcome_is_not_reached_when_steps_exist_without_an_inspection() -> None:
-    from dryheave.assessments import _workflow_outcome
-
-    progress = WorkflowProgress(steps=("check",), position=0, events=())
-    outcome = _workflow_outcome(progress, {"check": "inspect"})
-    assert outcome is not None
-    assert (outcome.inspections, outcome.first_inspection, outcome.final_inspection) == (
-        0,
-        "none",
-        "not_reached",
-    )
-
-
-def test_workflow_outcome_for_an_unavailable_inspection() -> None:
-    from dryheave.assessments import _workflow_outcome
-
-    progress = WorkflowProgress(
-        steps=("check",),
-        position=0,
-        events=(WorkflowEvent(step_id="check", kind="inspect", outcome="unavailable", turn=1),),
-    )
-    outcome = _workflow_outcome(progress, {"check": "inspect"})
-    assert outcome is not None
-    assert (outcome.first_inspection, outcome.final_inspection) == ("unavailable", "unavailable")
-    assert outcome.inspections == 1
-
-
-def test_workflow_outcome_for_dialogs_answered_without_a_declared_workflow() -> None:
-    from dryheave.assessments import _workflow_outcome
+    from dryheave.assessments import workflow_outcome
 
     progress = WorkflowProgress(
         steps=(),
         position=0,
         events=(WorkflowEvent(step_id="dialog", kind="dialog", outcome="answered", turn=1),),
     )
-    outcome = _workflow_outcome(progress, {})
-    assert outcome is not None
-    assert (outcome.steps, outcome.completed_steps, outcome.dialogs_answered) == (0, 0, 1)
-    assert (outcome.first_inspection, outcome.final_inspection) == ("none", "none")
-
-
-def test_workflow_outcome_final_inspection_is_not_reached_when_the_retest_never_ran() -> None:
-    from dryheave.assessments import _workflow_outcome
-
-    progress = WorkflowProgress(
-        steps=("manual-test", "review", "retest"),
-        position=2,
-        events=(
-            WorkflowEvent(
-                step_id="manual-test", kind="inspect", outcome="passed", turn=1, seconds=1.0
-            ),
-            WorkflowEvent(step_id="review", kind="prompt", outcome="sent", turn=2),
-        ),
+    assert (
+        workflow_outcome(phased_case(), None, "stand_in_stop", journal_of(), enabled=True) is None
     )
-    outcome = _workflow_outcome(
-        progress, {"manual-test": "inspect", "review": "prompt", "retest": "inspect"}
+    assert (
+        workflow_outcome(phased_case(), progress, "stand_in_stop", journal_of(), enabled=False)
+        is None
     )
-    assert outcome is not None
-    assert outcome.first_inspection == "passed"
-    assert outcome.final_inspection == "not_reached"
 
 
-def test_workflow_outcome_final_inspection_is_none_for_a_prompt_only_workflow() -> None:
-    from dryheave.assessments import _workflow_outcome
+def test_workflow_outcome_passes_an_inspection_whose_only_unmet_facts_are_in_a_later_phase():
+    from dryheave.assessments import workflow_outcome
 
     progress = WorkflowProgress(
         steps=("review",),
         position=1,
-        events=(WorkflowEvent(step_id="review", kind="prompt", outcome="sent", turn=1),),
+        events=(
+            WorkflowEvent(step_id="i-1", kind="inspect", outcome="passed", turn=1, seconds=1.5),
+            WorkflowEvent(step_id="review", kind="prompt", outcome="sent", turn=1),
+        ),
     )
-    outcome = _workflow_outcome(progress, {"review": "prompt"})
+    outcome = workflow_outcome(
+        phased_case(),
+        progress,
+        "workflow_complete",
+        journal_of(
+            inspected("i-1", 1, comma="met", tests="unmet"),
+            inspected("i-2", 3, digest="d2", comma="met", tests="met"),
+        ),
+        enabled=True,
+    )
     assert outcome is not None
+    assert (outcome.steps, outcome.completed_steps, outcome.inspections) == (1, 1, 2)
+    assert (outcome.first_inspection, outcome.final_inspection) == ("passed", "passed")
+    assert (outcome.completed, outcome.inspection_seconds) == (True, 1.5)
+
+
+def test_workflow_outcome_fails_an_inspection_with_a_blocking_phase_and_counts_raises():
+    from dryheave.assessments import workflow_outcome
+    from dryheave.judges import RaiseEvent
+
+    raises = (
+        RaiseEvent(call_id="s-1", phase="fix", fact_ids=("comma",), cause="fix_request", turn=2),
+        RaiseEvent(call_id="s-2", phase="fix", fact_ids=("comma",), cause="fallback", turn=3),
+    )
+    outcome = workflow_outcome(
+        phased_case(),
+        WorkflowProgress(steps=("review",), position=0),
+        "turn_budget",
+        journal_of(
+            inspected("i-1", 1, comma="unmet", tests="unmet"),
+            inspected("i-2", 2, comma="unmet", tests="unmet"),
+            raises=raises,
+        ),
+        enabled=True,
+    )
+    assert outcome is not None
+    assert (outcome.fix_requests, outcome.fallbacks, outcome.completed) == (1, 1, False)
+    assert (outcome.first_inspection, outcome.final_inspection) == ("failed", "failed")
+
+
+def test_an_inspection_with_an_unchecked_verifier_requirement_is_not_a_first_pass():
+    from dryheave.assessments import workflow_outcome
+    from dryheave.models import CommandSpec
+
+    case = phased_case()
+    comma, tests = case.allowed_facts
+    verifier = FactVerifier(
+        command=CommandSpec(argv=("python3", "{verifier}/comma.py")),
+        entrypoint="comma.py",
+        expected_stdout="CHECK_RAN",
+    )
+    case = case.model_copy(
+        update={"allowed_facts": (comma.model_copy(update={"verifier": verifier}), tests)}
+    )
+    outcome = workflow_outcome(
+        case,
+        WorkflowProgress(steps=("review",), position=1),
+        "workflow_complete",
+        journal_of(
+            inspected("i-1", 1, comma="unclear", tests="unmet"),
+            inspected("i-2", 3, digest="d2", comma="met", tests="met"),
+        ),
+        enabled=True,
+    )
+    assert outcome is not None
+    assert (outcome.inspections, outcome.first_inspection, outcome.final_inspection) == (
+        2,
+        "unavailable",
+        "passed",
+    )
+
+
+def test_workflow_outcome_reports_an_inspection_intent_without_a_result_as_unknown():
+    from dryheave.assessments import workflow_outcome
+    from dryheave.workflow import InspectionRecord
+
+    outcome = workflow_outcome(
+        phased_case(),
+        WorkflowProgress(steps=("review",), position=0),
+        "interrupted",
+        journal_of(
+            inspected("i-1", 1, comma="unmet", tests="unmet"), InspectionRecord("i-2", 2, None)
+        ),
+        enabled=True,
+    )
+    assert outcome is not None
+    assert (outcome.inspections, outcome.first_inspection, outcome.final_inspection) == (
+        1,
+        "failed",
+        "unknown",
+    )
+
+
+def test_workflow_outcome_without_inspections_has_no_verdicts() -> None:
+    from dryheave.assessments import workflow_outcome
+
+    progress = WorkflowProgress(
+        steps=(),
+        position=0,
+        events=(WorkflowEvent(step_id="dialog", kind="dialog", outcome="answered", turn=1),),
+    )
+    outcome = workflow_outcome(phased_case(), progress, "stand_in_stop", journal_of(), enabled=True)
+    assert outcome is not None
+    assert (outcome.inspections, outcome.dialogs_answered) == (0, 1)
     assert (outcome.first_inspection, outcome.final_inspection) == ("none", "none")
 
 
@@ -149,7 +228,7 @@ def test_real_hidden_check_calibrates_and_resume_never_relaunches(
     original = load_capture(store, summary.pending_assessment[0])
     identifiers = assess_run(store, summary.run_id)
     result = load_assessment(store, identifiers[0])
-    assert (result.audit.input_integrity, result.completion, result.eligible) == (
+    assert (result.audit.input_integrity, result.outcome, result.eligible) == (
         "verified",
         "pass",
         True,
@@ -165,7 +244,7 @@ def test_real_hidden_check_calibrates_and_resume_never_relaunches(
     assert load_capture(store, summary.pending_assessment[0]) == original
     assert run_status(store, summary.run_id).attempts[0].stage == TrialStage.FINISHED
     monkeypatch.setattr(
-        "dryheave.assessments.grade_criterion",
+        "dryheave.assessments.grade_fact",
         lambda *_args: pytest.fail("Finished checks must not rerun."),
     )
     assert assess_run(store, summary.run_id) == identifiers
@@ -191,12 +270,12 @@ def test_verifier_blob_mutation_retains_invalid_report_without_loading_corrupt_i
     with pytest.raises(IntegrityError, match="hash mismatch"):
         load_capture(store, summary.pending_assessment[0])
     monkeypatch.setattr(
-        "dryheave.assessments.grade_criterion",
+        "dryheave.assessments.grade_fact",
         lambda *_args: pytest.fail("Tampered inputs cannot be graded."),
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.audit.input_integrity == "invalid"
-    assert result.completion == "indeterminate"
+    assert result.outcome == "indeterminate"
     assert result.roles[0].known_cost == 0
     assert result.capture_id == summary.pending_assessment[0]
     report = report_run(store, summary.run_id)
@@ -252,7 +331,9 @@ def test_mutation_before_capture_publication_quarantines_and_blocks_next_subject
         "raise SystemExit(1)\n",
     ],
 )
-def test_zero_checks_and_failure_are_not_success(store, graded_benchmark, program):
+def test_a_verifier_exiting_without_a_marker_is_unmet_but_uncalibrated(
+    store, graded_benchmark, program
+):
     case_id = graded_benchmark.cases[0]
     case = load_frozen_case(store, case_id)
     blobs = store.read_blobs(case_id)
@@ -269,7 +350,36 @@ def test_zero_checks_and_failure_are_not_success(store, graded_benchmark, progra
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.criteria[0].outcome == "error"
     assert result.criteria[0].calibration.status == "unavailable"
-    assert result.completion == "indeterminate"
+    assert verdicts(result) == {"punctuation": ("unmet", "verifier")}
+    assert (result.outcome, result.outcome_reason) == ("fail", "unmet")
+    assert (result.eligible, result.exclusion_reasons) == (False, ("verifier_uncalibrated",))
+
+
+def test_uncalibrated_verifiers_name_crashed_required_verifiers_whose_reference_did_not_pass():
+    from dryheave.result_models import Calibration, CheckExecution, CriterionResult
+
+    passed = CheckExecution(outcome="pass")
+    errored = CheckExecution(outcome="error", error="expected_execution_evidence_missing")
+
+    def criterion(name, reference, *, required=True, kind="deterministic", outcome="error"):
+        return CriterionResult(
+            criterion_id=name,
+            kind=kind,
+            required=required,
+            outcome=outcome,
+            calibration=Calibration(reference=reference),
+        )
+
+    criteria = (
+        criterion("calibrated", passed),
+        criterion("broken", errored),
+        criterion("no-reference", None),
+        criterion("optional", errored, required=False),
+        criterion("rubric", errored, kind="judge", required=False),
+        criterion("audit-excluded", errored, outcome="not_run"),
+        criterion("marker-fail-without-reference", None, outcome="fail"),
+    )
+    assert uncalibrated_verifiers(criteria) == ("broken", "no-reference")
 
 
 @pytest.mark.integration
@@ -301,7 +411,7 @@ def test_known_future_git_object_is_retained_but_excluded(
         host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
-    assert result.completion == "pass"
+    assert result.outcome == "pass"
     assert result.audit.findings[0].rule_id == "forbidden-git-object"
     assert result.audit.findings[0].confidence == "confirmed"
     assert result.eligible is False
@@ -315,10 +425,10 @@ def test_relative_verifier_executable_requires_an_explicit_trusted_path(store, g
 
     case_id = graded_benchmark.cases[0]
     case = load_frozen_case(store, case_id)
-    criterion = case.criteria[0].model_copy(
-        update={"command": CommandSpec(argv=("./wrapper", "{verifier}/hidden.py"))}
+    fact = with_verifier(
+        case.allowed_facts[0], command=CommandSpec(argv=("./wrapper", "{verifier}/hidden.py"))
     )
-    case = case.model_copy(update={"criteria": (criterion,)})
+    case = case.model_copy(update={"allowed_facts": (fact,)})
     changed = store.put(
         ObjectKind.CASE,
         case,
@@ -333,7 +443,8 @@ def test_relative_verifier_executable_requires_an_explicit_trusted_path(store, g
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.criteria[0].outcome == "error"
-    assert result.completion == "indeterminate"
+    assert result.facts == ()
+    assert (result.outcome, result.outcome_reason) == ("indeterminate", "grading_error")
     errors = [
         json.loads(content)
         for name, content in store.read_blobs(result.evidence_id).items()
@@ -354,7 +465,7 @@ def test_relative_verifier_executable_requires_an_explicit_trusted_path(store, g
 def test_interrupted_grading_resume_retains_error_without_reexecuting_command(
     store, graded_benchmark, monkeypatch
 ):
-    from dryheave.grading import grade_criterion
+    from dryheave.grading import grade_fact
 
     summary = run_experiment(
         store,
@@ -363,21 +474,21 @@ def test_interrupted_grading_resume_retains_error_without_reexecuting_command(
         host=HOST,
     )
 
-    def interrupt(context, criterion):
-        grade_criterion(context, criterion)
+    def interrupt(context, fact):
+        grade_fact(context, fact)
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("dryheave.assessments.grade_criterion", interrupt)
+    monkeypatch.setattr("dryheave.assessments.grade_fact", interrupt)
     with pytest.raises(KeyboardInterrupt):
         assess_run(store, summary.run_id)
     assert run_status(store, summary.run_id).attempts[0].stage == TrialStage.GRADING
     monkeypatch.setattr(
-        "dryheave.assessments.grade_criterion",
+        "dryheave.assessments.grade_fact",
         lambda *_args: pytest.fail("Ambiguous verifier execution must not repeat."),
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.criteria[0].error == "interrupted_verifier"
-    assert result.completion == "indeterminate"
+    assert result.outcome == "indeterminate"
     assert result.evidence_id
 
 
@@ -401,22 +512,24 @@ def test_independent_checks_and_explicit_ordered_suites(store, graded_benchmark,
         + '\nprint("CHECK_RAN")\n'
     ).encode()
     suite = "ordered" if shared else None
-    criteria = tuple(
-        DeterministicCriterion(
-            criterion_id="suite-shared"
-            if layout == "colliding-names" and name == "first"
-            else name,
-            description="Confirm independent or explicitly shared workspace state.",
-            command=CommandSpec(argv=(sys.executable, "{verifier}/" + name + ".py")),
-            entrypoint=name + ".py",
-            expected_stdout="CHECK_RAN",
-            suite_id="shared" if layout == "colliding-names" and name == "second" else suite,
+    facts = tuple(
+        TaskFact(
+            fact_id="suite-shared" if layout == "colliding-names" and name == "first" else name,
+            phase="fix",
+            text="Confirm independent or explicitly shared workspace state.",
+            curator_authored=True,
+            verifier=FactVerifier(
+                command=CommandSpec(argv=(sys.executable, "{verifier}/" + name + ".py")),
+                entrypoint=name + ".py",
+                expected_stdout="CHECK_RAN",
+                suite_id="shared" if layout == "colliding-names" and name == "second" else suite,
+            ),
         )
         for name in ("first", "second")
     )
     case = case.model_copy(
         update={
-            "criteria": criteria,
+            "allowed_facts": (as_context(case.allowed_facts[0]), *facts),
             "hidden_files": {
                 **case.hidden_files,
                 "first.py": "verifiers/first.py",
@@ -449,11 +562,13 @@ def test_interrupted_shared_suite_keeps_remaining_members_indeterminate(
 
     case_id = graded_benchmark.cases[0]
     case = load_frozen_case(store, case_id)
-    criteria = tuple(
-        case.criteria[0].model_copy(update={"criterion_id": name, "suite_id": "ordered"})
+    facts = tuple(
+        with_verifier(case.allowed_facts[0], suite_id="ordered").model_copy(
+            update={"fact_id": name}
+        )
         for name in ("first", "second")
     )
-    case = case.model_copy(update={"criteria": criteria})
+    case = case.model_copy(update={"allowed_facts": (as_context(case.allowed_facts[0]), *facts)})
     changed = store.put(
         ObjectKind.CASE,
         case,
@@ -487,13 +602,13 @@ def test_interrupted_shared_suite_keeps_remaining_members_indeterminate(
                 ),
             )
     monkeypatch.setattr(
-        "dryheave.assessments.grade_criterion",
+        "dryheave.assessments.grade_fact",
         lambda *_args: pytest.fail("Interrupted suites cannot continue in fresh workspaces."),
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
     assert result.criteria[0].outcome == ("pass" if saved_first else "error")
     assert result.criteria[1].error == "interrupted_verifier"
-    assert result.completion == "indeterminate"
+    assert result.outcome == "indeterminate"
 
 
 @pytest.mark.integration
@@ -504,9 +619,12 @@ def test_unjudged_assessment_keeps_legacy_shape_without_default_rubrics(store, a
     identifier = run_status(store, assessed.run_id).attempts[0].assessment_id
     payload = store.get(identifier).payload
     result = parse_model(canonical_json(payload), Assessment)
-    assert [item.criterion_id for item in result.criteria] == ["greeting"]
-    assert (result.checks, result.metrics, result.rubric_set) == ((), (), None)
-    assert not {"checks", "metrics", "rubric_set"} & set(payload)
+    assert [item.criterion_id for item in result.criteria] == ["punctuation"]
+    assert [(item.fact_id, item.verdict, item.source) for item in result.facts] == [
+        ("punctuation", "met", "verifier")
+    ]
+    assert (result.metrics, result.rubric_set, result.uncovered) == ((), None, ())
+    assert not {"metrics", "rubric_set", "uncovered"} & set(payload)
     assert canonical_json(result) == canonical_json(payload)
 
 
@@ -579,7 +697,7 @@ def test_case_metrics_command_measures_final_against_baseline(store, graded_benc
         ("baseline_unfixed", True, None),
         ("baseline_writable", False, None),
     ]
-    assert (result.completion, result.eligible) == ("pass", True)
+    assert (result.outcome, result.eligible) == ("pass", True)
     evidence = store.read_blobs(result.evidence_id)
     stdout = next(
         content
@@ -605,7 +723,7 @@ def test_failing_metrics_command_is_an_error_that_leaves_completion_alone(store,
     assert [(item.outcome, item.error) for item in result.metrics] == [
         ("error", "metrics command exited with status 4")
     ]
-    assert (result.completion, result.eligible, result.exclusion_reasons) == ("pass", True, ())
+    assert (result.outcome, result.eligible, result.exclusion_reasons) == ("pass", True, ())
 
 
 @pytest.mark.integration
@@ -715,20 +833,21 @@ def test_interrupted_metrics_command_becomes_an_error_on_resume_without_rerunnin
     assert [(item.outcome, item.error) for item in result.metrics] == [
         ("error", "interrupted_metrics")
     ]
-    assert result.completion == "pass"
+    assert result.outcome == "pass"
     assert assess_run(store, summary.run_id) == (
         run_status(store, summary.run_id).attempts[0].assessment_id,
     )
 
 
 @pytest.mark.integration
-def test_help_needed_separates_disclosed_facts_by_kind(store, graded_benchmark):
+def test_fact_account_credits_a_cited_on_request_requirement_as_elicited(store, graded_benchmark):
     from dryheave.cases import TaskFact
 
     case_id = store.resolve(graded_benchmark.cases[0])
     case = load_frozen_case(store, case_id)
     extra_fact = TaskFact(
         fact_id="greeting-style",
+        kind="context",
         text="Keep the greeting informal.",
         disclosure="proactive",
         curator_authored=True,
@@ -739,11 +858,11 @@ def test_help_needed_separates_disclosed_facts_by_kind(store, graded_benchmark):
         files=store.read_blobs(case_id),
         references=(case.persona_id, case.repository_id),
     )
-    script = graded_benchmark.simulator.script
+    script = graded_benchmark.stand_in.script
     draft = graded_benchmark.model_copy(
         update={
             "cases": (changed_case,),
-            "simulator": graded_benchmark.simulator.model_copy(
+            "stand_in": graded_benchmark.stand_in.model_copy(
                 update={
                     "script": (
                         script[0].model_copy(
@@ -766,19 +885,50 @@ def test_help_needed_separates_disclosed_facts_by_kind(store, graded_benchmark):
         host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
-    assert result.help_needed is not None
-    assert result.help_needed.simulator_replies == 1
-    assert set(result.help_needed.facts_disclosed) == {"punctuation", "greeting-style"}
-    assert result.help_needed.on_request_facts == ("punctuation",)
-    assert result.help_needed.proactive_facts == ("greeting-style",)
+    account = result.fact_account
+    assert account is not None
+    assert (account.stand_in_replies, account.fix_rounds, account.independence) == (1, 0, 0.75)
+    assert [(item.fact_id, item.credit, item.elicited) for item in account.facts] == [
+        ("punctuation", "elicited", True)
+    ]
+    assert (result.outcome, result.outcome_reason) == ("pass", "all_met")
 
 
 @pytest.mark.integration
-def test_help_needed_follows_the_captures_own_case_id_not_a_substitute_case(
+def test_a_run_without_a_workflow_that_answered_a_dialog_has_no_workflow_outcome(
+    store, graded_benchmark, monkeypatch
+):
+    dialog = WorkflowProgress(
+        steps=(),
+        position=0,
+        events=(WorkflowEvent(step_id="dialog", kind="dialog", outcome="answered", turn=1),),
+    )
+    monkeypatch.setattr("dryheave.runner_attempt.workflow_progress", lambda *_a, **_k: dialog)
+    summary = run_experiment(
+        store,
+        create_experiment(store, graded_benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
+    assert load_capture(store, summary.pending_assessment[0]).workflow == dialog
+    result = load_assessment(store, assess_run(store, summary.run_id)[0])
+    case = load_frozen_case(store, store.resolve(graded_benchmark.cases[0]))
+    assert result.workflow is None
+    assert result.fact_account is not None
+    assert result.fact_account.reached_phases == case.phases
+
+
+@pytest.mark.integration
+def test_elicited_facts_follow_the_captures_own_case_id_not_a_substitute_case(
     store, graded_benchmark
 ):
     from dryheave.assessment_inputs import AssessmentInputs
-    from dryheave.assessments import _capture_case, _help_needed
+    from dryheave.assessments import _capture_case, stand_in_exchanges
+    from dryheave.fact_metrics import elicited_facts
+
+    def elicited(capture):
+        case = _capture_case(store, AssessmentInputs(capture=capture))
+        return elicited_facts(case, stand_in_exchanges(capture, ()))
 
     case_id = store.resolve(graded_benchmark.cases[0])
     case = load_frozen_case(store, case_id)
@@ -803,22 +953,16 @@ def test_help_needed_follows_the_captures_own_case_id_not_a_substitute_case(
     )
     capture = load_capture(store, summary.pending_assessment[0])
     assert capture.case_id == case_id
-    original = _help_needed(capture, _capture_case(store, AssessmentInputs(capture=capture)))
-    assert original is not None
-    assert original.on_request_facts == ("punctuation",)
-    assert original.proactive_facts == ()
-
-    substitute = capture.model_copy(update={"case_id": proactive_variant})
-    swapped = _help_needed(substitute, _capture_case(store, AssessmentInputs(capture=substitute)))
-    assert swapped is not None
-    assert swapped.on_request_facts == ()
-    assert swapped.proactive_facts == ("punctuation",)
+    assert elicited(capture) == {"punctuation"}
+    assert elicited(capture.model_copy(update={"case_id": proactive_variant})) == frozenset()
 
 
 @pytest.mark.integration
-def test_help_needed_excludes_fix_it_and_dialog_answer_simulator_calls(store, graded_benchmark):
-    from dryheave.assessments import _help_needed
-    from dryheave.controller_models import RoleCall, SimulatorDecision
+def test_stand_in_exchanges_mark_fix_its_raised_and_count_dialog_answers(store, graded_benchmark):
+    from dryheave.assessments import stand_in_exchanges
+    from dryheave.controller_models import RoleCall, StandInDecision
+    from dryheave.fact_metrics import Exchange
+    from dryheave.judges import RaiseEvent
     from dryheave.runner_models import WorkflowEvent, WorkflowProgress
 
     summary = run_experiment(
@@ -828,27 +972,38 @@ def test_help_needed_excludes_fix_it_and_dialog_answer_simulator_calls(store, gr
         host=HOST,
     )
     capture = load_capture(store, summary.pending_assessment[0])
-    case = load_frozen_case(store, capture.case_id)
-    baseline = _help_needed(capture, case)
-    assert baseline is not None
+    baseline = stand_in_exchanges(capture, ())
 
     ordinary = RoleCall(
         call_id="ordinary-reply",
-        role="simulator",
+        role="stand_in",
         status="completed",
-        decision=SimulatorDecision(action="reply", text="Use mutual TLS", reason="asked"),
+        decision=StandInDecision(
+            action="reply", text="Use mutual TLS", fact_ids=("punctuation",), reason="asked"
+        ),
     )
     fix_it = RoleCall(
         call_id="fix-it-reply",
-        role="simulator",
+        role="stand_in",
         status="completed",
-        decision=SimulatorDecision(action="reply", text="Still broken", reason="fix"),
+        decision=StandInDecision(action="reply", text="Still broken", reason="fix"),
+    )
+    rejected = RoleCall(
+        call_id="rejected-reply",
+        role="stand_in",
+        status="failed",
+        error="invalid_dialog_answer",
+        decision=StandInDecision(
+            action="reply", text="Maybe", fact_ids=("punctuation",), reason="x"
+        ),
     )
     dialog_answer = RoleCall(
         call_id="dialog-reply",
-        role="simulator",
+        role="stand_in",
         status="completed",
-        decision=SimulatorDecision(action="reply", choices=("Option A",), reason="answered"),
+        decision=StandInDecision(
+            action="reply", choices=("Option A",), fact_ids=("punctuation",), reason="answered"
+        ),
     )
     workflow = WorkflowProgress(
         steps=("check",),
@@ -872,19 +1027,35 @@ def test_help_needed_excludes_fix_it_and_dialog_answer_simulator_calls(store, gr
     )
     modified = capture.model_copy(
         update={
-            "controller_calls": (*capture.controller_calls, ordinary, fix_it, dialog_answer),
+            "controller_calls": (
+                *capture.controller_calls,
+                ordinary,
+                fix_it,
+                rejected,
+                dialog_answer,
+            ),
             "workflow": workflow,
         }
     )
-    result = _help_needed(modified, case)
-    assert result is not None
-    assert result.simulator_replies == baseline.simulator_replies + 1
+    raised = RaiseEvent(
+        call_id="fix-it-reply",
+        phase="fix",
+        fact_ids=("punctuation",),
+        cause="fix_request",
+        turn=1,
+    )
+    assert stand_in_exchanges(modified, (raised,)) == (
+        *baseline,
+        Exchange(raised=False, fact_ids=("punctuation",)),
+        Exchange(raised=True, fact_ids=("punctuation",)),
+        Exchange(raised=False, fact_ids=("punctuation",)),
+    )
 
 
 @pytest.mark.integration
-def test_help_needed_excludes_screen_steps_of_an_unanswered_screen(store, graded_benchmark):
-    from dryheave.assessments import _help_needed
-    from dryheave.controller_models import RoleCall, SimulatorDecision
+def test_stand_in_exchanges_exclude_screen_steps_of_an_unanswered_screen(store, graded_benchmark):
+    from dryheave.assessments import stand_in_exchanges
+    from dryheave.controller_models import RoleCall, StandInDecision
     from dryheave.drivers.models import ScreenAction
 
     summary = run_experiment(
@@ -894,13 +1065,12 @@ def test_help_needed_excludes_screen_steps_of_an_unanswered_screen(store, graded
         host=HOST,
     )
     capture = load_capture(store, summary.pending_assessment[0])
-    case = load_frozen_case(store, capture.case_id)
-    baseline = _help_needed(capture, case)
+    baseline = stand_in_exchanges(capture, ())
     screen_step = RoleCall(
         call_id="screen-step",
-        role="simulator",
+        role="stand_in",
         status="completed",
-        decision=SimulatorDecision(
+        decision=StandInDecision(
             action="reply",
             reason="Moving to the option.",
             screen_kind="question",
@@ -910,8 +1080,7 @@ def test_help_needed_excludes_screen_steps_of_an_unanswered_screen(store, graded
     modified = capture.model_copy(
         update={"controller_calls": (*capture.controller_calls, screen_step)}
     )
-    result = _help_needed(modified, case)
-    assert (result.simulator_replies, baseline.simulator_replies) == (1, 1)
+    assert (len(stand_in_exchanges(modified, ())), len(baseline)) == (1, 1)
 
 
 def test_capture_case_reuses_the_trial_case_and_loads_only_a_different_one(store, monkeypatch):
@@ -935,7 +1104,7 @@ def test_capture_case_reuses_the_trial_case_and_loads_only_a_different_one(store
     assert (assessments._capture_case(store, inputs), loaded) == (other, ["c" * 64])
 
 
-def test_legacy_shaped_assessment_payload_loads_through_the_store_with_new_fields_defaulted(
+def test_assessment_payload_without_new_fields_loads_defaulted_and_schema_one_is_refused(
     store,
 ):
     from dryheave.models import Manifest
@@ -948,7 +1117,7 @@ def test_legacy_shaped_assessment_payload_loads_through_the_store_with_new_field
         "capture_id": None,
         "case_id": "a" * 64,
         "profile_id": None,
-        "simulator_id": None,
+        "stand_in_id": None,
         "scoring_id": None,
         "criteria_id": None,
         "variant": "base",
@@ -973,25 +1142,28 @@ def test_legacy_shaped_assessment_payload_loads_through_the_store_with_new_field
                 "coverage": "unknown",
                 "reasons": ["fixture"],
             }
-            for role in ("subject", "simulator", "judge")
+            for role in ("subject", "stand_in", "judge")
         ],
     }
     manifest = Manifest(kind=ObjectKind.RESULT, payload=legacy_payload)
     identifier = store.put_manifest(manifest, files={})
     result = load_assessment(store, identifier)
     assert (
-        result.checks,
+        result.schema_version,
+        result.facts,
+        result.uncovered,
         result.metrics,
         result.rubric_set,
-        result.help_needed,
-        result.workflow,
-    ) == (
-        (),
-        (),
-        None,
-        None,
-        None,
+        result.fact_account,
+        result.outcome,
+        result.outcome_reason,
+    ) == (2, (), (), (), None, None, "indeterminate", None)
+    old = store.put_manifest(
+        Manifest(kind=ObjectKind.RESULT, payload={**legacy_payload, "schema_version": 1}),
+        files={},
     )
+    with pytest.raises(InputError, match="schema_version"):
+        load_assessment(store, old)
 
 
 def test_assessment_serializer_drops_empty_optional_assessment_fields() -> None:
@@ -1024,7 +1196,7 @@ def test_assessment_serializer_drops_empty_optional_assessment_fields() -> None:
         capture_id=None,
         case_id=None,
         profile_id=None,
-        simulator_id=None,
+        stand_in_id=None,
         scoring_id=None,
         criteria_id=None,
         variant="base",
@@ -1037,23 +1209,24 @@ def test_assessment_serializer_drops_empty_optional_assessment_fields() -> None:
         subject_observation="completed",
         roles=(
             role,
-            role.model_copy(update={"role": "simulator"}),
+            role.model_copy(update={"role": "stand_in"}),
             role.model_copy(update={"role": "judge"}),
         ),
-        checks=(),
         metrics=(),
+        uncovered=(),
         rubric_set=None,
-        help_needed=None,
+        fact_account=None,
         workflow=None,
         graded_case_id=None,
         regrade_id=None,
     )
     parsed = json.loads(canonical_json(assessment))
     assert not {
-        "checks",
         "metrics",
+        "uncovered",
+        "outcome_reason",
         "rubric_set",
-        "help_needed",
+        "fact_account",
         "workflow",
         "graded_case_id",
         "regrade_id",
@@ -1063,7 +1236,7 @@ def test_assessment_serializer_drops_empty_optional_assessment_fields() -> None:
 def judged_regrade_benchmark(store, graded_benchmark, root: Path):
     import sys
 
-    from dryheave.cases import CaseCheck, RubricCriterion
+    from dryheave.cases import RubricCriterion
     from dryheave.controller_models import ControllerRecipe
     from dryheave.experiment_models import ScoringConfig
     from dryheave.models import CommandSpec
@@ -1076,13 +1249,6 @@ def judged_regrade_benchmark(store, graded_benchmark, root: Path):
                 *case.criteria,
                 RubricCriterion(
                     criterion_id="quality", rubric="The greeting keeps its public interface."
-                ),
-            ),
-            "checks": (
-                CaseCheck(
-                    check_id="asked",
-                    question="Did the agent ask which punctuation to use?",
-                    expect="yes",
                 ),
             ),
             "disabled_rubrics": ("code-quality", "codebase-consistency", "test-quality"),
@@ -1103,7 +1269,7 @@ def judged_regrade_benchmark(store, graded_benchmark, root: Path):
         'calls.write_text(str(int(calls.read_text()) + 1) if calls.exists() else "1")\n'
         'print((root / "response.json").read_text())\n'
     )
-    judge_answers(root, "pass", "yes")
+    judge_answers(root, "pass")
     scoring = ScoringConfig(
         judge=ControllerRecipe(
             kind="json-command",
@@ -1114,7 +1280,7 @@ def judged_regrade_benchmark(store, graded_benchmark, root: Path):
     return graded_benchmark.model_copy(update={"cases": (changed,), "scoring": scoring})
 
 
-def judge_answers(root: Path, outcome: str, answer: str) -> None:
+def judge_answers(root: Path, outcome: str) -> None:
     import json
 
     (root / "response.json").write_text(
@@ -1123,7 +1289,6 @@ def judge_answers(root: Path, outcome: str, answer: str) -> None:
                 "judgments": [
                     {"criterion_id": "quality", "outcome": outcome, "rationale": "Judged."}
                 ],
-                "checks": [{"check_id": "asked", "answer": answer, "rationale": "Judged."}],
             }
         )
     )
@@ -1157,10 +1322,10 @@ def test_regrade_judges_finished_attempts_again_as_new_chained_assessments(
     (original_id,) = assess_run(store, summary.run_id)
     original = load_assessment(store, original_id)
     assert [(item.criterion_id, item.outcome) for item in original.criteria] == [
-        ("greeting", "pass"),
+        ("punctuation", "pass"),
         ("quality", "pass"),
     ]
-    judge_answers(tmp_path, "fail", "no")
+    judge_answers(tmp_path, "fail")
 
     regrade_id, (regraded_id,) = regrade_run(store, summary.run_id)
 
@@ -1169,10 +1334,9 @@ def test_regrade_judges_finished_attempts_again_as_new_chained_assessments(
     assert regraded_id != original_id
     assert regraded.previous_id == original_id
     assert [(item.criterion_id, item.outcome) for item in regraded.criteria] == [
-        ("greeting", "pass"),
+        ("punctuation", "pass"),
         ("quality", "fail"),
     ]
-    assert [(item.check_id, item.outcome) for item in regraded.checks] == [("asked", "fail")]
     assert (regraded.case_id, regraded.graded_case_id) == (original.case_id, None)
     assert (regraded.regrade_id, original.regrade_id) == (regrade_id, None)
     assert regraded.criteria_id == original.criteria_id
@@ -1223,7 +1387,7 @@ def test_regrade_against_a_replacement_case_runs_its_hidden_metrics_script(store
         ("changed_lines", 1)
     ]
     assert regraded.criteria_id != original.criteria_id
-    assert (regraded.previous_id, regraded.completion, regraded.eligible) == (
+    assert (regraded.previous_id, regraded.outcome, regraded.eligible) == (
         original_id,
         "pass",
         True,
@@ -1246,7 +1410,7 @@ def test_regrade_refuses_an_incompatible_case_or_a_missing_judge(
     store, graded_benchmark, tmp_path, problem
 ):
     from dryheave.assessments import regrade_run
-    from dryheave.cases import CaseCheck
+    from dryheave.cases import TaskFact
     from dryheave.errors import InputError
 
     summary = run_experiment(
@@ -1262,11 +1426,14 @@ def test_regrade_refuses_an_incompatible_case_or_a_missing_judge(
         "initial_prompt": {"initial_prompt": "Rewrite the greeting in French."},
         "repository_id": {"repository_id": other_repository(store, tmp_path)},
         "judge": {
-            "checks": (
-                CaseCheck(
-                    check_id="asked",
-                    question="Did the agent ask which punctuation to use?",
-                    expect="yes",
+            "allowed_facts": (
+                *case.allowed_facts,
+                TaskFact(
+                    fact_id="asked",
+                    phase="fix",
+                    text="Ask which punctuation to use.",
+                    check="The agent asked which punctuation to use before editing.",
+                    curator_authored=True,
                 ),
             )
         },
@@ -1458,7 +1625,6 @@ def test_regrade_resume_skips_a_finished_attempt_and_reconciles_one_left_grading
     assert resumed_assessment.previous_id == grading_audit_id
     assert resumed_assessment.regrade_id == regrade_id
     assert any(item.error == "interrupted_judge" for item in resumed_assessment.criteria)
-    assert any(item.outcome == "error" for item in resumed_assessment.checks)
 
 
 @pytest.mark.integration
@@ -1512,3 +1678,279 @@ def test_regrade_keeps_reviews_of_findings_its_audit_still_reports(
     assert regraded.previous_id == reviewed_id
     assert regraded.reviews == (review,)
     assert (regraded.exclusion_reasons, regraded.eligible) == ((), True)
+
+
+def final_judge_run(
+    store, graded_benchmark, tmp_path, answers, *, workflow, max_calls=None, **case_changes
+):
+    import json
+
+    from conftest import workflow_benchmark
+    from dryheave.controller_models import RoleBudget
+
+    draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path, **case_changes)
+    if max_calls is not None:
+        judge = draft.scoring.judge
+        draft = draft.model_copy(
+            update={
+                "scoring": draft.scoring.model_copy(
+                    update={
+                        "judge": judge.model_copy(
+                            update={"budget": RoleBudget(max_calls=max_calls)}
+                        )
+                    }
+                )
+            }
+        )
+    (tmp_path / "fact-verdicts.json").write_text(json.dumps(answers))
+    summary = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture", workflow=workflow),
+        host=HOST,
+    )
+    result = load_assessment(store, assess_run(store, summary.run_id)[0])
+    requests = [
+        [item["fact_id"] for item in json.loads(path.read_text())["facts"]]
+        for path in sorted(tmp_path.glob("fact-request-*.json"))
+    ]
+    return result, requests
+
+
+def verdicts(result):
+    return {item.fact_id: (item.verdict, item.source) for item in result.facts}
+
+
+def interrupted_final_judge(store, graded_benchmark, tmp_path, monkeypatch, target):
+    import json
+
+    from conftest import workflow_benchmark
+
+    draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path)
+    (tmp_path / "fact-verdicts.json").write_text(json.dumps([{"interface": "met"}]))
+    summary = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
+
+    def interrupt(*_args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(f"dryheave.assessments.{target}", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        assess_run(store, summary.run_id)
+    return summary
+
+
+def fact_requests(tmp_path):
+    return len(list(tmp_path.glob("fact-request-*.json")))
+
+
+@pytest.mark.integration
+def test_resume_after_a_fact_judge_intent_without_a_grade_never_repeats_the_call(
+    store, graded_benchmark, tmp_path, monkeypatch
+):
+    summary = interrupted_final_judge(
+        store, graded_benchmark, tmp_path, monkeypatch, "invoke_final_judge"
+    )
+    monkeypatch.setattr(
+        "dryheave.assessments.invoke_final_judge",
+        lambda *_args: pytest.fail("An interrupted fact judge call must not repeat."),
+    )
+    result = load_assessment(store, assess_run(store, summary.run_id)[0])
+    assert fact_requests(tmp_path) == 0
+    assert verdicts(result) == {"punctuation": ("met", "verifier")}
+    assert (result.outcome, result.outcome_reason) == ("indeterminate", "grading_error")
+    assert {item.criterion_id: item.outcome for item in result.criteria}["quality"] == "pass"
+
+
+@pytest.mark.integration
+def test_resume_after_the_fact_grade_reuses_the_saved_verdicts(
+    store, graded_benchmark, tmp_path, monkeypatch
+):
+    summary = interrupted_final_judge(
+        store, graded_benchmark, tmp_path, monkeypatch, "invoke_judge"
+    )
+    assert fact_requests(tmp_path) == 1
+    monkeypatch.setattr(
+        "dryheave.assessments.invoke_final_judge",
+        lambda *_args: pytest.fail("Saved fact verdicts must not be judged again."),
+    )
+    result = load_assessment(store, assess_run(store, summary.run_id)[0])
+    assert fact_requests(tmp_path) == 1
+    assert verdicts(result) == {"punctuation": ("met", "verifier"), "interface": ("met", "judge")}
+    assert (result.outcome, result.outcome_reason) == ("pass", "all_met")
+
+
+@pytest.mark.integration
+def test_final_judge_reasks_only_missing_facts_and_keeps_uncovered_problems(
+    store, graded_benchmark, tmp_path
+):
+    answers = [{"interface": "missing", "uncovered": ["An empty name greets nobody."]}, {}]
+    result, requests = final_judge_run(store, graded_benchmark, tmp_path, answers, workflow=False)
+    assert requests == [["interface"], ["interface"]]
+    assert verdicts(result) == {"punctuation": ("met", "verifier"), "interface": ("met", "judge")}
+    assert result.uncovered == ("An empty name greets nobody.",)
+    assert (result.outcome, result.outcome_reason, result.eligible) == ("pass", "all_met", True)
+
+
+@pytest.mark.integration
+def test_an_over_long_uncovered_list_is_clipped_not_rejected(store, graded_benchmark, tmp_path):
+    notes = ["x" * 700, *(f"problem {index}" for index in range(24))]
+    result, requests = final_judge_run(
+        store, graded_benchmark, tmp_path, [{"uncovered": notes}], workflow=False
+    )
+    assert requests == [["interface"]]
+    assert verdicts(result)["interface"] == ("met", "judge")
+    assert result.uncovered == ("x" * 600, *(f"problem {index}" for index in range(19)))
+    assert (result.outcome, result.outcome_reason) == ("pass", "all_met")
+
+
+@pytest.mark.integration
+def test_a_fact_the_final_judge_never_returns_leaves_the_attempt_indeterminate(
+    store, graded_benchmark, tmp_path
+):
+    result, requests = final_judge_run(
+        store, graded_benchmark, tmp_path, [{"interface": "missing"}], workflow=False
+    )
+    assert requests == [["interface"], ["interface"]]
+    assert verdicts(result) == {"punctuation": ("met", "verifier")}
+    assert (result.outcome, result.outcome_reason) == ("indeterminate", "grading_error")
+    assert "unscorable" in result.exclusion_reasons
+
+
+@pytest.mark.integration
+def test_an_unmet_judged_requirement_fails_the_attempt(store, graded_benchmark, tmp_path):
+    result, _ = final_judge_run(
+        store, graded_benchmark, tmp_path, [{"interface": "unmet"}], workflow=False
+    )
+    assert (result.outcome, result.outcome_reason, result.eligible) == ("fail", "unmet", True)
+    assert result.fact_account is not None
+    assert [(item.fact_id, item.credit) for item in result.fact_account.facts] == [
+        ("punctuation", "elicited"),
+        ("interface", "unmet"),
+    ]
+
+
+@pytest.mark.integration
+def test_a_verifier_crashing_on_the_subject_tree_fails_the_attempt(
+    store, graded_benchmark, tmp_path
+):
+    broken = graded_benchmark.fixture[1].model_copy(
+        update={"files": {"greet.py": "def greet(name)\n    return name\n"}}
+    )
+    crashing = graded_benchmark.model_copy(
+        update={"fixture": (graded_benchmark.fixture[0], broken)}
+    )
+    result, _ = final_judge_run(store, crashing, tmp_path, [{"interface": "met"}], workflow=False)
+    assert verdicts(result) == {"punctuation": ("unmet", "verifier"), "interface": ("met", "judge")}
+    (punctuation,) = (item for item in result.facts if item.fact_id == "punctuation")
+    assert (punctuation.observation, punctuation.evidence) == (
+        "Use a comma after Hello. (crashed)",
+        "verifier hidden.py: exited, exit code 1, expected_execution_evidence_missing",
+    )
+    assert (result.outcome, result.outcome_reason, result.eligible) == ("fail", "unmet", True)
+
+
+@pytest.mark.integration
+def test_an_unmet_later_phase_requirement_without_a_workflow_fails_the_attempt(
+    store, graded_benchmark, tmp_path, monkeypatch
+):
+    dialog = WorkflowProgress(
+        steps=(),
+        position=0,
+        events=(WorkflowEvent(step_id="dialog", kind="dialog", outcome="answered", turn=1),),
+    )
+    monkeypatch.setattr("dryheave.runner_attempt.workflow_progress", lambda *_a, **_k: dialog)
+    later = {
+        "fact_id": "docs-note",
+        "phase": "docs",
+        "text": "Document the greeting.",
+        "check": "README mentions the greeting.",
+        "curator_authored": True,
+    }
+    result, _ = final_judge_run(
+        store,
+        graded_benchmark,
+        tmp_path,
+        [{"docs-note": "unmet"}],
+        workflow=False,
+        facts=(later,),
+        phases=("fix", "docs"),
+    )
+    assert result.workflow is None
+    assert (result.outcome, result.outcome_reason) == ("fail", "unmet")
+
+
+@pytest.mark.integration
+def test_a_spent_judge_budget_skips_the_rejudge_and_the_rubrics_with_their_own_reason(
+    store, graded_benchmark, tmp_path
+):
+    result, requests = final_judge_run(
+        store, graded_benchmark, tmp_path, [{"interface": "unmet"}], workflow=True, max_calls=1
+    )
+    assert requests == [["interface"]]
+    interface = next(item for item in result.facts if item.fact_id == "interface")
+    assert interface.verdict == "disputed"
+    assert interface.evidence.startswith("re-judge skipped, judge call budget spent; ")
+    rubrics = [item for item in result.criteria if item.kind == "judge"]
+    assert {(item.outcome, item.error) for item in rubrics} == {
+        ("not_run", "judge_budget_exhausted")
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("rejudged", "expected", "outcome"),
+    [
+        ("unmet", ("disputed", "judge"), ("indeterminate", "disputed")),
+        ("met", ("met", "judge"), ("pass", "all_met")),
+    ],
+)
+def test_a_final_verdict_contradicting_the_last_inspection_is_rejudged_then_disputed(
+    store, graded_benchmark, tmp_path, rejudged, expected, outcome
+):
+    answers = [{"interface": "unmet"}, {"interface": rejudged}]
+    result, requests = final_judge_run(store, graded_benchmark, tmp_path, answers, workflow=True)
+    assert requests == [["interface"], ["interface"]]
+    assert verdicts(result)["interface"] == expected
+    assert (result.outcome, result.outcome_reason) == outcome
+    assert result.workflow is not None
+    assert (result.workflow.final_inspection, result.workflow.completed) == ("passed", True)
+
+
+@pytest.mark.integration
+def test_a_regrade_with_a_corrected_check_reports_the_new_verdict_instead_of_a_dispute(
+    store, graded_benchmark, tmp_path
+):
+    import json
+
+    from dryheave.assessments import regrade_run
+    from dryheave.cases import load_frozen_case
+
+    result, _ = final_judge_run(
+        store, graded_benchmark, tmp_path, [{"interface": "met"}], workflow=True
+    )
+    case = load_frozen_case(store, result.case_id)
+    corrected = tuple(
+        fact.model_copy(update={"check": "greet also rejects an empty name."})
+        if fact.fact_id == "interface"
+        else fact
+        for fact in case.allowed_facts
+    )
+    replacement = store.put(
+        ObjectKind.CASE,
+        case.model_copy(update={"allowed_facts": corrected}),
+        files=store.read_blobs(result.case_id),
+        references=(case.persona_id, case.repository_id),
+    )
+    (tmp_path / "fact-verdicts.json").write_text(json.dumps([{"interface": "unmet"}]))
+    for request in tmp_path.glob("fact-request-*.json"):
+        request.unlink()
+    _, (regraded_id,) = regrade_run(store, result.run_id, case=replacement)
+    regraded = load_assessment(store, regraded_id)
+    assert fact_requests(tmp_path) == 1
+    assert verdicts(regraded)["interface"] == ("unmet", "judge")
+    assert (regraded.outcome, regraded.outcome_reason) == ("fail", "unmet")

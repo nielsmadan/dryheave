@@ -7,8 +7,19 @@ description: Assess, report and compare saved Dryheave runs with retained audit 
 
 ## Instructions
 
+0. A benchmark from `dryheave-case` is `dryheave bench NAME --variant NAME=MODEL ... --judge MODEL --budget-from PILOT_RUN`,
+   which runs, grades and writes `reports/RUN_ID.json` and `.html` in a workspace.
+   Its `data.results` summarizes each variant's attempts, and the passed pilot
+   appears as a floor variant labelled `pilot (n=1)` with its larger budget; it
+   shows the independence a weak model reached and is not a benchmark repetition.
+   It is shown only when the pilot's case, stand-in, scoring and workflow match.
+   Read a single attempt with `dryheave transcript RUN_ID --attempt ATTEMPT_ID`
+   (the conversation the agent saw, what happened behind the scenes, the gaps left),
+   or the Review card in the viewer's Attempt detail. In `ask` mode offer to commit
+   the reported `commit_paths` of `bench`/`report` with `bench: RUN_ID` or
+   `report: RUN_ID`; in `auto` report `commit.state`; in `off` say nothing.
 1. Inspect saved inputs with `dryheave --store STORE experiment inspect EXPERIMENT_ID --json`.
-   Frozen case/profile/simulator/scoring IDs determine the comparison. An alias
+   Frozen case/profile/stand-in/scoring IDs determine the comparison. An alias
    move cannot change historical runs. Repetitions require fresh workspaces.
 2. For an authorized new trial, run
    `dryheave --store STORE run EXPERIMENT_ID --mode native --tui-test TUI_TEST_PATH --runtime-root SHORT_ROOT --json`.
@@ -23,20 +34,43 @@ description: Assess, report and compare saved Dryheave runs with retained audit 
    pending. Read `data.groups` for scheduled/attempt/completed/scored/eligible
    counts, exclusions, duration/token (including cache read/write) distributions,
    `known_spend_by_currency`, `cost_by_role`, `unknown_cost_records` and
-   `partial_cost_attempts`. Role records retain subject, simulator and judge
+   `partial_cost_attempts`. Role records retain subject, stand-in and judge
    costs independently, including failures and retries, each with the price
-   table version/date it used. `groups[].criteria`, `.checks` (with
-   `agreement`, the share of a case's repetitions matching the majority
-   outcome) and `.metrics` summarize case-declared checks and metrics commands
-   per case; `help_needed`/`simulator_replies` summarize how much the subject
-   asked for versus was told. Three default rubrics (`code-quality`,
-   `codebase-consistency`, `test-quality`) grade every case with a judge
-   unless a case overrode or disabled one; `rubric_set` on each assessment
-   records the default version used.
+   table version/date it used.
+   Explain the fact-based results this way:
+   - Outcome (`result.outcome`, with `outcome_reason`): `pass` means every
+     requirement fact was met at the end. `fail` means a requirement was unmet
+     (`unmet`), or the agent ran out of turns or stand-in replies
+     (`budget_exhausted`), or it stopped on the subject's side with later phases
+     unreached. `indeterminate` means the result is not safe to call: a requirement
+     was `disputed` (the inspector and final judge disagreed on an unchanged
+     snapshot) or `unclear`, a phase was never reached for a harness-side reason
+     (`phase_unreached`), or grading failed (`grading_error`).
+   - Independence score (`independence`, 0 to 1): the mean credit over the
+     non-proactive requirement facts in the phases the run reached. A fact is `own`
+     (met, never raised or elicited) for 1.0, `elicited` for 0.75 (the stand-in
+     voiced it in an ordinary reply before any fix request), `corrected` for 0 (met
+     only after a fix request named it) and `unmet` for 0. `unreached` facts are left
+     out and reported separately. It is null when nothing was scored or a scored fact
+     lacks a met/unmet verdict.
+   - Fact split: `groups[].facts` tallies per fact the verdicts (`met`, `unmet`,
+     `unclear`, `disputed`), the credits (`own`, `elicited`, `corrected`,
+     `unreached`), how often it was raised, whether the first inspection already
+     found it met, and regressions (met, then unmet after the files changed).
+     `corrections` counts fix rounds and raised facts per phase. `stand_in_replies`
+     counts the stand-in's ordinary replies.
+   - `groups[].criteria` and `groups[].metrics` summarize non-gating quality rubrics and metrics
+     commands per case; they never change the outcome. Three default rubrics
+     (`code-quality`, `codebase-consistency`, `test-quality`) grade every case with
+     a judge unless a case overrode or disabled one; `rubric_set` on each assessment
+     records the default version used. `result.uncovered` lists problems the judge
+     saw that no fact covers: candidates for new facts.
+   Do not call a run better because its independence is higher on one attempt;
+   report `n`, outcomes and attrition beside it.
 5. Compare `compare BEFORE_RUN AFTER_RUN --json`, or compare two variants within
    one run using `compare RUN_ID RUN_ID --before-variant base --after-variant changed --json`.
    Read `paired_count`, `excluded_before/after`, `pairs` and both metric lists.
-   Require matching case/criteria/simulator/scoring/repetition/seed/mode identities.
+   Require matching case/criteria/stand-in/scoring/repetition/seed/mode identities.
    Present eligible performance beside attrition and spending across every attempt.
 6. To re-grade existing captures without relaunching subjects — after a rubric,
    check or metrics-script change — run
@@ -48,8 +82,8 @@ description: Assess, report and compare saved Dryheave runs with retained audit 
    replacement case was used. An interrupted regrade resumes by re-running the
    same command; plain `assess` refuses while a regrade is unfinished.
 7. Serve the results interactively with `dryheave --store STORE view RUN_ID --open`
-   (Results tab for cost/tokens/turns/help-needed/criteria/checks/metrics per
-   variant, Case tab for the frozen case, attempt detail for judge reasoning),
+   (Results tab for cost/tokens/turns/outcome/independence/fact split/criteria/metrics
+   per variant, Case tab for the frozen case, attempt detail for judge reasoning),
    or write one shareable file with
    `dryheave --store STORE report RUN_ID --html report.html`. Add
    `--include-sensitive assessment-evidence` to include judge rationale in the

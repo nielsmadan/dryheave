@@ -10,6 +10,7 @@ from dryheave.cli import main
 from dryheave.controller_models import ControllerRecipe
 from dryheave.experiments import create_experiment
 from dryheave.models import CommandSpec
+from dryheave.workspaces import initialize_workspace
 
 
 @pytest.mark.integration
@@ -57,7 +58,7 @@ def test_real_second_cli_status_reads_progress_while_writer_is_active(
         isolation="trusted-native",
         command=CommandSpec(argv=(sys.executable, str(script))),
     )
-    identifier = create_experiment(store, graded_benchmark.model_copy(update={"simulator": recipe}))
+    identifier = create_experiment(store, graded_benchmark.model_copy(update={"stand_in": recipe}))
     command = [sys.executable, "-m", "dryheave", "--store", str(store.root), "--json"]
     process = subprocess.Popen(
         [*command, "run", identifier, "--mode", "offline-fixture"],
@@ -344,3 +345,64 @@ def test_cli_report_html_reasoning_does_not_depend_on_the_request_journal_budget
         == 0
     )
     assert "Judged quality." in destination.read_text()
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("git_identity")
+def test_cli_report_inside_a_workspace_writes_reports_and_commits_them_in_auto_mode(
+    store, graded_benchmark, tmp_path, short_runtime, monkeypatch, capsys
+):
+    benchmark, case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    prefix = ["--store", str(store.root), "--json"]
+    identifier = create_experiment(store, benchmark)
+    assert main([*prefix, "run", identifier, "--mode", "offline-fixture"]) == 0
+    run_id = json.loads(capsys.readouterr().out)["data"]["run_id"]
+    assert main([*prefix, "assess", run_id]) == 0
+    capsys.readouterr()
+    workspace = tmp_path / "ws"
+    init = ["init", str(workspace), "--runtime-root", str(short_runtime), "--git-commit", "auto"]
+    assert main([*init, "--json"]) == 0
+    capsys.readouterr()
+    monkeypatch.chdir(workspace)
+    assert main([*prefix, "report", run_id]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    data_file = workspace / "reports" / f"{run_id}.json"
+    page = workspace / "reports" / f"{run_id}.html"
+    assert data["written"] == [str(data_file), str(page)]
+    assert json.loads(data_file.read_text())["run_id"] == run_id
+    assert case_id in page.read_text()
+    assert data["commit_paths"] == [f"reports/{run_id}.json", f"reports/{run_id}.html"]
+    assert data["commit"]["message"] == f"report: {run_id}"
+    assert data["commit"]["state"] == "committed"
+    assert main([*prefix, "report", run_id]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["commit"]["state"] == "nothing_to_commit"
+
+
+@pytest.mark.integration
+def test_cli_report_inside_a_workspace_keeps_an_explicit_html_path_and_reports_it(
+    store, graded_benchmark, tmp_path, short_runtime, monkeypatch, capsys
+):
+    benchmark, _ = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    prefix = ["--store", str(store.root), "--json"]
+    identifier = create_experiment(store, benchmark)
+    assert main([*prefix, "run", identifier, "--mode", "offline-fixture"]) == 0
+    run_id = json.loads(capsys.readouterr().out)["data"]["run_id"]
+    workspace = tmp_path / "ws"
+    assert main(["init", str(workspace), "--runtime-root", str(short_runtime), "--json"]) == 0
+    capsys.readouterr()
+    monkeypatch.chdir(workspace)
+    assert main([*prefix, "report", run_id, "--html", "custom/out.html"]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["path"] == str(workspace / "custom/out.html")
+    assert data["commit_paths"] == ["custom/out.html"]
+    assert not (workspace / "reports").exists()
+
+
+def test_report_in_a_workspace_still_requires_html_for_force_and_sensitive(
+    store, tmp_path, short_runtime, monkeypatch, capsys
+):
+    initialize_workspace(tmp_path / "ws", runtime_root=short_runtime)
+    monkeypatch.chdir(tmp_path / "ws")
+    run_id = "a" * 32
+    assert main(["--store", str(store.root), "report", run_id, "--force"]) == 2
+    assert capsys.readouterr().err == "dryheave: --force and --include-sensitive require --html.\n"

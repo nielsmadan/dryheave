@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  checkLabel,
   chipTitle,
   contentNotes,
   describeCalibration,
@@ -466,7 +465,7 @@ test("roleTotals prefers attempt roles over assessment roles", () => {
       result: {
         roles: [
           {
-            role: "simulator",
+            role: "stand_in",
             coverage: "complete",
             known_tokens: { uncached_input: 1, output: 2, reasoning: 1 },
             records: [{ cost: 1, currency: "EUR" }],
@@ -476,7 +475,7 @@ test("roleTotals prefers attempt roles over assessment roles", () => {
     },
   ]);
   assert.equal(totals.length, 1);
-  assert.equal(totals[0].role, "simulator");
+  assert.equal(totals[0].role, "stand_in");
   assert.deepEqual(totals[0].spend, { EUR: 1 });
 });
 
@@ -632,5 +631,4 @@ test("topline formatters render compact durations, token counts, costs and turns
     ["$0.91", "1.50 EUR", "unknown"],
   );
   assert.deepEqual([formatTurns(2), formatTurns(2.5), formatTurns(null)], ["2", "2.5", "unknown"]);
-  assert.equal(checkLabel("layout-collapse-at-any-point"), "Layout collapse at any point");
 });

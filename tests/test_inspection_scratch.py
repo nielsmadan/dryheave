@@ -16,8 +16,8 @@ def report(stopped):
 
 
 def test_only_dryheave_cleanup_records_decide_and_subject_files_are_ignored(tmp_path):
-    criterion = tmp_path / "verifiers" / "criteria" / "greeting" / "final"
-    record(criterion / "greeting-evidence" / "000003-cleanup.json", report(True))
+    criterion = tmp_path / "verifiers" / "facts" / "punctuation" / "final"
+    record(criterion / "punctuation-evidence" / "000003-cleanup.json", report(True))
     record(tmp_path / "judge" / "j-1" / "000002-cleanup.json", report(True))
     record(criterion / "workspace" / "000001-cleanup.json", "[1, 2]")
     record(criterion / "workspace" / "deep" / "x-cleanup.json", report(False))

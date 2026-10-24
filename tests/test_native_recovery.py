@@ -136,7 +136,7 @@ def test_corrupt_inputs_do_not_prevent_recorded_writer_cleanup(
         writer.wait(timeout=3)
         assert result.audit.input_integrity == "invalid"
         assert result.eligible is False
-        assert result.completion == "indeterminate"
+        assert result.outcome == "indeterminate"
         assert len(run_status(store, run_id).attempts) == 1
 
 

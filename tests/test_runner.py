@@ -8,11 +8,14 @@ import pytest
 from conftest import (
     CHANNEL,
     EDIT_PERMISSION,
+    FIX_REPLY,
     FIX_SCOPE,
+    FIXED_GREETING,
     HOST,
     AskedQuestion,
     ClaudeQuestionUI,
     ScreenUI,
+    broken_then_fixed,
     live_codex_home,
     workflow_benchmark,
 )
@@ -23,10 +26,11 @@ from dryheave.experiments import create_experiment, load_experiment
 from dryheave.fixture_subject import FixtureTerminal
 from dryheave.host import HostContext
 from dryheave.journals import RunStore
+from dryheave.judges import RaiseEvent
 from dryheave.models import ObjectKind, TrialStage
 from dryheave.runner import load_capture, run_experiment, run_status
 from dryheave.runner_attempt import _combine_cleanup
-from dryheave.runner_models import RunOptions
+from dryheave.runner_models import RunBudget, RunOptions
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json
 
@@ -57,7 +61,7 @@ def test_fixture_clarification_capture_and_resume_without_paid_launch(store, ben
     assert (capture.accepted_turns, capture.delivery_attempts, capture.stop_reason) == (
         2,
         2,
-        "simulator_stop",
+        "stand_in_stop",
     )
     assert [item.text for item in capture.dialogue] == [
         "Fix the greeting; ask me which punctuation.",
@@ -254,8 +258,8 @@ def test_new_cli_run_uses_workspace_runtime_only_for_native(
 def test_turn_and_controller_budgets_stop_further_submission(store, benchmark):
     from dryheave.controller_models import RoleBudget
 
-    recipe = benchmark.simulator.model_copy(update={"budget": RoleBudget(max_calls=0)})
-    identifier = create_experiment(store, benchmark.model_copy(update={"simulator": recipe}))
+    recipe = benchmark.stand_in.model_copy(update={"budget": RoleBudget(max_calls=0)})
+    identifier = create_experiment(store, benchmark.model_copy(update={"stand_in": recipe}))
     result = run_experiment(
         store,
         identifier,
@@ -326,7 +330,7 @@ def test_controller_intent_is_interrupted_on_recovery_without_reexecution(store,
 
 
 @pytest.mark.integration
-def test_permission_dialog_stops_without_a_simulator_call(store, benchmark):
+def test_permission_dialog_stops_without_a_stand_in_call(store, benchmark):
     turn = benchmark.fixture[0].model_copy(update={"state": "approval"})
     result = run_experiment(
         store,
@@ -402,7 +406,7 @@ def test_controller_cleanup_failure_preserves_capture_after_fresh_reconciliation
         ),
     )
     identifier = create_experiment(
-        store, benchmark.model_copy(update={"simulator": recipe, "repetitions": 2})
+        store, benchmark.model_copy(update={"stand_in": recipe, "repetitions": 2})
     )
     result = run_experiment(
         store,
@@ -476,7 +480,7 @@ def test_load_capture_batch_traversal_does_not_grow_per_file(store, benchmark, m
 
 
 @pytest.mark.integration
-def test_a_failed_simulator_call_is_retried_once(store, benchmark, tmp_path):
+def test_a_failed_stand_in_call_is_retried_once(store, benchmark, tmp_path):
     import sys
 
     from dryheave.controller_models import ControllerRecipe
@@ -494,7 +498,7 @@ def test_a_failed_simulator_call_is_retried_once(store, benchmark, tmp_path):
         isolation="trusted-native",
         command=CommandSpec(argv=(sys.executable, "-c", script)),
     )
-    identifier = create_experiment(store, benchmark.model_copy(update={"simulator": recipe}))
+    identifier = create_experiment(store, benchmark.model_copy(update={"stand_in": recipe}))
     result = run_experiment(
         store,
         identifier,
@@ -503,7 +507,7 @@ def test_a_failed_simulator_call_is_retried_once(store, benchmark, tmp_path):
     )
     captured = load_capture(store, result.pending_assessment[0])
     assert [call.status for call in captured.controller_calls] == ["failed", "completed"]
-    assert captured.stop_reason == "simulator_stop"
+    assert captured.stop_reason == "stand_in_stop"
 
 
 def test_attempt_errors_name_their_type_and_origin():
@@ -567,57 +571,24 @@ def test_setup_spawning_many_processes_journals_a_bounded_number_of_ownership_ev
     assert not any(event.event == "owned-process" for event in journal.events)
 
 
-FIXED_GREETING = 'def greet(name):\n    return "Hello, " + name\n'
-FIX_REPLY = "When I greet someone there is no comma after Hello."
-
-
-def workflow_options() -> RunOptions:
-    return RunOptions(mode="offline-fixture", workflow=True)
+def workflow_options(**budget) -> RunOptions:
+    return RunOptions(mode="offline-fixture", workflow=True, budget=RunBudget(**budget))
 
 
 def workflow_events(capture):
     return [(item.kind, item.outcome) for item in capture.workflow.events]
 
 
-def broken_then_fixed(benchmark, *, max_calls=4):
-    from dryheave.controller_models import RoleBudget, ScriptStep, SimulatorDecision
-    from dryheave.experiment_models import FixtureTurn
+def inspections(store, run_id, attempt_id):
+    from dryheave.workflow import inspection_records
 
-    broken = benchmark.fixture[1].model_copy(update={"files": {"added.txt": "new task file\n"}})
-    return benchmark.model_copy(
-        update={
-            "fixture": (
-                benchmark.fixture[0],
-                broken,
-                FixtureTurn(
-                    prompt=FIX_REPLY, assistant="Fixed.", files={"greet.py": FIXED_GREETING}
-                ),
-            ),
-            "simulator": benchmark.simulator.model_copy(
-                update={
-                    "budget": RoleBudget(max_calls=max_calls),
-                    "script": (
-                        *benchmark.simulator.script,
-                        ScriptStep(
-                            match="contains",
-                            assistant="Done.",
-                            decision=SimulatorDecision(
-                                action="reply",
-                                text=FIX_REPLY,
-                                reason="Using the greeting shows the comma is missing.",
-                            ),
-                        ),
-                        ScriptStep(
-                            assistant="Fixed.",
-                            decision=SimulatorDecision(
-                                action="stop", reason="The greeting now works."
-                            ),
-                        ),
-                    ),
-                },
-            ),
-        }
-    )
+    return inspection_records(RunStore(store.root).inspect(run_id).events, attempt_id)
+
+
+def raises(store, run_id, attempt_id):
+    from dryheave.workflow import raise_events
+
+    return raise_events(RunStore(store.root).inspect(run_id).events, attempt_id)
 
 
 @pytest.mark.integration
@@ -636,14 +607,20 @@ def test_default_workflow_inspects_once_then_grading_runs_its_own_judge(
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
-    assert (capture.workflow.steps, capture.workflow.position) == (("inspect-required",), 1)
+    assert (capture.workflow.steps, capture.workflow.position) == ((), 0)
     assert workflow_events(capture) == [("inspect", "passed")]
     (inspected,) = [call for call in capture.controller_calls if call.role == "judge"]
     assert inspected.status == "completed"
     assert capture.workflow.events[0].call_ids == (inspected.call_id,)
     assert capture.workflow.events[0].seconds > 0
+    (record,) = inspections(store, result.run_id, capture.attempt_id)
+    assert record.inspection_id == capture.workflow.events[0].step_id
+    assert [(item.fact_id, item.verdict) for item in record.result.judgments] == [
+        ("punctuation", "met"),
+        ("interface", "met"),
+    ]
     (sent,) = [json.loads(path.read_text()) for path in inspector.glob("request-*.json")]
-    assert [item["criterion_id"] for item in sent["criteria"]] == ["quality"]
+    assert [item["fact_id"] for item in sent["facts"]] == ["interface"]
     assert {"role": "assistant", "text": "Which punctuation?"} in sent["transcript"]
     assert any(name.startswith("evidence/inspection/") for name in capture.evidence_files)
 
@@ -654,13 +631,18 @@ def test_default_workflow_inspects_once_then_grading_runs_its_own_judge(
         for event in journal.events
         if event.event == "judge-result" and event.attempt_id == capture.attempt_id
     ]
-    assert len(graded) == 1
+    assert len(graded) == 2
+    assert [(item.fact_id, item.verdict, item.source) for item in assessment.facts] == [
+        ("punctuation", "met", "verifier"),
+        ("interface", "met", "judge"),
+    ]
+    assert (assessment.outcome, assessment.outcome_reason) == ("pass", "all_met")
     quality = next(item for item in assessment.criteria if item.criterion_id == "quality")
     assert quality.outcome == "pass"
     judge = next(item for item in assessment.roles if item.role == "judge")
-    assert {record.identity for record in judge.records} == {graded[0], inspected.call_id}
-    simulator = next(item for item in assessment.roles if item.role == "simulator")
-    assert inspected.call_id not in {record.identity for record in simulator.records}
+    assert {record.identity for record in judge.records} == {*graded, inspected.call_id}
+    stand_in = next(item for item in assessment.roles if item.role == "stand_in")
+    assert inspected.call_id not in {record.identity for record in stand_in.records}
 
 
 @pytest.mark.integration
@@ -677,11 +659,11 @@ def test_failed_inspection_sends_a_fix_request_then_passes(store, graded_benchma
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
     assert [call.role for call in capture.controller_calls] == [
-        "simulator",
-        "simulator",
+        "stand_in",
+        "stand_in",
         "judge",
-        "simulator",
-        "simulator",
+        "stand_in",
+        "stand_in",
         "judge",
     ]
     assert workflow_events(capture) == [
@@ -690,27 +672,41 @@ def test_failed_inspection_sends_a_fix_request_then_passes(store, graded_benchma
         ("inspect", "passed"),
     ]
     failed, requested, _ = capture.workflow.events
-    assert failed.failed_criteria == requested.failed_criteria == ("greeting",)
+    assert failed.failed_criteria == requested.failed_criteria == ("punctuation",)
+    assert requested.step_id == "fix"
     fix_call = capture.controller_calls[3]
     assert requested.call_ids == (fix_call.call_id,)
     assert fix_call.decision.text == FIX_REPLY
     assert capture.dialogue[-2].text == FIX_REPLY
+    assert raises(store, result.run_id, capture.attempt_id) == (
+        RaiseEvent(
+            call_id=fix_call.call_id,
+            phase="fix",
+            fact_ids=("punctuation",),
+            cited=("interface",),
+            cause="fix_request",
+            turn=requested.turn,
+        ),
+    )
+    assert requested.turn == 2
     blobs = store.read_blobs(result.pending_assessment[0])
     request = json.loads(blobs[f"evidence/controller/{fix_call.call_id}/000001-request.json"])
     assert request["instruction"] == FIX_IT_INSTRUCTION
     assert request["inspection"] == [
         {
-            "criterion_id": "greeting",
-            "rationale": "Validate punctuation and correct name handling. (failed)",
+            "fact_id": "punctuation",
+            "text": "Use a comma after Hello.",
+            "observation": "Use a comma after Hello. (failed)",
         }
     ]
+    assert "check" not in json.dumps(request["inspection"])
 
 
 @pytest.mark.integration
-def test_a_simulator_that_keeps_stopping_on_findings_gets_a_corrected_retry_then_a_fallback(
+def test_a_stand_in_that_keeps_stopping_on_findings_gets_a_corrected_retry_then_a_fallback(
     store, graded_benchmark, tmp_path
 ):
-    from dryheave.controller_models import ScriptStep, SimulatorDecision
+    from dryheave.controller_models import ScriptStep, StandInDecision
     from dryheave.experiment_models import FixtureTurn
     from dryheave.runner_attempt import FALLBACK_FIX_REPLY, STOP_CORRECTION
 
@@ -719,9 +715,9 @@ def test_a_simulator_that_keeps_stopping_on_findings_gets_a_corrected_retry_then
     stop = ScriptStep(
         match="contains",
         assistant="Done.",
-        decision=SimulatorDecision(action="stop", reason="Looks done to me."),
+        decision=StandInDecision(action="stop", reason="Looks done to me."),
     )
-    script = fixed.simulator.script
+    script = fixed.stand_in.script
     stubborn = fixed.model_copy(
         update={
             "fixture": (
@@ -732,7 +728,7 @@ def test_a_simulator_that_keeps_stopping_on_findings_gets_a_corrected_retry_then
                     files={"greet.py": FIXED_GREETING},
                 ),
             ),
-            "simulator": fixed.simulator.model_copy(
+            "stand_in": fixed.stand_in.model_copy(
                 update={"script": (*script[:2], stop, stop, script[3])}
             ),
         }
@@ -762,12 +758,20 @@ def test_a_simulator_that_keeps_stopping_on_findings_gets_a_corrected_retry_then
     assert request(retried)["correction"] == STOP_CORRECTION
     assert capture.dialogue[-2].text == FALLBACK_FIX_REPLY
     journal = RunStore(store.root).inspect(result.run_id)
-    (fallback,) = [event for event in journal.events if event.event == "simulator-fallback"]
+    (fallback,) = [event for event in journal.events if event.event == "stand-in-fallback"]
     assert fallback.data["text"] == FALLBACK_FIX_REPLY
+    (raised,) = raises(store, result.run_id, capture.attempt_id)
+    assert (raised.call_id, raised.phase, raised.fact_ids, raised.cited, raised.cause) == (
+        retried.call_id,
+        "fix",
+        ("punctuation",),
+        (),
+        "fallback",
+    )
 
 
 @pytest.mark.integration
-def test_exhausted_simulator_budget_keeps_its_stop_reason_and_progress(
+def test_exhausted_stand_in_budget_keeps_its_stop_reason_and_progress(
     store, graded_benchmark, tmp_path
 ):
     draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path)
@@ -785,21 +789,61 @@ def test_exhausted_simulator_budget_keeps_its_stop_reason_and_progress(
 
 
 @pytest.mark.integration
-def test_prompt_step_is_delivered_before_the_inspection(store, graded_benchmark, tmp_path):
-    from dryheave.cases import InspectStep, PromptStep
-    from dryheave.controller_models import ScriptStep, SimulatorDecision
+def test_the_stand_in_reply_budget_ends_the_attempt_with_its_own_stop_reason(
+    store, graded_benchmark, tmp_path
+):
+    draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path)
+    result = run_experiment(
+        store,
+        create_experiment(store, broken_then_fixed(draft, max_calls=10)),
+        options=workflow_options(stand_in_replies=3),
+        host=HOST,
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "stand_in_budget"
+    assert [call.role for call in capture.controller_calls].count("stand_in") == 3
+    assert capture.accepted_turns == 3
+
+
+@pytest.mark.integration
+def test_the_turn_budget_ends_the_attempt_with_its_own_stop_reason(
+    store, graded_benchmark, tmp_path
+):
+    draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path)
+    result = run_experiment(
+        store,
+        create_experiment(store, broken_then_fixed(draft)),
+        options=workflow_options(max_turns=2),
+        host=HOST,
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "turn_budget"
+    assert capture.accepted_turns == 2
+    assert inspections(store, result.run_id, capture.attempt_id) == ()
+
+
+README_FACT = {
+    "fact_id": "readme",
+    "phase": "docs",
+    "text": "Mention the comma in the README.",
+    "check": "README.md says greetings put a comma after Hello.",
+    "curator_authored": True,
+}
+
+
+def docs_draft(store, graded_benchmark, tmp_path, **changes):
+    from dryheave.cases import PromptStep
+    from dryheave.controller_models import ScriptStep, StandInDecision
     from dryheave.experiment_models import FixtureTurn
 
-    draft, _ = workflow_benchmark(
+    draft, inspector = workflow_benchmark(
         store,
         graded_benchmark,
         tmp_path,
-        workflow=(
-            PromptStep(step_id="docs", prompt="Update the docs."),
-            InspectStep(step_id="check", criteria=("greeting",)),
-        ),
+        workflow=(PromptStep(after_phase="fix", step_id="docs", prompt="Update the docs."),),
+        **changes,
     )
-    draft = draft.model_copy(
+    return draft.model_copy(
         update={
             "fixture": (
                 *draft.fixture,
@@ -809,19 +853,26 @@ def test_prompt_step_is_delivered_before_the_inspection(store, graded_benchmark,
                     files={"README.md": "Greets with a comma.\n"},
                 ),
             ),
-            "simulator": draft.simulator.model_copy(
+            "stand_in": draft.stand_in.model_copy(
                 update={
                     "script": (
-                        *draft.simulator.script,
+                        *draft.stand_in.script,
                         ScriptStep(
                             assistant="Docs updated.",
-                            decision=SimulatorDecision(action="stop", reason="Docs are done."),
+                            decision=StandInDecision(action="stop", reason="Docs are done."),
                         ),
                     )
                 }
             ),
         }
-    )
+    ), inspector
+
+
+@pytest.mark.integration
+def test_prompt_step_is_delivered_between_the_opening_and_closing_inspections(
+    store, graded_benchmark, tmp_path
+):
+    draft, inspector = docs_draft(store, graded_benchmark, tmp_path)
     result = run_experiment(
         store,
         create_experiment(store, draft),
@@ -830,13 +881,206 @@ def test_prompt_step_is_delivered_before_the_inspection(store, graded_benchmark,
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
-    assert workflow_events(capture) == [("prompt", "sent"), ("inspect", "passed")]
-    assert [(item.step_id, item.turn) for item in capture.workflow.events] == [
-        ("docs", 2),
-        ("check", 3),
+    assert (capture.workflow.steps, capture.workflow.position) == (("docs",), 1)
+    assert [(item.kind, item.outcome, item.turn) for item in capture.workflow.events] == [
+        ("inspect", "passed", 2),
+        ("prompt", "sent", 2),
+        ("inspect", "passed", 3),
     ]
+    assert capture.workflow.events[1].step_id == "docs"
     assert capture.dialogue[-2].text == "Update the docs."
-    assert all(call.role == "simulator" for call in capture.controller_calls)
+    assert len(list(inspector.glob("request-*.json"))) == 2
+
+
+@pytest.mark.integration
+def test_the_inspection_budget_stops_the_workflow_before_its_closing_inspection(
+    store, graded_benchmark, tmp_path
+):
+    draft, inspector = docs_draft(store, graded_benchmark, tmp_path)
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(max_inspections=1),
+        host=HOST,
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "inspection_budget"
+    assert workflow_events(capture) == [("inspect", "passed"), ("prompt", "sent")]
+    assert len(list(inspector.glob("request-*.json"))) == 1
+    assert capture.workflow.position == 1
+
+
+def two_phases(store, graded_benchmark, tmp_path, outcomes):
+    return docs_draft(
+        store,
+        graded_benchmark,
+        tmp_path,
+        outcomes=outcomes,
+        facts=(README_FACT,),
+        phases=("fix", "docs"),
+    )
+
+
+def requested_facts(inspector):
+    return [
+        [item["fact_id"] for item in json.loads(path.read_text())["facts"]]
+        for path in sorted(inspector.glob("request-*.json"))
+    ]
+
+
+@pytest.mark.integration
+def test_a_met_phase_fires_its_prompt_step_and_the_next_phase_is_then_inspected(
+    store, graded_benchmark, tmp_path
+):
+    draft, inspector = two_phases(store, graded_benchmark, tmp_path, ({"readme": "fail"}, "pass"))
+    result = run_experiment(
+        store, create_experiment(store, draft), options=workflow_options(), host=HOST
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "workflow_complete"
+    assert workflow_events(capture) == [
+        ("inspect", "passed"),
+        ("prompt", "sent"),
+        ("inspect", "passed"),
+    ]
+    assert capture.workflow.events[0].failed_criteria == ("readme",)
+    assert requested_facts(inspector) == [["interface", "readme"], ["interface", "readme"]]
+    assert raises(store, result.run_id, capture.attempt_id) == ()
+
+
+@pytest.mark.integration
+def test_an_earlier_phase_regression_is_raised_before_the_next_prompt_step(
+    store, graded_benchmark, tmp_path
+):
+    from dryheave.cases import PromptStep
+    from dryheave.controller_models import RoleBudget, ScriptStep, StandInDecision
+    from dryheave.experiment_models import FixtureTurn
+
+    draft, _ = workflow_benchmark(
+        store,
+        graded_benchmark,
+        tmp_path,
+        outcomes=({"readme": "fail"}, {"interface": "fail"}, "pass"),
+        facts=(README_FACT,),
+        phases=("fix", "docs"),
+        workflow=(
+            PromptStep(after_phase="fix", step_id="docs", prompt="Update the docs."),
+            PromptStep(after_phase="docs", step_id="summary", prompt="Summarize the change."),
+        ),
+    )
+    restore = "Calling greet with two names fails now."
+
+    def stop(assistant):
+        return ScriptStep(
+            assistant=assistant, decision=StandInDecision(action="stop", reason="Done.")
+        )
+
+    draft = draft.model_copy(
+        update={
+            "fixture": (
+                *draft.fixture,
+                FixtureTurn(prompt="Update the docs.", assistant="Docs updated."),
+                FixtureTurn(prompt=restore, assistant="Interface restored."),
+                FixtureTurn(prompt="Summarize the change.", assistant="Summary written."),
+            ),
+            "stand_in": draft.stand_in.model_copy(
+                update={
+                    "budget": RoleBudget(max_calls=8),
+                    "script": (
+                        *draft.stand_in.script,
+                        stop("Docs updated."),
+                        ScriptStep(
+                            assistant="Docs updated.",
+                            decision=StandInDecision(
+                                action="reply", text=restore, reason="It broke for me."
+                            ),
+                        ),
+                        stop("Interface restored."),
+                        stop("Summary written."),
+                    ),
+                }
+            ),
+        }
+    )
+    result = run_experiment(
+        store, create_experiment(store, draft), options=workflow_options(), host=HOST
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "workflow_complete"
+    assert [(item.kind, item.outcome, item.step_id) for item in capture.workflow.events][1:] == [
+        ("prompt", "sent", "docs"),
+        ("inspect", "failed", capture.workflow.events[2].step_id),
+        ("inspect", "fix_requested", "fix"),
+        ("inspect", "passed", capture.workflow.events[4].step_id),
+        ("prompt", "sent", "summary"),
+        ("inspect", "passed", capture.workflow.events[6].step_id),
+    ]
+    (raised,) = raises(store, result.run_id, capture.attempt_id)
+    assert (raised.phase, raised.fact_ids, raised.turn) == ("fix", ("interface",), 3)
+    assert raised.turn == capture.workflow.events[3].turn
+
+
+@pytest.mark.integration
+def test_an_unclear_fact_is_judged_again_alone_and_still_unclear_does_not_block(
+    store, graded_benchmark, tmp_path
+):
+    draft, inspector = workflow_benchmark(
+        store, graded_benchmark, tmp_path, outcomes=({"interface": "unclear"},)
+    )
+    result = run_experiment(
+        store, create_experiment(store, draft), options=workflow_options(), host=HOST
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "workflow_complete"
+    assert requested_facts(inspector) == [["interface"], ["interface"]]
+    (record,) = inspections(store, result.run_id, capture.attempt_id)
+    assert [(item.fact_id, item.verdict) for item in record.result.judgments] == [
+        ("punctuation", "met"),
+        ("interface", "unclear"),
+    ]
+    assert len(capture.workflow.events[0].call_ids) == 2
+    assert raises(store, result.run_id, capture.attempt_id) == ()
+
+
+@pytest.mark.integration
+def test_an_unclear_fact_is_judged_unmet_on_its_second_look(store, graded_benchmark, tmp_path):
+    draft, _ = workflow_benchmark(
+        store,
+        graded_benchmark,
+        tmp_path,
+        outcomes=({"interface": "unclear"}, {"interface": "fail"}),
+    )
+    result = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=workflow_options(stand_in_replies=2),
+        host=HOST,
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    (record,) = inspections(store, result.run_id, capture.attempt_id)
+    assert record.result.judgments[1].verdict == "unmet"
+    assert capture.stop_reason == "stand_in_budget"
+    assert capture.workflow.events[0].failed_criteria == ("interface",)
+
+
+@pytest.mark.integration
+def test_a_later_phase_is_never_reached_while_an_earlier_one_stays_unmet(
+    store, graded_benchmark, tmp_path
+):
+    draft, _ = two_phases(store, graded_benchmark, tmp_path, ({"readme": "fail"},))
+    result = run_experiment(
+        store,
+        create_experiment(store, broken_then_fixed(draft)),
+        options=workflow_options(max_turns=3),
+        host=HOST,
+    )
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "turn_budget"
+    assert workflow_events(capture) == [("inspect", "failed"), ("inspect", "fix_requested")]
+    assert capture.workflow.events[0].failed_criteria == ("punctuation", "readme")
+    (raised,) = raises(store, result.run_id, capture.attempt_id)
+    assert (raised.phase, raised.fact_ids) == ("fix", ("punctuation",))
+    assert capture.workflow.position == 0
 
 
 def claude_profile(store) -> str:
@@ -856,14 +1100,14 @@ def slash_draft(
     store, graded_benchmark, tmp_path, prompt="/code-review --quick", typed="/code-review --quick"
 ):
     from dryheave.cases import PromptStep
-    from dryheave.controller_models import ScriptStep, SimulatorDecision
+    from dryheave.controller_models import ScriptStep, StandInDecision
     from dryheave.experiment_models import FixtureTurn
 
     draft, _ = workflow_benchmark(
         store,
         graded_benchmark,
         tmp_path,
-        workflow=(PromptStep(step_id="review", prompt=prompt),),
+        workflow=(PromptStep(after_phase="fix", step_id="review", prompt=prompt),),
     )
     return draft.model_copy(
         update={
@@ -871,13 +1115,13 @@ def slash_draft(
                 *draft.fixture,
                 FixtureTurn(prompt=typed, assistant="Review clean."),
             ),
-            "simulator": draft.simulator.model_copy(
+            "stand_in": draft.stand_in.model_copy(
                 update={
                     "script": (
-                        *draft.simulator.script,
+                        *draft.stand_in.script,
                         ScriptStep(
                             assistant="Review clean.",
-                            decision=SimulatorDecision(action="stop", reason="Reviewed."),
+                            decision=StandInDecision(action="stop", reason="Reviewed."),
                         ),
                     )
                 }
@@ -904,8 +1148,20 @@ def test_slash_prompt_step_is_delivered_as_a_curated_native_command(
     )
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
-    assert [sorted(event.model_dump(mode="json")) for event in capture.workflow.events] == [
-        ["call_ids", "failed_criteria", "kind", "outcome", "seconds", "step_id", "turn"]
+    assert [(event.kind, event.outcome) for event in capture.workflow.events] == [
+        ("inspect", "passed"),
+        ("prompt", "sent"),
+        ("inspect", "passed"),
+    ]
+    assert capture.workflow.events[1].step_id == "review"
+    assert sorted(capture.workflow.events[1].model_dump(mode="json")) == [
+        "call_ids",
+        "failed_criteria",
+        "kind",
+        "outcome",
+        "seconds",
+        "step_id",
+        "turn",
     ]
     journal = RunStore(store.root).inspect(result.run_id)
     assert [
@@ -989,8 +1245,13 @@ def test_slash_prompt_step_is_delivered_to_codex_as_its_skill_mention(
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
     assert [
-        (event.step_id, event.outcome, event.delivered_text) for event in capture.workflow.events
-    ] == [("review", "sent", "$code-review --quick")]
+        (event.kind, event.outcome, event.delivered_text) for event in capture.workflow.events
+    ] == [
+        ("inspect", "passed", None),
+        ("prompt", "sent", "$code-review --quick"),
+        ("inspect", "passed", None),
+    ]
+    assert capture.workflow.events[1].step_id == "review"
     journal = RunStore(store.root).inspect(result.run_id)
     assert [event.data["prompt"] for event in journal.events if event.event == "interaction"][
         -1
@@ -1097,34 +1358,15 @@ def test_a_resumed_run_is_refused_when_its_codex_snapshot_lacks_a_workflow_skill
     )
 
 
-def test_inspect_steps_without_an_inspector_are_refused_before_launch(store, graded_benchmark):
-    from dryheave.cases import InspectStep, load_frozen_case
-
-    case_id = store.resolve(graded_benchmark.cases[0])
-    case = load_frozen_case(store, case_id)
-    changed = store.put(
-        ObjectKind.CASE,
-        case.model_copy(
-            update={"workflow": (InspectStep(step_id="check", criteria=("greeting",)),)}
-        ),
-        files=store.read_blobs(case_id),
-        references=(case.persona_id, case.repository_id),
-    )
-    identifier = create_experiment(store, graded_benchmark.model_copy(update={"cases": (changed,)}))
-    with pytest.raises(InputError, match="inspector"):
-        run_experiment(store, identifier, options=workflow_options(), host=HOST)
-    assert RunStore(store.root).list_runs() == ()
-
-
 @pytest.mark.integration
 def test_declined_stop_ends_the_run_without_an_inspection(store, graded_benchmark, tmp_path):
     draft, inspector = workflow_benchmark(store, graded_benchmark, tmp_path)
-    first, last = draft.simulator.script
+    first, last = draft.stand_in.script
     declined = last.model_copy(
         update={"decision": last.decision.model_copy(update={"stop_kind": "declined"})}
     )
     draft = draft.model_copy(
-        update={"simulator": draft.simulator.model_copy(update={"script": (first, declined)})}
+        update={"stand_in": draft.stand_in.model_copy(update={"script": (first, declined)})}
     )
     result = run_experiment(
         store,
@@ -1133,9 +1375,9 @@ def test_declined_stop_ends_the_run_without_an_inspection(store, graded_benchmar
         host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
-    assert capture.stop_reason == "simulator_stop"
+    assert capture.stop_reason == "stand_in_stop"
     assert (capture.workflow.position, capture.workflow.events) == (0, ())
-    assert [call.role for call in capture.controller_calls] == ["simulator", "simulator"]
+    assert [call.role for call in capture.controller_calls] == ["stand_in", "stand_in"]
     assert list(inspector.glob("request-*.json")) == []
 
 
@@ -1144,9 +1386,9 @@ def test_script_exhaustion_ends_the_run_without_running_the_workflow(
     store, graded_benchmark, tmp_path
 ):
     draft, inspector = workflow_benchmark(store, graded_benchmark, tmp_path)
-    first, _last = draft.simulator.script
+    first, _last = draft.stand_in.script
     draft = draft.model_copy(
-        update={"simulator": draft.simulator.model_copy(update={"script": (first,)})}
+        update={"stand_in": draft.stand_in.model_copy(update={"script": (first,)})}
     )
     result = run_experiment(
         store,
@@ -1155,7 +1397,7 @@ def test_script_exhaustion_ends_the_run_without_running_the_workflow(
         host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
-    assert capture.stop_reason == "simulator_stop"
+    assert capture.stop_reason == "stand_in_stop"
     assert (capture.workflow.position, capture.workflow.events) == (0, ())
     assert list(inspector.glob("request-*.json")) == []
 
@@ -1174,7 +1416,7 @@ def test_script_divergence_ends_the_run_without_running_the_workflow(
         host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
-    assert capture.stop_reason == "simulator_stop"
+    assert capture.stop_reason == "stand_in_stop"
     assert (capture.workflow.position, capture.workflow.events) == (0, ())
     assert list(inspector.glob("request-*.json")) == []
 
@@ -1194,28 +1436,19 @@ def test_unavailable_inspection_stops_the_run(store, graded_benchmark, tmp_path)
     judged = [call for call in capture.controller_calls if call.role == "judge"]
     assert [call.status for call in judged] == ["failed", "failed"]
     assert capture.workflow.events[0].call_ids == tuple(call.call_id for call in judged)
-    journal = RunStore(store.root).inspect(result.run_id)
-    (outcome,) = [event for event in journal.events if event.event == "inspection-result"]
-    assert outcome.data["result"]["error"] == "judge_unavailable"
+    (record,) = inspections(store, result.run_id, capture.attempt_id)
+    assert (record.result.status, record.result.error) == ("unavailable", "judge_unavailable")
 
 
 @pytest.mark.integration
 def test_cancellation_outranks_an_unavailable_inspection(
     store, graded_benchmark, tmp_path, monkeypatch
 ):
-    from dryheave.inspection import InspectionResult
+    from dryheave.inspection import InspectionResult, unavailable
 
     def cancelled(request):
         request.cancelled.set()
-        return InspectionResult(
-            step_id=request.step.step_id,
-            status="unavailable",
-            findings=(),
-            calls=(),
-            snapshot_digest=None,
-            error="cancelled",
-            seconds=0,
-        )
+        return InspectionResult(inspection=unavailable(request, "cancelled"), calls=(), seconds=0)
 
     monkeypatch.setattr("dryheave.runner_attempt.inspect_workspace", cancelled)
     draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path)
@@ -1232,31 +1465,42 @@ def test_cancellation_outranks_an_unavailable_inspection(
 
 
 @pytest.mark.integration
-def test_timeout_outranks_an_unavailable_inspection(store, graded_benchmark, tmp_path, monkeypatch):
+def test_inspection_time_does_not_count_against_the_subject_deadline(
+    store, graded_benchmark, tmp_path, monkeypatch
+):
     import time as time_module
 
     from dryheave.inspection import InspectionResult
+    from dryheave.judges import FactInspection, FactJudgment
 
-    expired = {"flag": False}
+    slow = {"flag": False}
     real_monotonic = time_module.monotonic
 
     def fake_monotonic():
         now = real_monotonic()
-        return now + 1_000_000.0 if expired["flag"] else now
+        return now + 1_000_000.0 if slow["flag"] else now
 
-    def unavailable(request):
-        expired["flag"] = True
+    def long_inspection(request):
+        slow["flag"] = True
         return InspectionResult(
-            step_id=request.step.step_id,
-            status="unavailable",
-            findings=(),
+            inspection=FactInspection(
+                inspection_id=request.inspection_id,
+                turn=request.turn,
+                snapshot_digest="snapshot",
+                input_digest="input",
+                status="completed",
+                judgments=tuple(
+                    FactJudgment(
+                        fact_id=fact.fact_id, verdict="met", observation="Works.", evidence="x"
+                    )
+                    for fact in request.facts
+                ),
+            ),
             calls=(),
-            snapshot_digest=None,
-            error="judge_unavailable",
             seconds=0,
         )
 
-    monkeypatch.setattr("dryheave.runner_attempt.inspect_workspace", unavailable)
+    monkeypatch.setattr("dryheave.runner_attempt.inspect_workspace", long_inspection)
     monkeypatch.setattr(time_module, "monotonic", fake_monotonic)
     draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path)
     result = run_experiment(
@@ -1266,8 +1510,8 @@ def test_timeout_outranks_an_unavailable_inspection(store, graded_benchmark, tmp
         host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
-    assert capture.stop_reason == "timeout"
-    assert workflow_events(capture) == [("inspect", "unavailable")]
+    assert capture.stop_reason == "workflow_complete"
+    assert capture.subject_seconds < 1000
 
 
 @pytest.mark.integration
@@ -1353,7 +1597,7 @@ def test_workflow_off_keeps_todays_run_and_serialization(store, graded_benchmark
         host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
-    assert (capture.stop_reason, capture.workflow) == ("simulator_stop", None)
+    assert (capture.stop_reason, capture.workflow) == ("stand_in_stop", None)
     assert "workflow" not in json.loads(canonical_json(capture))
     assert not any(name.startswith("evidence/inspection/") for name in capture.evidence_files)
     assert list(inspector.glob("request-*.json")) == []
@@ -1364,14 +1608,14 @@ def test_workflow_off_keeps_todays_run_and_serialization(store, graded_benchmark
 
 
 @pytest.mark.integration
-def test_workflow_off_any_simulator_stop_ends_the_run_as_before(store, graded_benchmark, tmp_path):
+def test_workflow_off_any_stand_in_stop_ends_the_run_as_before(store, graded_benchmark, tmp_path):
     draft, inspector = workflow_benchmark(store, graded_benchmark, tmp_path)
-    first, last = draft.simulator.script
+    first, last = draft.stand_in.script
     declined = last.model_copy(
         update={"decision": last.decision.model_copy(update={"stop_kind": "declined"})}
     )
     draft = draft.model_copy(
-        update={"simulator": draft.simulator.model_copy(update={"script": (first, declined)})}
+        update={"stand_in": draft.stand_in.model_copy(update={"script": (first, declined)})}
     )
     result = run_experiment(
         store,
@@ -1380,17 +1624,17 @@ def test_workflow_off_any_simulator_stop_ends_the_run_as_before(store, graded_be
         host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
-    assert (capture.stop_reason, capture.workflow) == ("simulator_stop", None)
+    assert (capture.stop_reason, capture.workflow) == ("stand_in_stop", None)
     assert list(inspector.glob("request-*.json")) == []
     journal = RunStore(store.root).inspect(result.run_id)
     assert not any(event.event == "workflow-step" for event in journal.events)
 
 
 @pytest.mark.integration
-def test_unchanged_work_reuses_the_failed_verdict_until_the_turn_budget(
+def test_unchanged_files_are_judged_again_once_the_conversation_moved_on(
     store, graded_benchmark, tmp_path
 ):
-    from dryheave.controller_models import ScriptStep, SimulatorDecision
+    from dryheave.controller_models import ScriptStep, StandInDecision
     from dryheave.experiment_models import FixtureTurn
 
     draft, inspector = workflow_benchmark(store, graded_benchmark, tmp_path)
@@ -1403,14 +1647,14 @@ def test_unchanged_work_reuses_the_failed_verdict_until_the_turn_budget(
                 unchanged,
                 FixtureTurn(prompt=FIX_REPLY, assistant="Fixed again."),
             ),
-            "simulator": draft.simulator.model_copy(
+            "stand_in": draft.stand_in.model_copy(
                 update={
                     "script": (
-                        *draft.simulator.script,
+                        *draft.stand_in.script,
                         ScriptStep(
                             match="contains",
                             assistant="Fixed.",
-                            decision=SimulatorDecision(
+                            decision=StandInDecision(
                                 action="reply",
                                 text=FIX_REPLY,
                                 reason="The greeting still lacks the comma.",
@@ -1424,7 +1668,7 @@ def test_unchanged_work_reuses_the_failed_verdict_until_the_turn_budget(
     result = run_experiment(
         store,
         create_experiment(store, draft),
-        options=workflow_options(),
+        options=workflow_options(max_turns=4),
         host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
@@ -1432,37 +1676,19 @@ def test_unchanged_work_reuses_the_failed_verdict_until_the_turn_budget(
     assert workflow_events(capture) == [
         ("inspect", "failed"),
         ("inspect", "fix_requested"),
-        ("inspect", "reused"),
+        ("inspect", "failed"),
         ("inspect", "fix_requested"),
     ]
-    assert capture.workflow.events[2].call_ids == ()
-    assert len(list(inspector.glob("request-*.json"))) == 1
+    first, second = inspections(store, result.run_id, capture.attempt_id)
+    assert first.result.snapshot_digest == second.result.snapshot_digest
+    assert first.result.input_digest != second.result.input_digest
+    assert len(capture.workflow.events[2].call_ids) == 1
+    assert len(list(inspector.glob("request-*.json"))) == 2
+    assert [item.phase for item in raises(store, result.run_id, capture.attempt_id)] == [
+        "fix",
+        "fix",
+    ]
     assert capture.workflow.position == 0
-
-
-@pytest.mark.integration
-def test_the_inspections_cap_stops_a_workflow_of_passing_inspect_steps(
-    store, graded_benchmark, tmp_path
-):
-    from dryheave.cases import InspectStep
-
-    steps = tuple(
-        InspectStep(step_id=f"check-{index}", criteria=("quality",)) for index in range(6)
-    )
-    draft, inspector = workflow_benchmark(
-        store, graded_benchmark, tmp_path, outcomes=("pass",), workflow=steps
-    )
-    result = run_experiment(
-        store,
-        create_experiment(store, draft),
-        options=workflow_options(),
-        host=HOST,
-    )
-    capture = load_capture(store, result.pending_assessment[0])
-    assert capture.stop_reason == "turn_budget"
-    assert workflow_events(capture) == [("inspect", "passed")] * 4
-    assert len(list(inspector.glob("request-*.json"))) == 4
-    assert capture.workflow.position == 4
 
 
 class DialogFixtureTerminal(FixtureTerminal):
@@ -1537,9 +1763,9 @@ def dialog_fixture(monkeypatch, dialogs, *, startup=None):
 
 
 def dialog_reply(*choices, text=""):
-    from dryheave.controller_models import SimulatorDecision
+    from dryheave.controller_models import StandInDecision
 
-    return SimulatorDecision(
+    return StandInDecision(
         action="reply", choices=choices, text=text, reason="Answering as the user would."
     )
 
@@ -1551,7 +1777,7 @@ def claude_draft(store, draft, *script):
     return draft.model_copy(
         update={
             "variants": (VariantSpec(name="claude", profile=claude_profile(store)),),
-            "simulator": draft.simulator.model_copy(
+            "stand_in": draft.stand_in.model_copy(
                 update={"script": script, "budget": RoleBudget(max_calls=len(script))}
             ),
         }
@@ -1562,8 +1788,8 @@ def claude_draft(store, draft, *script):
 def test_a_prompt_step_dialog_is_answered_and_the_workflow_completes(
     store, graded_benchmark, tmp_path, monkeypatch
 ):
-    from dryheave.cases import InspectStep, PromptStep
-    from dryheave.controller_models import DIALOG_INSTRUCTION, ScriptStep, SimulatorDecision
+    from dryheave.cases import PromptStep
+    from dryheave.controller_models import DIALOG_INSTRUCTION, ScriptStep, StandInDecision
     from dryheave.experiment_models import FixtureTurn
 
     hint = "Fix only the critical findings."
@@ -1572,8 +1798,9 @@ def test_a_prompt_step_dialog_is_answered_and_the_workflow_completes(
         graded_benchmark,
         tmp_path,
         workflow=(
-            PromptStep(step_id="review", prompt="Review the greeting.", answer_hint=hint),
-            InspectStep(step_id="check", criteria=("greeting",)),
+            PromptStep(
+                after_phase="fix", step_id="review", prompt="Review the greeting.", answer_hint=hint
+            ),
         ),
     )
     draft = claude_draft(
@@ -1588,11 +1815,11 @@ def test_a_prompt_step_dialog_is_answered_and_the_workflow_completes(
                 )
             }
         ),
-        *draft.simulator.script,
+        *draft.stand_in.script,
         ScriptStep(assistant=SCOPE.question, decision=dialog_reply("Critical only")),
         ScriptStep(
             assistant="Fixed the critical findings.",
-            decision=SimulatorDecision(action="stop", reason="Reviewed."),
+            decision=StandInDecision(action="stop", reason="Reviewed."),
         ),
     )
     ui = ClaudeQuestionUI((SCOPE,))
@@ -1606,12 +1833,13 @@ def test_a_prompt_step_dialog_is_answered_and_the_workflow_completes(
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "workflow_complete"
     assert workflow_events(capture) == [
+        ("inspect", "passed"),
         ("prompt", "sent"),
         ("dialog", "answered"),
         ("inspect", "passed"),
     ]
-    asked = capture.controller_calls[2]
-    answered = capture.workflow.events[1]
+    asked = capture.controller_calls[3]
+    answered = capture.workflow.events[2]
     assert (answered.step_id, answered.turn, answered.call_ids) == ("review", 3, (asked.call_id,))
     assert (terminals[0].keys, ui.answers) == (["Down", "Enter"], {0: "Critical only"})
     assert capture.accepted_turns == 3
@@ -1642,7 +1870,7 @@ def test_dialogs_are_answered_and_counted_without_a_workflow(store, benchmark, m
         store,
         benchmark,
         ScriptStep(assistant=AUTH.question, decision=dialog_reply(text="Use mutual TLS")),
-        *benchmark.simulator.script,
+        *benchmark.stand_in.script,
     )
     ui = ClaudeQuestionUI((AUTH,))
     terminals = dialog_fixture(monkeypatch, {prompt: ui})
@@ -1653,7 +1881,7 @@ def test_dialogs_are_answered_and_counted_without_a_workflow(store, benchmark, m
         host=HOST,
     )
     capture = load_capture(store, result.pending_assessment[0])
-    assert (capture.stop_reason, capture.accepted_turns) == ("simulator_stop", 2)
+    assert (capture.stop_reason, capture.accepted_turns) == ("stand_in_stop", 2)
     asked = capture.controller_calls[0]
     assert capture.workflow == WorkflowProgress(
         steps=(),
@@ -1728,7 +1956,7 @@ class DialogBeforeAcceptanceTerminal(FixtureTerminal):
 
 @pytest.mark.integration
 def test_a_dialog_shown_before_enter_is_accepted_is_not_answered(store, benchmark, monkeypatch):
-    draft = claude_draft(store, benchmark, *benchmark.simulator.script)
+    draft = claude_draft(store, benchmark, *benchmark.stand_in.script)
     ui = ClaudeQuestionUI((AUTH,))
     prompt = benchmark.fixture[0].prompt.strip()
     terminals = []
@@ -1756,10 +1984,10 @@ def test_a_dialog_shown_before_enter_is_accepted_is_not_answered(store, benchmar
 
 
 @pytest.mark.integration
-def test_a_claude_permission_dialog_still_stops_without_a_simulator_call(
+def test_a_claude_permission_dialog_still_stops_without_a_stand_in_call(
     store, benchmark, monkeypatch
 ):
-    draft = claude_draft(store, benchmark, *benchmark.simulator.script)
+    draft = claude_draft(store, benchmark, *benchmark.stand_in.script)
     terminals = dialog_fixture(monkeypatch, {benchmark.fixture[0].prompt.strip(): PERMISSION})
     result = run_experiment(
         store,
@@ -1773,8 +2001,8 @@ def test_a_claude_permission_dialog_still_stops_without_a_simulator_call(
 
 
 @pytest.mark.integration
-def test_a_startup_trust_prompt_never_reaches_the_simulator(store, benchmark, monkeypatch):
-    draft = claude_draft(store, benchmark, *benchmark.simulator.script)
+def test_a_startup_trust_prompt_never_reaches_the_stand_in(store, benchmark, monkeypatch):
+    draft = claude_draft(store, benchmark, *benchmark.stand_in.script)
     terminals = dialog_fixture(monkeypatch, {}, startup=TRUST)
     result = run_experiment(
         store,
@@ -1824,10 +2052,10 @@ def test_a_call_limit_never_excuses_surviving_writers():
 
 
 def screen_reply(key=None, text=None, target="Fix all Should Fix"):
-    from dryheave.controller_models import SimulatorDecision
+    from dryheave.controller_models import StandInDecision
     from dryheave.drivers.models import ScreenAction
 
-    return SimulatorDecision(
+    return StandInDecision(
         action="reply",
         reason="Acting as this user on the screen.",
         screen_kind="question",
@@ -1843,9 +2071,9 @@ def screen_step(decision, seen="Apply fixes for the Should Fix findings?"):
 
 
 def screen_judgement(kind):
-    from dryheave.controller_models import SimulatorDecision
+    from dryheave.controller_models import StandInDecision
 
-    return SimulatorDecision(action="stop", reason="Judging the screen.", screen_kind=kind)
+    return StandInDecision(action="stop", reason="Judging the screen.", screen_kind=kind)
 
 
 def scripted(draft, *script):
@@ -1853,7 +2081,7 @@ def scripted(draft, *script):
 
     return draft.model_copy(
         update={
-            "simulator": draft.simulator.model_copy(
+            "stand_in": draft.stand_in.model_copy(
                 update={"script": script, "budget": RoleBudget(max_calls=len(script))}
             )
         }
@@ -1910,11 +2138,11 @@ def test_the_claude_fix_scope_screen_is_answered_through_the_screen_loop(
 
     prompt = benchmark.fixture[0].prompt.strip()
     draft = claude_draft(
-        store, benchmark, screen_step(screen_reply(key="Enter")), *benchmark.simulator.script
+        store, benchmark, screen_step(screen_reply(key="Enter")), *benchmark.stand_in.script
     )
     ui = ScreenUI(FIX_SCOPE)
     capture, terminal, blobs = run_screen(store, draft, monkeypatch, ui)
-    assert (capture.stop_reason, capture.accepted_turns) == ("simulator_stop", 2)
+    assert (capture.stop_reason, capture.accepted_turns) == ("stand_in_stop", 2)
     assert (terminal.keys, ui.answer) == (["Enter"], "Fix all Should Fix")
     assert capture.workflow == answered_dialogs(capture)
     asked = capture.controller_calls[0]
@@ -1933,8 +2161,8 @@ def test_the_claude_fix_scope_screen_is_answered_through_the_screen_loop(
 def test_a_screen_is_answered_one_key_at_a_time_guided_by_the_prompt_step_hint(
     store, graded_benchmark, tmp_path, monkeypatch
 ):
-    from dryheave.cases import InspectStep, PromptStep
-    from dryheave.controller_models import SimulatorDecision
+    from dryheave.cases import PromptStep
+    from dryheave.controller_models import StandInDecision
     from dryheave.experiment_models import FixtureTurn
 
     hint = "Use the nightly channel."
@@ -1943,8 +2171,12 @@ def test_a_screen_is_answered_one_key_at_a_time_guided_by_the_prompt_step_hint(
         graded_benchmark,
         tmp_path,
         workflow=(
-            PromptStep(step_id="release", prompt="Pick a release channel.", answer_hint=hint),
-            InspectStep(step_id="check", criteria=("greeting",)),
+            PromptStep(
+                after_phase="fix",
+                step_id="release",
+                prompt="Pick a release channel.",
+                answer_hint=hint,
+            ),
         ),
     )
     seen = "Which release channel?"
@@ -1958,12 +2190,12 @@ def test_a_screen_is_answered_one_key_at_a_time_guided_by_the_prompt_step_hint(
                 )
             }
         ),
-        *draft.simulator.script,
+        *draft.stand_in.script,
         *(
             screen_step(screen_reply(key=key, target="Nightly"), seen)
             for key in ("Down", "Down", "Enter")
         ),
-        screen_step(SimulatorDecision(action="stop", reason="Done."), "Switched to nightly."),
+        screen_step(StandInDecision(action="stop", reason="Done."), "Switched to nightly."),
     )
     ui = ScreenUI(CHANNEL)
     terminals = dialog_fixture(monkeypatch, {"Pick a release channel.": ui})
@@ -1977,12 +2209,13 @@ def test_a_screen_is_answered_one_key_at_a_time_guided_by_the_prompt_step_hint(
     assert capture.stop_reason == "workflow_complete"
     assert (terminals[0].keys, ui.answer) == (["Down", "Down", "Enter"], "Nightly")
     assert workflow_events(capture) == [
+        ("inspect", "passed"),
         ("prompt", "sent"),
         ("dialog", "answered"),
         ("inspect", "passed"),
     ]
-    answered = capture.workflow.events[1]
-    screen_calls = capture.controller_calls[2:5]
+    answered = capture.workflow.events[2]
+    screen_calls = capture.controller_calls[3:6]
     assert (answered.step_id, answered.call_ids) == (
         "release",
         tuple(call.call_id for call in screen_calls),
@@ -2005,11 +2238,11 @@ def test_free_text_is_typed_into_a_screen_then_submitted(store, benchmark, monke
         screen_step(screen_reply(key="3", target=text)),
         screen_step(screen_reply(text=text, target=text)),
         screen_step(screen_reply(key="Enter", target=text)),
-        *benchmark.simulator.script,
+        *benchmark.stand_in.script,
     )
     ui = ScreenUI(FIX_SCOPE)
     capture, terminal, _ = run_screen(store, draft, monkeypatch, ui)
-    assert capture.stop_reason == "simulator_stop"
+    assert capture.stop_reason == "stand_in_stop"
     assert (terminal.keys, terminal.typed, ui.answer) == (["3", "Enter"], [text], text)
     assert capture.workflow == answered_dialogs(capture)
 
@@ -2029,10 +2262,10 @@ class BusyUI(ScreenUI):
 @pytest.mark.integration
 def test_a_busy_screen_is_waited_out_without_a_key(store, benchmark, monkeypatch):
     draft = claude_draft(
-        store, benchmark, screen_step(screen_judgement("busy")), *benchmark.simulator.script
+        store, benchmark, screen_step(screen_judgement("busy")), *benchmark.stand_in.script
     )
     capture, terminal, blobs = run_screen(store, draft, monkeypatch, BusyUI(FIX_SCOPE, 8))
-    assert (capture.stop_reason, capture.accepted_turns) == ("simulator_stop", 2)
+    assert (capture.stop_reason, capture.accepted_turns) == ("stand_in_stop", 2)
     assert (terminal.keys, terminal.typed, capture.workflow) == ([], [], None)
     assert capture.controller_calls[0].decision.screen_kind == "busy"
     assert screen_evidence(blobs, "screen-intent") == []
@@ -2044,14 +2277,14 @@ def test_a_screen_judged_an_approval_stops_without_a_key(store, benchmark, monke
     capture, terminal, _ = run_screen(store, draft, monkeypatch, ScreenUI(FIX_SCOPE))
     assert (capture.stop_reason, capture.last_observation.state) == ("needs_input", "approval")
     assert capture.last_observation.reason == (
-        "The simulator judged the screen a permission prompt; it was not answered."
+        "The stand-in judged the screen a permission prompt; it was not answered."
     )
     assert (terminal.keys, len(capture.controller_calls), capture.workflow) == ([], 1, None)
 
 
 @pytest.mark.integration
-def test_an_unanchored_permission_prompt_never_reaches_the_simulator(store, benchmark, monkeypatch):
-    draft = claude_draft(store, benchmark, *benchmark.simulator.script)
+def test_an_unanchored_permission_prompt_never_reaches_the_stand_in(store, benchmark, monkeypatch):
+    draft = claude_draft(store, benchmark, *benchmark.stand_in.script)
     capture, terminal, _ = run_screen(store, draft, monkeypatch, ScreenUI(EDIT_PERMISSION))
     assert (capture.stop_reason, capture.last_observation.text) == (
         "needs_input",
@@ -2082,12 +2315,12 @@ def test_a_screen_still_open_after_the_step_cap_needs_input(store, benchmark, mo
 
 @pytest.mark.integration
 def test_an_invalid_screen_answer_is_retried_once_then_needs_input(store, benchmark, monkeypatch):
-    from dryheave.controller_models import SimulatorDecision
+    from dryheave.controller_models import StandInDecision
 
     draft = claude_draft(
         store,
         benchmark,
-        screen_step(SimulatorDecision(action="stop", reason="No judgement.")),
+        screen_step(StandInDecision(action="stop", reason="No judgement.")),
         screen_step(screen_reply(key="Enter").model_copy(update={"screen_kind": "busy"})),
     )
     capture, terminal, _ = run_screen(store, draft, monkeypatch, ScreenUI(FIX_SCOPE))
@@ -2132,11 +2365,11 @@ def test_a_codex_question_the_parser_cannot_answer_goes_through_the_screen_loop(
         benchmark,
         screen_step(screen_reply(text=text, target=text), "Share details."),
         screen_step(screen_reply(key="Enter", target=text), "Share details."),
-        *benchmark.simulator.script,
+        *benchmark.stand_in.script,
     )
     ui = CodexFreeformUI(template)
     capture, terminal, blobs = run_screen(store, draft, monkeypatch, ui)
-    assert (capture.stop_reason, capture.accepted_turns) == ("simulator_stop", 2)
+    assert (capture.stop_reason, capture.accepted_turns) == ("stand_in_stop", 2)
     assert (terminal.typed, terminal.keys, ui.answer) == ([text], ["Enter"], text)
     assert capture.workflow == answered_dialogs(capture)
     results = screen_evidence(blobs, "screen-result")
@@ -2257,12 +2490,12 @@ def test_each_screen_in_a_run_of_questions_has_its_own_cap_and_answered_event(
             screen_step(screen_reply(key=key, target="Nightly"), "Which release channel?")
             for key in channel
         ),
-        *benchmark.simulator.script,
+        *benchmark.stand_in.script,
     )
     ui = QuestionsUI(FIX_SCOPE, CHANNEL)
     capture, terminal, _ = run_screen(store, draft, monkeypatch, ui)
     assert (capture.stop_reason, ui.answers) == (
-        "simulator_stop",
+        "stand_in_stop",
         ["Fix all Should Fix", "Nightly"],
     )
     assert terminal.keys == fix + channel

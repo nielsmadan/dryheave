@@ -7,13 +7,12 @@ from pathlib import Path
 from stat import S_ISDIR, S_ISREG
 from tempfile import mkdtemp
 from threading import Event
-from typing import Literal
 
 from pydantic import Field, JsonValue
 
 from dryheave.capture_models import WorkspaceCapture
-from dryheave.cases import DeterministicCriterion, FrozenCase, InspectStep, RubricCriterion
-from dryheave.controller_models import ControllerRecipe, InspectionFinding, RoleCall
+from dryheave.cases import FrozenCase, TaskFact, fact_verifier
+from dryheave.controller_models import ControllerRecipe, RoleCall
 from dryheave.controllers import CallContext
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.models import ProcessIdentity
@@ -22,27 +21,35 @@ from dryheave.filesystem import ensure_directory
 from dryheave.final_capture import capture_workspace
 from dryheave.grading import VerifierContext, check_snapshot
 from dryheave.inspection_scratch import writers_confirmed_stopped
-from dryheave.judges import JudgeInput, TranscriptEntry, fit_transcript, invoke_judge, judge_files
-from dryheave.models import Name, StrictModel
-from dryheave.result_models import CheckExecution
-from dryheave.rubrics import graded_criteria
+from dryheave.judges import (
+    FACT_OBSERVATION_CHARACTERS,
+    FactInspection,
+    FactJudgment,
+    TranscriptEntry,
+    fact_judge_recipe,
+    fact_projection,
+    fit_transcript,
+    invoke_fact_judge,
+    judge_files,
+)
+from dryheave.models import StrictModel
+from dryheave.result_models import (
+    VERIFIER_HARNESS_ERRORS,
+    CheckExecution,
+    VerifierVerdict,
+    verifier_verdict,
+)
 from dryheave.serialization import canonical_json, digest
 from dryheave.storage import ObjectStore
 
-FINDINGS_CHARACTERS = 4000
 SNAPSHOT_ATTEMPTS = 2
 JUDGE_ATTEMPTS = 2
 CLEANUP_ERRORS = frozenset({"judge_cleanup_failed", "verifier_cleanup_failed"})
-VERIFIER_INFRASTRUCTURE_ERRORS = frozenset({"verifier_cleanup_failed", "hidden_verifier_changed"})
 
 
 class InspectionResult(StrictModel):
-    step_id: Name
-    status: Literal["passed", "failed", "unavailable"]
-    findings: tuple[InspectionFinding, ...]
+    inspection: FactInspection
     calls: tuple[RoleCall, ...]
-    snapshot_digest: str | None
-    error: str | None = None
     seconds: float = Field(ge=0)
 
 
@@ -51,7 +58,7 @@ class InspectionRequest:
     store: ObjectStore
     case_id: str
     case: FrozenCase
-    step: InspectStep
+    facts: tuple[TaskFact, ...]
     workspace: Path
     transcript: tuple[TranscriptEntry, ...]
     recipe: ControllerRecipe | None
@@ -61,7 +68,9 @@ class InspectionRequest:
     deadline: float
     cancelled: Event
     on_identities: Callable[[tuple[ProcessIdentity, ...]], None]
-    previous: InspectionResult | None = None
+    inspection_id: str
+    turn: int
+    previous: tuple[FactInspection, ...] = ()
     private: Path | None = None
 
 
@@ -80,15 +89,27 @@ def snapshot_digest(snapshot: WorkspaceCapture) -> str:
     return digest(canonical_json(payload))
 
 
-def fit_findings(findings: tuple[InspectionFinding, ...]) -> tuple[InspectionFinding, ...]:
-    if not findings:
-        return ()
-    share = max(2, FINDINGS_CHARACTERS // len(findings))
-    return tuple(
-        item
-        if len(item.rationale) <= share
-        else item.model_copy(update={"rationale": item.rationale[: share - 1] + "…"})
-        for item in findings
+def input_digest(
+    snapshot: str, transcript: tuple[TranscriptEntry, ...], facts: tuple[TaskFact, ...]
+) -> str:
+    payload: dict[str, JsonValue] = {
+        "snapshot": snapshot,
+        "transcript": [entry.model_dump(mode="json") for entry in transcript],
+        "facts": [fact.model_dump(mode="json") for fact in facts],
+    }
+    return digest(canonical_json(payload))
+
+
+def unavailable(
+    request: InspectionRequest, error: str, snapshot: str | None = None
+) -> FactInspection:
+    return FactInspection(
+        inspection_id=request.inspection_id,
+        turn=request.turn,
+        snapshot_digest=snapshot,
+        input_digest=None,
+        status="unavailable",
+        error=error,
     )
 
 
@@ -112,12 +133,15 @@ def inspect_workspace(request: InspectionRequest) -> InspectionResult:
         if writers_confirmed_stopped(private):
             _remove(private)
         raise
-    if result.error not in CLEANUP_ERRORS and not _remove(private):
+    error = result.inspection.error
+    if error not in CLEANUP_ERRORS and not _remove(private):
         result = result.model_copy(
             update={
-                "status": "unavailable",
-                "findings": (),
-                "error": result.error or "inspection_cleanup_failed",
+                "inspection": unavailable(
+                    request,
+                    error or "inspection_cleanup_failed",
+                    result.inspection.snapshot_digest,
+                ),
             }
         )
     return result.model_copy(update={"seconds": time.monotonic() - started})
@@ -132,50 +156,54 @@ def _remove(private: Path) -> bool:
 
 
 def _inspect(request: InspectionRequest, private: Path) -> InspectionResult:
-    step_id = request.step.step_id
     current: str | None = None
     try:
         snapshot, blobs = _snapshot(request, private)
         current = snapshot_digest(snapshot)
-        previous = request.previous
-        if (
-            previous is not None
-            and previous.step_id == step_id
-            and previous.snapshot_digest == current
-            and previous.status != "unavailable"
-        ):
-            return previous.model_copy(update={"calls": ()})
-        criteria = {item.criterion_id: item for item in graded_criteria(request.case, judged=True)}
-        if any(name not in criteria for name in request.step.criteria):
-            raise _Unavailable("unknown_criterion")
-        selected = tuple(criteria[name] for name in request.step.criteria)
+        key = input_digest(current, request.transcript, request.facts)
+        previous = next(
+            (
+                item
+                for item in reversed(request.previous)
+                if item.status == "completed" and item.input_digest == key
+            ),
+            None,
+        )
+        if previous is not None:
+            return InspectionResult(
+                inspection=previous.model_copy(
+                    update={"inspection_id": request.inspection_id, "turn": request.turn}
+                ),
+                calls=(),
+                seconds=0,
+            )
         verified = _verify(
             request,
             private,
-            tuple(item for item in selected if isinstance(item, DeterministicCriterion)),
+            tuple(item for item in request.facts if item.verifier is not None),
             (snapshot, blobs),
         )
-        rubrics = tuple(item for item in selected if isinstance(item, RubricCriterion))
+        judged_facts = tuple(item for item in request.facts if item.verifier is None)
         calls, judged = (
-            _judge(request, private, rubrics, (snapshot, blobs)) if rubrics else ((), ())
+            _judge(request, private, judged_facts, (snapshot, blobs)) if judged_facts else ((), {})
         )
-    except _Unavailable as unavailable:
+    except _Unavailable as failure:
         return InspectionResult(
-            step_id=step_id,
-            status="unavailable",
-            findings=(),
-            calls=unavailable.calls,
-            snapshot_digest=current,
-            error=unavailable.error,
+            inspection=unavailable(request, failure.error, current),
+            calls=failure.calls,
             seconds=0,
         )
-    findings = fit_findings((*verified, *judged))
+    settled = verified | judged
     return InspectionResult(
-        step_id=step_id,
-        status="failed" if findings else "passed",
-        findings=findings,
+        inspection=FactInspection(
+            inspection_id=request.inspection_id,
+            turn=request.turn,
+            snapshot_digest=current,
+            input_digest=key,
+            status="completed",
+            judgments=tuple(settled[item.fact_id] for item in request.facts),
+        ),
         calls=calls,
-        snapshot_digest=current,
         seconds=0,
     )
 
@@ -218,32 +246,51 @@ def _retain(source: Path, target: Path) -> None:
     shutil.copytree(source, target, symlinks=True, ignore=_irregular)
 
 
-def _verdict(execution: CheckExecution, deadline: float) -> tuple[str, str | None]:
-    if execution.error in VERIFIER_INFRASTRUCTURE_ERRORS or execution.returncode is None:
-        return "unavailable", execution.error or "verifier_unavailable"
-    if execution.process_outcome == "timeout" and time.monotonic() >= deadline:
-        return "unavailable", "deadline_exhausted"
-    return ("pass" if execution.outcome == "pass" else "fail"), None
-
-
-def _outcome_category(execution: CheckExecution) -> str:
+def _outcome_category(verdict: VerifierVerdict | None, execution: CheckExecution) -> str:
+    if verdict is None:
+        return "verifier gave no result"
+    if verdict == "met":
+        return "passed"
     if execution.process_outcome == "timeout":
         return "timed out"
+    if execution.process_outcome == "output_limit":
+        return "output limit"
     return "failed" if execution.outcome == "fail" else "crashed"
 
 
-def _verifier_rationale(criterion: DeterministicCriterion, execution: CheckExecution) -> str:
-    return f"{criterion.description} ({_outcome_category(execution)})"
+def _execution_details(execution: CheckExecution) -> str:
+    details = (
+        execution.process_outcome or "not launched",
+        None if execution.returncode is None else f"exit code {execution.returncode}",
+        execution.error,
+    )
+    return ", ".join(item for item in details if item)
+
+
+def _observation(text: str) -> str:
+    if len(text) <= FACT_OBSERVATION_CHARACTERS:
+        return text
+    return text[: FACT_OBSERVATION_CHARACTERS - 1] + "…"
+
+
+def verifier_judgment(fact: TaskFact, execution: CheckExecution) -> FactJudgment:
+    verdict = verifier_verdict(execution)
+    return FactJudgment(
+        fact_id=fact.fact_id,
+        verdict=verdict or "unclear",
+        observation=_observation(f"{fact.text} ({_outcome_category(verdict, execution)})"),
+        evidence=f"verifier {fact_verifier(fact).entrypoint}: {_execution_details(execution)}",
+    )
 
 
 def _verify(
     request: InspectionRequest,
     private: Path,
-    criteria: tuple[DeterministicCriterion, ...],
+    facts: tuple[TaskFact, ...],
     snapshot: tuple[WorkspaceCapture, dict[str, bytes]],
-) -> tuple[InspectionFinding, ...]:
-    if not criteria:
-        return ()
+) -> dict[str, FactJudgment]:
+    if not facts:
+        return {}
     capture, blobs = snapshot
     try:
         hidden = request.store.read_blobs(
@@ -260,74 +307,83 @@ def _verify(
         request.on_identities,
         request.cancelled,
     )
-    findings = []
-    for criterion in criteria:
+    judgments = {}
+    for fact in facts:
         _available(request)
         try:
-            execution, evidence = check_snapshot(context, criterion, capture, request.deadline)
-            _retain(evidence, request.retained / private.name / "criteria" / criterion.criterion_id)
+            execution, evidence = check_snapshot(context, fact, capture, request.deadline)
+            _retain(evidence, request.retained / private.name / "facts" / fact.fact_id)
         except (DryheaveError, OSError) as error:
             raise _Unavailable(type(error).__name__) from error
-        verdict, error_name = _verdict(execution, request.deadline)
-        if error_name is not None:
-            raise _Unavailable(error_name)
-        if verdict == "fail":
-            findings.append(
-                InspectionFinding(
-                    criterion_id=criterion.criterion_id,
-                    rationale=_verifier_rationale(criterion, execution),
-                )
-            )
-    return tuple(findings)
+        if execution.error is not None and execution.error in VERIFIER_HARNESS_ERRORS:
+            raise _Unavailable(execution.error)
+        judgments[fact.fact_id] = verifier_judgment(fact, execution)
+    return judgments
+
+
+def _judge_call(
+    request: InspectionRequest,
+    private: Path,
+    facts: tuple[TaskFact, ...],
+    snapshot: tuple[WorkspaceCapture, dict[str, bytes]],
+    attempt: str,
+) -> tuple[RoleCall, dict[str, FactJudgment]]:
+    if request.recipe is None:
+        raise _Unavailable("no_inspector")
+    recipe = fact_judge_recipe(request.recipe, len(facts))
+    judge_input = fit_transcript(
+        fact_projection(
+            request.case, facts, judge_files(snapshot[0].files, snapshot[1]), request.transcript
+        ),
+        recipe.budget.max_input_bytes,
+    )
+    context = request.call_context(
+        min(request.deadline, time.monotonic() + recipe.budget.call_seconds),
+        private / "runtime" / attempt,
+    )
+    artifacts = ArtifactWriter(
+        private / "judge" / context.call_id,
+        recipe.budget.max_input_bytes + 8 * recipe.budget.max_output_bytes,
+    )
+    call, judgments = invoke_fact_judge(recipe, judge_input, artifacts, context)
+    _retain(artifacts.root, request.retained / private.name / "judge" / context.call_id)
+    if call.cleanup is not None and not call.cleanup.known_writers_stopped:
+        raise _Unavailable("judge_cleanup_failed", (call,))
+    verdicts = {item.fact_id: item for item in judgments} if call.status == "completed" else {}
+    return call, verdicts
 
 
 def _judge(
     request: InspectionRequest,
     private: Path,
-    rubrics: tuple[RubricCriterion, ...],
+    facts: tuple[TaskFact, ...],
     snapshot: tuple[WorkspaceCapture, dict[str, bytes]],
-) -> tuple[tuple[RoleCall, ...], tuple[InspectionFinding, ...]]:
-    recipe = request.recipe
-    if recipe is None:
-        raise _Unavailable("no_inspector")
-    files, omitted = judge_files(snapshot[0].files, snapshot[1])
-    judge_input = fit_transcript(
-        JudgeInput(
-            initial_prompt=request.case.initial_prompt,
-            criteria=rubrics,
-            files=files,
-            omitted_binary_files=omitted,
-            transcript=request.transcript,
-        ),
-        recipe.budget.max_input_bytes,
-    )
+) -> tuple[tuple[RoleCall, ...], dict[str, FactJudgment]]:
     calls: list[RoleCall] = []
+    judged: dict[str, FactJudgment] | None = None
     for attempt in range(JUDGE_ATTEMPTS):
         _available(request, tuple(calls))
         try:
-            context = request.call_context(
-                min(request.deadline, time.monotonic() + recipe.budget.call_seconds),
-                private / "runtime" / str(attempt),
-            )
-            artifacts = ArtifactWriter(
-                private / "judge" / context.call_id,
-                recipe.budget.max_input_bytes + 8 * recipe.budget.max_output_bytes,
-            )
-            call, _, _, judgments = invoke_judge(recipe, judge_input, artifacts, context)
-            calls.append(call)
-            _retain(artifacts.root, request.retained / private.name / "judge" / context.call_id)
+            call, verdicts = _judge_call(request, private, facts, snapshot, str(attempt))
+        except _Unavailable as failure:
+            raise _Unavailable(failure.error, (*calls, *failure.calls)) from failure
         except (DryheaveError, OSError) as error:
             raise _Unavailable(type(error).__name__, tuple(calls)) from error
-        if call.cleanup is not None and not call.cleanup.known_writers_stopped:
-            raise _Unavailable("judge_cleanup_failed", tuple(calls))
-        verdicts = {item.criterion_id: item for item in judgments if item.outcome != "error"}
-        if call.status == "completed" and all(item.criterion_id in verdicts for item in rubrics):
-            return tuple(calls), tuple(
-                InspectionFinding(
-                    criterion_id=item.criterion_id,
-                    rationale=verdicts[item.criterion_id].rationale,
-                )
-                for item in rubrics
-                if verdicts[item.criterion_id].outcome == "fail"
-            )
-    raise _Unavailable("judge_unavailable", tuple(calls))
+        calls.append(call)
+        if all(item.fact_id in verdicts for item in facts):
+            judged = verdicts
+            break
+    if judged is None:
+        raise _Unavailable("judge_unavailable", tuple(calls))
+    unclear = tuple(item for item in facts if judged[item.fact_id].verdict == "unclear")
+    if not unclear or request.cancelled.is_set() or time.monotonic() >= request.deadline:
+        return tuple(calls), judged
+    try:
+        call, rejudged = _judge_call(request, private, unclear, snapshot, "rejudge")
+    except _Unavailable as failure:
+        raise _Unavailable(failure.error, (*calls, *failure.calls)) from failure
+    except (DryheaveError, OSError) as error:
+        raise _Unavailable(type(error).__name__, tuple(calls)) from error
+    return (*calls, call), judged | {
+        fact_id: judgment for fact_id, judgment in rejudged.items() if fact_id in judged
+    }

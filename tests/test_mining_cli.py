@@ -1,11 +1,13 @@
 import json
 import shutil
+import subprocess
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from dryheave.cli import main
+from dryheave.workspaces import initialize_workspace
 
 
 @pytest.fixture
@@ -13,8 +15,7 @@ def authoring_workspace(tmp_path, monkeypatch, capsys):
     fixture = Path("tests/fixtures/codex-recorded.jsonl").absolute()
     runtime = (Path(".cache") / ("m" + uuid4().hex[:5])).absolute()
     workspace = tmp_path / "bench"
-    assert main(["init", str(workspace), "--runtime-root", str(runtime), "--json"]) == 0
-    capsys.readouterr()
+    initialize_workspace(workspace, runtime_root=runtime)
     nested = workspace / "nested"
     nested.mkdir()
     monkeypatch.chdir(nested)
@@ -29,7 +30,7 @@ def invoke(capsys, *arguments):
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("draft_directory", [".dryheave/authoring", "drafts"])
+@pytest.mark.parametrize("draft_directory", ["cases/greeting", "drafts"])
 def test_selected_log_public_cli_voice_decision_validate_freeze(
     authoring_workspace, historical_repo, capsys, draft_directory
 ):
@@ -96,6 +97,7 @@ def test_selected_log_public_cli_voice_decision_validate_freeze(
         invoke(capsys, "voice", "inspect", "my-voice")["persona"]["examples"][0]["excerpt"]
         == user["text"]
     )
+    assert invoke(capsys, "voice", "inspect", "my-voice")["voice"]["persona_id"] == voice["id"]
     case_path = workspace / draft_directory / "case.json"
     invoke(
         capsys,
@@ -120,11 +122,14 @@ def test_selected_log_public_cli_voice_decision_validate_freeze(
         intent_confirmed=True,
         facts_reviewed=True,
         unresolved_issues=[],
-        criteria=[
+        phases=["fix"],
+        allowed_facts=[
             {
-                "kind": "judge",
-                "criterion_id": "command",
-                "rubric": "The requested greeting command behaves correctly for normal and empty names.",
+                "fact_id": "command",
+                "phase": "fix",
+                "text": "The greeting command takes a name.",
+                "check": "The requested greeting command behaves correctly for normal and empty names.",
+                "curator_authored": True,
             }
         ],
     )
@@ -167,12 +172,31 @@ def test_selected_log_public_cli_voice_decision_validate_freeze(
     recorded = invoke(capsys, *record, "--expect-revision", "3")
     assert recorded["revision"] == 4
     assert recorded["request"]["decisions"]["greeting"]["draft_path"] == (
-        "case.json" if draft_directory == ".dryheave/authoring" else str(case_path)
+        f"{draft_directory}/case.json"
     )
     validated = invoke(capsys, "problem", "validate", "mine", "greeting", "--expect-revision", "4")
     assert validated["valid"] is True
     frozen = invoke(capsys, "problem", "freeze", "mine", "greeting", "--expect-revision", "5")
     assert frozen["decision"]["state"] == "frozen"
+    assert frozen["commit_paths"] == (
+        ["cases/greeting/case.json"]
+        if draft_directory == "cases/greeting"
+        else ["drafts/case.json"]
+    )
+    assert "commit_paths" not in validated
+    aliases = invoke(capsys, "store", "alias", "list")["aliases"]
+    if draft_directory == "cases/greeting":
+        assert frozen["alias"] == "greeting"
+        assert aliases == {"greeting": frozen["id"]}
+        assert frozen["next"].startswith(
+            "Calibrate before subject spend with case calibrate greeting"
+        )
+    else:
+        assert "alias" not in frozen
+        assert aliases == {}
+        assert frozen["next"].startswith(
+            f"Calibrate before subject spend with case calibrate {frozen['id']}"
+        )
     assert invoke(capsys, "case", "inspect", frozen["id"])["case"]["persona_id"] == voice["id"]
     gap = invoke(
         capsys,
@@ -291,6 +315,12 @@ def test_voice_defaults_to_one_default_name_and_reports_computed_evidence(
         "default",
         "second",
     }
+    assert main(["voice", "draft", "--selection", "chosen", "--name", "second", "--json"]) != 0
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert (error["code"], error["message"]) == (
+        "conflict",
+        "A voice named 'second' already exists; choose another --name.",
+    )
 
 
 def test_selection_commands_require_initialized_workspace(tmp_path, monkeypatch, capsys):
@@ -711,3 +741,53 @@ def test_voice_delete_frees_the_name_and_keeps_the_frozen_persona(
     again = curate_voice(capsys, "chosen", "mistake", 3)
     assert again["id"] == created["id"]
     assert invoke(capsys, "voice", "list")["voices"][0]["name"] == "mistake"
+
+
+def test_voice_drafts_land_in_the_voices_folder_without_overwriting_earlier_ones(
+    authoring_workspace, tmp_path, capsys
+):
+    workspace, _ = authoring_workspace
+    source = tmp_path / "source.jsonl"
+    write_codex_log(source, FEATURE_TEXTS, cwd="/repos/alpha")
+    invoke(capsys, "collect", "select", "chosen", str(source), "--agent", "codex")
+    first = invoke(capsys, "voice", "draft", "--selection", "chosen", "--name", "terse")
+    second = invoke(capsys, "voice", "draft", "--selection", "chosen", "--name", "terse")
+    assert first["path"] == str(workspace / "voices/terse.json")
+    assert second["path"] == str(workspace / "voices/terse-2.json")
+    assert (workspace / "voices/terse.json").is_file()
+
+
+@pytest.mark.parametrize("name", ["../x", "/abs/path", "a/b"])
+def test_voice_draft_rejects_names_that_are_not_catalog_names(
+    authoring_workspace, tmp_path, capsys, name
+):
+    workspace, _ = authoring_workspace
+    source = tmp_path / "source.jsonl"
+    write_codex_log(source, FEATURE_TEXTS, cwd="/repos/alpha")
+    invoke(capsys, "collect", "select", "chosen", str(source), "--agent", "codex")
+    assert main(["voice", "draft", "--selection", "chosen", "--name", name, "--json"]) == 2
+    assert "Invalid voice name" in json.loads(capsys.readouterr().err)["error"]["message"]
+    assert not (workspace / "voices").exists()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mode", ["ask", "auto"])
+def test_voice_create_reports_its_draft_and_commits_it_only_in_auto_mode(
+    authoring_workspace, tmp_path, capsys, git_identity, mode
+):
+    workspace, _ = authoring_workspace
+    invoke(capsys, "init", str(workspace), "--git-commit", mode)
+    source = tmp_path / "source.jsonl"
+    write_codex_log(source, FEATURE_TEXTS, cwd="/repos/alpha")
+    invoke(capsys, "collect", "select", "chosen", str(source), "--agent", "codex")
+    created = curate_voice(capsys, "chosen", "terse", 1)
+    assert created["commit_paths"] == ["voices/terse.json"]
+    log = subprocess.run(
+        ["git", "log", "--format=%s"], cwd=workspace, capture_output=True, text=True, check=False
+    )
+    if mode == "auto":
+        assert created["commit"]["state"] == "committed"
+        assert log.stdout.splitlines() == ["voice: create terse"]
+    else:
+        assert "commit" not in created
+        assert log.returncode != 0

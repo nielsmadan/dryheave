@@ -16,18 +16,28 @@ from dryheave.models import Name, ObjectId, RelativePath, RunId, StrictModel, Tr
 from dryheave.profile_models import LaunchPlan
 
 
+class RunBudget(StrictModel):
+    max_turns: int = Field(default=60, ge=1, le=1000)
+    stand_in_replies: int = Field(default=40, ge=1, le=100)
+    max_inspections: int = Field(default=20, ge=1, le=1000)
+
+
 class RunOptions(StrictModel):
     mode: Literal["native", "offline-fixture"] = "native"
     strict: bool = False
     runtime_root: str | None = None
     transport: str | None = None
     workflow: bool = False
+    budget: RunBudget = Field(default_factory=RunBudget)
+    pilot_run: RunId | None = None
 
     @model_serializer(mode="wrap")
     def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         value: dict[str, object] = handler(self)
         if not self.workflow:
             value.pop("workflow", None)
+        if self.pilot_run is None:
+            value.pop("pilot_run", None)
         return value
 
 
@@ -45,9 +55,7 @@ class AttemptCheckpoint(StrictModel):
 class WorkflowEvent(StrictModel):
     step_id: Name
     kind: Literal["prompt", "inspect", "dialog"]
-    outcome: Literal[
-        "sent", "passed", "failed", "fix_requested", "answered", "unavailable", "reused"
-    ]
+    outcome: Literal["sent", "passed", "failed", "fix_requested", "answered", "unavailable"]
     turn: int = Field(ge=0)
     failed_criteria: tuple[Name, ...] = ()
     call_ids: tuple[Name, ...] = ()
@@ -111,7 +119,7 @@ class CapturedAttempt(StrictModel):
     case_id: ObjectId
     profile_id: ObjectId
     persona_id: ObjectId
-    simulator_id: ObjectId
+    stand_in_id: ObjectId
     scoring_id: ObjectId
     mode: Literal["native", "offline-fixture"]
     isolation: Literal["repository-object"] = "repository-object"

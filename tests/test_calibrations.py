@@ -18,8 +18,9 @@ from dryheave.calibration_recovery import (
     reconcile_calibrations,
 )
 from dryheave.calibrations import calibrate_case, load_calibration
-from dryheave.cases import RubricCriterion, load_frozen_case
+from dryheave.cases import TaskFact, load_frozen_case
 from dryheave.cli import main
+from dryheave.controller_models import ControllerRecipe
 from dryheave.drivers.models import ProcessIdentity
 from dryheave.errors import InputError, IntegrityError, LockBusyError
 from dryheave.models import CommandSpec, ObjectKind
@@ -27,7 +28,7 @@ from dryheave.serialization import canonical_json, digest, parse_model
 from dryheave.storage import ObjectStore
 
 
-def altered_case(store, reference, *, program=None, criteria=None, reference_patch=True, setup=()):
+def altered_case(store, reference, *, program=None, facts=None, reference_patch=True, setup=()):
     case = load_frozen_case(store, reference)
     files = store.read_blobs(reference)
     if program is not None:
@@ -36,7 +37,7 @@ def altered_case(store, reference, *, program=None, criteria=None, reference_pat
         files.pop("reference.patch", None)
     case = case.model_copy(
         update={
-            "criteria": case.criteria if criteria is None else criteria,
+            "allowed_facts": case.allowed_facts if facts is None else facts,
             "reference_patch_file": case.reference_patch_file if reference_patch else None,
             "setup": setup,
         }
@@ -44,6 +45,52 @@ def altered_case(store, reference, *, program=None, criteria=None, reference_pat
     return store.put(
         ObjectKind.CASE, case, files=files, references=(case.repository_id, case.persona_id)
     )
+
+
+def verified(case, fact_id=None, *, command=None, **changes):
+    fact = case.allowed_facts[0]
+    verifier = fact.verifier.model_copy(
+        update=changes | ({"command": command} if command is not None else {})
+    )
+    return fact.model_copy(update={"fact_id": fact_id or fact.fact_id, "verifier": verifier})
+
+
+def judged(fact_id, text="Greet with a comma."):
+    return TaskFact(
+        fact_id=fact_id,
+        phase="fix",
+        text=text,
+        check="Calling greet('Ada') returns 'Hello, Ada'.",
+        curator_authored=True,
+    )
+
+
+JUDGE = """
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+request = json.load(sys.stdin)
+count = len(list(root.glob("request-*.json")))
+(root / f"request-{count}.json").write_text(json.dumps(request))
+verdicts = json.loads((root / "verdicts.json").read_text())[count]
+print(json.dumps({"judgments": [
+    {"fact_id": fact_id, "verdict": verdict, "observation": "Seen.", "evidence": "greet.py:2"}
+    for fact_id, verdict in verdicts.items()
+]}))
+"""
+
+
+def fake_judge(tmp_path, *sides):
+    root = tmp_path / "judge"
+    root.mkdir()
+    (root / "verdicts.json").write_text(json.dumps(list(sides)))
+    script = tmp_path / "judge.py"
+    script.write_text(JUDGE)
+    recipe = ControllerRecipe(
+        kind="json-command",
+        isolation="trusted-native",
+        command=CommandSpec(argv=(sys.executable, str(script), str(root))),
+    )
+    return recipe, root
 
 
 def calibration_objects(store):
@@ -69,7 +116,11 @@ def test_public_calibration_retains_baseline_failure_reference_success_without_r
     record = load_calibration(store, identifier)
     assert record.case_id == case_id
     assert record.status == "demonstrated"
-    calibration = record.criteria[0].calibration
+    assert data["flagged"] == []
+    assert data["next"].endswith("every fact behaves; pilot the case next.")
+    assert (record.facts[0].baseline, record.facts[0].reference) == ("unmet", "met")
+    assert record.judge_calls == ()
+    calibration = record.facts[0].calibration
     assert calibration.baseline.outcome == "fail"
     assert calibration.reference.outcome == "pass"
     assert calibration.baseline.execution_observed
@@ -107,10 +158,24 @@ def test_runtime_and_unobserved_execution_errors_do_not_demonstrate_failure(
     case_id = altered_case(store, graded_benchmark.cases[0], program=program)
     record = load_calibration(store, calibrate_case(store, case_id))
     assert record.status == "unavailable"
-    result = record.criteria[0].calibration
+    assert (record.facts[0].baseline, record.facts[0].flags) == ("unclear", ())
+    result = record.facts[0].calibration
     assert result.baseline.outcome == "error"
     assert result.reference.outcome == "error"
     assert result.baseline.error == "expected_execution_evidence_missing"
+
+
+@pytest.mark.integration
+def test_an_unavailable_calibration_names_the_facts_and_where_their_errors_are(
+    store, graded_benchmark, capsys
+):
+    case_id = altered_case(store, graded_benchmark.cases[0], program="print('no checks')\n")
+    assert main(["--store", str(store.root), "--json", "case", "calibrate", case_id]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert (data["calibration"]["status"], data["flagged"]) == ("unavailable", [])
+    assert "no verdict on a side for punctuation" in data["next"]
+    assert "facts[].calibration.{baseline,reference}.error" in data["next"]
+    assert "exit nonzero" in data["next"]
 
 
 @pytest.mark.integration
@@ -120,8 +185,24 @@ def test_passing_baseline_is_ineffective(store, graded_benchmark):
     )
     record = load_calibration(store, calibrate_case(store, case_id))
     assert record.status == "ineffective"
-    assert record.criteria[0].calibration.baseline.outcome == "pass"
-    assert record.criteria[0].calibration.reference.outcome == "pass"
+    assert record.facts[0].flags == ("met_on_baseline",)
+    assert record.facts[0].calibration.baseline.outcome == "pass"
+    assert record.facts[0].calibration.reference.outcome == "pass"
+
+
+@pytest.mark.integration
+def test_failing_reference_flags_the_verifier_fact(store, graded_benchmark):
+    case_id = altered_case(
+        store,
+        graded_benchmark.cases[0],
+        program="print('GREETING_ASSERTION_FAILED'); raise SystemExit(1)\n",
+    )
+    record = load_calibration(store, calibrate_case(store, case_id))
+    assert record.status == "ineffective"
+    assert (record.facts[0].baseline, record.facts[0].reference) == ("unmet", "unmet")
+    assert [(item.fact_id, item.flags) for item in record.flagged] == [
+        ("punctuation", ("unmet_on_reference",))
+    ]
 
 
 @pytest.mark.integration
@@ -131,10 +212,8 @@ def test_direct_executable_hidden_entrypoint_is_trusted(store, graded_benchmark)
         f"#!{sys.executable}\n"
         + store.read_blob(graded_benchmark.cases[0], "verifiers/hidden.py").decode()
     )
-    criterion = case.criteria[0].model_copy(
-        update={"command": CommandSpec(argv=("{verifier}/hidden.py",))}
-    )
-    case_id = altered_case(store, graded_benchmark.cases[0], program=program, criteria=(criterion,))
+    fact = verified(case, command=CommandSpec(argv=("{verifier}/hidden.py",)))
+    case_id = altered_case(store, graded_benchmark.cases[0], program=program, facts=(fact,))
     assert load_calibration(store, calibrate_case(store, case_id)).status == "demonstrated"
 
 
@@ -149,12 +228,11 @@ def test_one_byte_verifier_output_calibrates_and_assesses_with_retained_metadata
     from dryheave.runner_models import RunOptions
 
     case = load_frozen_case(store, graded_benchmark.cases[0])
-    criterion = case.criteria[0].model_copy(
-        update={
-            "command": case.criteria[0].command.model_copy(update={"max_output_bytes": 1}),
-            "expected_stdout": "P",
-            "expected_failure_stdout": "F",
-        }
+    fact = verified(
+        case,
+        command=case.allowed_facts[0].verifier.command.model_copy(update={"max_output_bytes": 1}),
+        expected_stdout="P",
+        expected_failure_stdout="F",
     )
     case_id = altered_case(
         store,
@@ -166,13 +244,13 @@ def test_one_byte_verifier_output_calibrates_and_assesses_with_retained_metadata
             "sys.stdout.write('P' if passed else 'F')\n"
             "raise SystemExit(0 if passed else 1)\n"
         ),
-        criteria=(criterion,),
+        facts=(fact,),
     )
     identifier = calibrate_case(store, case_id)
     record = load_calibration(store, identifier)
     assert record.status == "demonstrated"
     for side, marker, outcome in (("baseline", b"F", "fail"), ("reference", b"P", "pass")):
-        execution = getattr(record.criteria[0].calibration, side)
+        execution = getattr(record.facts[0].calibration, side)
         assert execution.outcome == outcome
         assert execution.process_outcome == "exited"
         assert execution.execution_observed
@@ -188,7 +266,7 @@ def test_one_byte_verifier_output_calibrates_and_assesses_with_retained_metadata
         host=HOST,
     )
     result = load_assessment(store, assess_run(store, summary.run_id)[0])
-    assert result.completion == "pass"
+    assert result.outcome == "pass"
     assert result.eligible
     check = result.criteria[0]
     assert check.execution.outcome == "pass"
@@ -201,19 +279,20 @@ def test_one_byte_verifier_output_calibrates_and_assesses_with_retained_metadata
 @pytest.mark.integration
 def test_timeout_is_a_retained_error_and_stops_verifier(store, graded_benchmark):
     case = load_frozen_case(store, graded_benchmark.cases[0])
-    criterion = case.criteria[0].model_copy(
-        update={"command": case.criteria[0].command.model_copy(update={"timeout_seconds": 1})}
+    fact = verified(
+        case,
+        command=case.allowed_facts[0].verifier.command.model_copy(update={"timeout_seconds": 1}),
     )
     case_id = altered_case(
         store,
         graded_benchmark.cases[0],
         program="import time\nprint('PRIVATE_VERIFIER_SENTINEL', flush=True)\ntime.sleep(30)\n",
-        criteria=(criterion,),
+        facts=(fact,),
     )
     record = load_calibration(store, calibrate_case(store, case_id))
     assert record.status == "unavailable"
-    assert record.criteria[0].calibration.baseline.process_outcome == "timeout"
-    assert record.criteria[0].calibration.reference.outcome == "error"
+    assert record.facts[0].calibration.baseline.process_outcome == "timeout"
+    assert record.facts[0].calibration.reference.outcome == "error"
 
 
 @pytest.mark.integration
@@ -265,28 +344,144 @@ def test_completed_verifier_stops_observed_detached_child_before_snapshot(
 
 
 @pytest.mark.integration
-def test_missing_reference_and_judge_only_remain_honest(store, graded_benchmark):
+def test_missing_reference_remains_honest(store, graded_benchmark):
     missing = altered_case(store, graded_benchmark.cases[0], reference_patch=False)
     record = load_calibration(store, calibrate_case(store, missing))
     assert record.status == "unavailable"
-    assert record.criteria[0].calibration.baseline.outcome == "fail"
-    assert record.criteria[0].calibration.reference is None
-    judge = altered_case(
-        store,
-        missing,
-        reference_patch=False,
-        criteria=(
-            RubricCriterion(
-                criterion_id="quality",
-                rubric="Judge the clarity of the resulting greeting implementation.",
-            ),
-        ),
+    assert (record.facts[0].baseline, record.facts[0].reference) == ("unmet", None)
+    assert record.facts[0].calibration.baseline.outcome == "fail"
+    assert record.facts[0].calibration.reference is None
+
+
+@pytest.mark.integration
+def test_judged_facts_take_one_judge_call_per_side_and_are_flagged(
+    store, graded_benchmark, tmp_path
+):
+    case = load_frozen_case(store, graded_benchmark.cases[0])
+    facts = (*case.allowed_facts, judged("comma"), judged("already"), judged("never"))
+    case_id = altered_case(store, graded_benchmark.cases[0], facts=facts)
+    recipe, root = fake_judge(
+        tmp_path,
+        {"comma": "unmet", "already": "met", "never": "unmet"},
+        {"comma": "met", "already": "met", "never": "unmet"},
     )
-    record = load_calibration(store, calibrate_case(store, judge))
-    assert record.status == "not_applicable"
-    assert record.criteria[0].kind == "judge"
-    assert record.criteria[0].calibration is None
-    assert set(record.files) == {"cleanup.json"}
+    record = load_calibration(store, calibrate_case(store, case_id, judge=recipe))
+    assert [(item.fact_id, item.source, item.status, item.flags) for item in record.facts] == [
+        ("punctuation", "verifier", "demonstrated", ()),
+        ("comma", "judge", "demonstrated", ()),
+        ("already", "judge", "ineffective", ("met_on_baseline",)),
+        ("never", "judge", "ineffective", ("unmet_on_reference",)),
+    ]
+    assert record.status == "ineffective"
+    assert [call.status for call in record.judge_calls] == ["completed", "completed"]
+    requests = [json.loads(path.read_text()) for path in sorted(root.glob("request-*.json"))]
+    assert [[item["fact_id"] for item in request["facts"]] for request in requests] == [
+        ["comma", "already", "never"],
+        ["comma", "already", "never"],
+    ]
+    assert [request["files"]["greet.py"] for request in requests] == [
+        'def greet(name):\n    return "Hello " + name\n',
+        'def greet(name):\n    return "Hello, " + name\n',
+    ]
+    assert record.facts[2].baseline_judgment.observation == "Seen."
+    assert set(record.files) - {"cleanup.json"}
+    assert any(name.startswith("judge/baseline/") for name in record.files)
+    assert not any("/workspace/" in name for name in record.files if name.startswith("judge/"))
+
+
+@pytest.mark.integration
+def test_calibration_scales_the_fact_judge_output_limit_with_the_fact_count(
+    store, graded_benchmark, tmp_path, monkeypatch
+):
+    from dryheave import calibrations
+
+    case = load_frozen_case(store, graded_benchmark.cases[0])
+    facts = (*case.allowed_facts, judged("comma"), judged("already"))
+    case_id = altered_case(store, graded_benchmark.cases[0], facts=facts)
+    recipe, _ = fake_judge(
+        tmp_path, {"comma": "unmet", "already": "unmet"}, {"comma": "met", "already": "met"}
+    )
+    small = recipe.model_copy(
+        update={"budget": recipe.budget.model_copy(update={"max_output_bytes": 1024})}
+    )
+    seen = []
+    real = calibrations.invoke_fact_judge
+
+    def recording(used, *args, **kwargs):
+        seen.append(used.budget.max_output_bytes)
+        return real(used, *args, **kwargs)
+
+    monkeypatch.setattr(calibrations, "invoke_fact_judge", recording)
+    record = load_calibration(store, calibrate_case(store, case_id, judge=small))
+    assert record.status == "demonstrated"
+    assert seen == [4096 + 2 * 16 * 1024] * 2
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("fact-id", "different fact"),
+        ("failed-call", "failed judge call"),
+        ("blank-evidence", "without evidence"),
+    ],
+)
+def test_calibration_rejects_inconsistent_judge_judgments(
+    store, graded_benchmark, tmp_path, mutation, message
+):
+    case = load_frozen_case(store, graded_benchmark.cases[0])
+    case_id = altered_case(
+        store, graded_benchmark.cases[0], facts=(*case.allowed_facts, judged("comma"))
+    )
+    recipe, _ = fake_judge(tmp_path, {"comma": "unmet"}, {"comma": "met"})
+    identifier = calibrate_case(store, case_id, judge=recipe)
+    record = load_calibration(store, identifier)
+    files = store.read_blobs(identifier)
+    result = record.facts[1]
+    if mutation == "fact-id":
+        judgment = result.baseline_judgment.model_copy(update={"fact_id": "punctuation"})
+        result = result.model_copy(update={"baseline_judgment": judgment})
+    elif mutation == "blank-evidence":
+        judgment = result.baseline_judgment.model_copy(update={"evidence": " "})
+        result = result.model_copy(update={"baseline_judgment": judgment})
+    calls = record.judge_calls
+    if mutation == "failed-call":
+        calls = (calls[0].model_copy(update={"status": "failed"}), *calls[1:])
+    changed = record.model_copy(update={"facts": (record.facts[0], result), "judge_calls": calls})
+    stored = store.put(ObjectKind.CALIBRATION, changed, files=files, references=(record.case_id,))
+    with pytest.raises(IntegrityError, match=message):
+        load_calibration(store, stored)
+
+
+@pytest.mark.integration
+def test_unjudged_facts_stay_unclear_and_without_reference_take_one_call(
+    store, graded_benchmark, tmp_path
+):
+    case = load_frozen_case(store, graded_benchmark.cases[0])
+    case_id = altered_case(
+        store,
+        graded_benchmark.cases[0],
+        facts=(*case.allowed_facts, judged("comma"), judged("silent")),
+        reference_patch=False,
+    )
+    recipe, _ = fake_judge(tmp_path, {"comma": "unmet"})
+    record = load_calibration(store, calibrate_case(store, case_id, judge=recipe))
+    assert [(item.fact_id, item.baseline, item.reference) for item in record.facts[1:]] == [
+        ("comma", "unmet", None),
+        ("silent", "unclear", None),
+    ]
+    assert len(record.judge_calls) == 1
+    assert record.status == "unavailable"
+
+
+def test_judged_facts_need_a_judge_to_calibrate(store, graded_benchmark):
+    case = load_frozen_case(store, graded_benchmark.cases[0])
+    case_id = altered_case(
+        store, graded_benchmark.cases[0], facts=(*case.allowed_facts, judged("comma"))
+    )
+    with pytest.raises(InputError, match=r"\(comma\); pass --judge"):
+        calibrate_case(store, case_id)
+    assert calibration_objects(store) == []
 
 
 @pytest.mark.integration
@@ -306,30 +501,32 @@ def test_shared_suites_keep_side_order_and_independent_copies(store, graded_benc
         "raise SystemExit(0 if side == 'reference' else 1)\n"
     )
     first, second = (
-        case.criteria[0].model_copy(
-            update={
-                "criterion_id": name,
-                "suite_id": "ordered",
-                "command": CommandSpec(argv=(sys.executable, "{verifier}/hidden.py", name)),
-            }
+        verified(
+            case,
+            name,
+            suite_id="ordered",
+            command=CommandSpec(argv=(sys.executable, "{verifier}/hidden.py", name)),
         )
         for name in ("first", "second")
     )
-    shared = altered_case(
-        store, graded_benchmark.cases[0], program=program, criteria=(first, second)
-    )
+    shared = altered_case(store, graded_benchmark.cases[0], program=program, facts=(first, second))
     record = load_calibration(store, calibrate_case(store, shared))
     assert record.status == "demonstrated"
-    assert [item.criterion_id for item in record.criteria] == ["first", "second"]
+    assert [item.fact_id for item in record.facts] == ["first", "second"]
     isolated = altered_case(
         store,
         shared,
-        criteria=tuple(item.model_copy(update={"suite_id": None}) for item in (first, second)),
+        facts=tuple(
+            item.model_copy(
+                update={"verifier": item.verifier.model_copy(update={"suite_id": None})}
+            )
+            for item in (first, second)
+        ),
     )
     record = load_calibration(store, calibrate_case(store, isolated))
     assert record.status == "unavailable"
-    assert record.criteria[1].calibration.baseline.outcome == "error"
-    assert record.criteria[1].calibration.reference.outcome == "error"
+    assert record.facts[1].calibration.baseline.outcome == "error"
+    assert record.facts[1].calibration.reference.outcome == "error"
 
 
 @pytest.mark.integration
@@ -347,7 +544,7 @@ def test_verifier_environment_and_setup_match_assessment_contract(
 
 @pytest.mark.parametrize(
     "mutation",
-    ["case", "criteria", "verifier", "files", "stdout", "result", "missing-result", "command"],
+    ["case", "facts", "verifier", "files", "stdout", "result", "missing-result", "command"],
 )
 def test_calibration_validates_exact_identity_and_retained_evidence(store, calibrated, mutation):
     identifier = calibrated
@@ -358,11 +555,11 @@ def test_calibration_validates_exact_identity_and_retained_evidence(store, calib
             store, record.case_id, program="print('PRIVATE_VERIFIER_SENTINEL')\n"
         )
         record = record.model_copy(update={"case_id": changed})
-    elif mutation == "criteria":
-        record = record.model_copy(update={"criteria_id": "a" * 64})
+    elif mutation == "facts":
+        record = record.model_copy(update={"facts_id": "a" * 64})
     elif mutation == "verifier":
         record = record.model_copy(
-            update={"criteria": (record.criteria[0].model_copy(update={"verifier_id": "a" * 64}),)}
+            update={"facts": (record.facts[0].model_copy(update={"verifier_id": "a" * 64}),)}
         )
     elif mutation == "files":
         record = record.model_copy(update={"files": {}})
@@ -384,7 +581,7 @@ def test_calibration_validates_exact_identity_and_retained_evidence(store, calib
                 parse_model(files[path], CommandSpec).model_copy(update={"timeout_seconds": 1})
             )
         else:
-            files[path] = canonical_json(record.criteria[0].calibration.reference)
+            files[path] = canonical_json(record.facts[0].calibration.reference)
         record = record.model_copy(
             update={"files": {name: digest(content) for name, content in files.items()}}
         )
@@ -503,7 +700,7 @@ def test_hard_interrupted_initial_publication_allows_later_native_progress(
         assert len(result.pending_assessment) == 1
     else:
         result = load_assessment(store, assess_run(store, summary.run_id)[0])
-        assert result.completion == "pass"
+        assert result.outcome == "pass"
         assert result.eligible
     assert {path.name: path.read_bytes() for path in staged.iterdir()} == original
 
@@ -522,7 +719,7 @@ def test_interrupted_verifier_stops_owned_writers_and_retains_recovery_evidence(
     check = calibrations.check_copy
     timers = []
 
-    def cancel(context, criterion, side):
+    def cancel(context, fact, side):
         own = context.on_identities
 
         def cancel_after_launch(identities):
@@ -532,7 +729,7 @@ def test_interrupted_verifier_stops_owned_writers_and_retains_recovery_evidence(
             timer.start()
 
         context.on_identities = cancel_after_launch
-        return check(context, criterion, side)
+        return check(context, fact, side)
 
     monkeypatch.setattr(calibrations, "check_copy", cancel)
     with pytest.raises(KeyboardInterrupt):
@@ -607,7 +804,7 @@ def test_recovery_stops_only_matching_recorded_process_identities(
 @pytest.mark.integration
 def test_schema_version_is_strict(store, graded_benchmark):
     record = load_calibration(store, calibrate_case(store, graded_benchmark.cases[0]))
-    for version in (2, "1", True):
+    for version in (1, "2", True):
         payload = record.model_dump(mode="json") | {"schema_version": version}
         with pytest.raises(InputError):
             parse_model(canonical_json(payload), CaseCalibration)
@@ -615,10 +812,10 @@ def test_schema_version_is_strict(store, graded_benchmark):
 
 @pytest.mark.integration
 @pytest.mark.parametrize("suite", [None, "workspace"])
-def test_criterion_names_do_not_hide_required_evidence(store, graded_benchmark, suite):
+def test_fact_names_do_not_hide_required_evidence(store, graded_benchmark, suite):
     case = load_frozen_case(store, graded_benchmark.cases[0])
-    criterion = case.criteria[0].model_copy(update={"criterion_id": "hidden", "suite_id": suite})
-    case_id = altered_case(store, graded_benchmark.cases[0], criteria=(criterion,))
+    fact = verified(case, "hidden", suite_id=suite)
+    case_id = altered_case(store, graded_benchmark.cases[0], facts=(fact,))
     record = load_calibration(store, calibrate_case(store, case_id))
     assert record.status == "demonstrated"
     assert any(name.endswith("hidden-evidence/stdout.bin") for name in record.files)
@@ -678,17 +875,30 @@ def test_unresolved_calibration_recovery_guards_all_native_entrypoints(
 def test_public_cancellation_returns_retry_instruction(
     store, graded_benchmark, monkeypatch, capsys
 ):
-    def interrupted(*_args):
+    judges = []
+
+    def interrupted(_store, _reference, *, judge):
+        judges.append(judge)
         raise KeyboardInterrupt
 
     monkeypatch.setattr("dryheave.authoring_cli.calibrate_case", interrupted)
+    case_id = graded_benchmark.cases[0]
+    common = ["--store", str(store.root), "case", "calibrate", case_id, "--json"]
+    assert main(common) == 130
+    assert main([*common, "--judge", "claude-haiku-4-5", "--claude", "/opt/claude"]) == 130
+    first, second = capsys.readouterr().err.splitlines()
+    assert json.loads(first)["error"]["code"] == "cancelled"
+    assert "case calibrate" in json.loads(first)["error"]["message"]
     assert (
-        main(["--store", str(store.root), "case", "calibrate", graded_benchmark.cases[0], "--json"])
-        == 130
+        f"case calibrate {case_id} --judge claude-haiku-4-5"
+        in json.loads(second)["error"]["message"]
     )
-    response = capsys.readouterr()
-    assert json.loads(response.err)["error"]["code"] == "cancelled"
-    assert "case calibrate" in json.loads(response.err)["error"]["message"]
+    assert judges[0] is None
+    assert (judges[1].kind, judges[1].model, judges[1].command.argv) == (
+        "claude",
+        "claude-haiku-4-5",
+        ("/opt/claude",),
+    )
 
 
 @pytest.mark.integration

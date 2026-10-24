@@ -224,7 +224,7 @@ export function describePriceBasis(basis) {
   ].join(" · ");
 }
 
-export const ROLE_ORDER = ["subject", "simulator", "judge"];
+export const ROLE_ORDER = ["subject", "stand_in", "judge"];
 
 function emptyTotal(role) {
   return {
@@ -366,8 +366,9 @@ export function describeCompletion(result) {
   }
   const exclusions = result.exclusion_reasons ?? [];
   return [
-    `completion ${result.completion ?? UNKNOWN}`,
-    `deterministic ${result.deterministic_completion ?? UNKNOWN}`,
+    `outcome ${result.outcome ?? UNKNOWN}${
+      result.outcome_reason && result.outcome !== "pass" ? ` (${result.outcome_reason})` : ""
+    }`,
     result.eligible ? "eligible" : "not eligible",
     `phase ${result.phase ?? UNKNOWN}`,
     exclusions.length === 0 ? "no exclusions" : `excluded: ${exclusions.join(", ")}`,
@@ -495,25 +496,26 @@ export function chipTitle(label, value, names) {
   return `${label}: ${labelledId(value, names)}`;
 }
 
-export const CHECK_MARKS = { pass: "✓", fail: "✗", not_applicable: "–", error: "?" };
+export const OUTCOME_MARKS = { pass: "✓", fail: "✗", indeterminate: "?" };
+
+export const OUTCOME_CLASSES = { pass: "pass", fail: "fail", indeterminate: "" };
 
 export const INSPECTION_MARKS = { passed: "✓", failed: "✗", unavailable: "?" };
 
 export const INSPECTION_CLASSES = { passed: "pass", failed: "fail", unavailable: "unavailable" };
 
 export const TOPLINE_LEGEND =
-  "✓ the outcome the case wants · ✗ the opposite · – not applicable · ? no clear answer. " +
-  "Turns, time, tokens and cost are the agent's alone, without the simulated user and the " +
+  "Outcome comes from final grading: ✓ every requirement met, ✗ a requirement unmet at the end, " +
+  "? indeterminate (disputed, unclear, a phase never reached, or a grading error); variant rows " +
+  "count passes, independence and corrections over eligible attempts. Independence is the mean " +
+  "credit over the requirements the " +
+  "user did not volunteer: 1 solved on its own, 0.75 asked for, 0 pointed out by the user or " +
+  "unmet. Turns, time, tokens and cost are the agent's alone, without the user stand-in and the " +
   "judge, and time excludes inspection; tokens include cache reads and writes, and cost is an " +
   "API list-price estimate. First check is the workflow's first inspection (✓ passed, ✗ failed, " +
-  "? unavailable, – no inspection); fix requests count fix-it replies; workflow shows completed " +
-  "over declared steps, or – without a workflow. Variant rows average the attempts below them; " +
-  "retried attempts are left out.";
-
-export function checkLabel(checkId) {
-  const words = checkId.replaceAll("-", " ").replaceAll("_", " ").toLowerCase();
-  return words.charAt(0).toUpperCase() + words.slice(1);
-}
+  "? unavailable, – no inspection); corrections count rounds in which the user pointed out unmet " +
+  "requirements; workflow shows delivered over declared prompt steps, or – without a workflow. " +
+  "Variant rows average the attempts below them; retried attempts are left out.";
 
 export function formatDuration(value) {
   if (!isNumber(value)) {

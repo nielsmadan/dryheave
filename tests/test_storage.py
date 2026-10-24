@@ -33,6 +33,49 @@ def test_hash_stability_deduplication_and_typed_round_trip(
     assert list((store.root / "objects").iterdir()) == [store.object_path(first)]
 
 
+def test_first_object_marks_the_store_with_format_two(
+    tmp_path: Path, payload: ExamplePayload
+) -> None:
+    store = ObjectStore(tmp_path / "fresh")
+    assert not store.root.exists()
+    store.put(ObjectKind.PERSONA, payload)
+    assert json.loads((store.root / "format.json").read_text()) == {"format": 2}
+
+
+def test_first_run_marks_an_empty_store_with_format_two(tmp_path: Path) -> None:
+    from dryheave.journals import RunStore
+
+    RunStore(tmp_path / "runs-only").create("a" * 64)
+    assert json.loads((tmp_path / "runs-only" / "format.json").read_text()) == {"format": 2}
+    assert ObjectStore(tmp_path / "runs-only").root == tmp_path / "runs-only"
+
+
+@pytest.mark.parametrize("holding", ["objects", "runs"])
+def test_store_with_data_but_no_format_marker_is_refused_with_the_old_cli_hint(
+    tmp_path: Path, holding: str
+) -> None:
+    root = tmp_path / "old"
+    (root / holding / "entry").mkdir(parents=True)
+    with pytest.raises(InputError, match="no format marker") as raised:
+        ObjectStore(root)
+    assert "commit 626c1b1" in str(raised.value)
+
+
+@pytest.mark.parametrize("content", [b'{"format": 1}', b"{}", b"not json"])
+def test_store_with_another_format_marker_is_refused(tmp_path: Path, content: bytes) -> None:
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "format.json").write_bytes(content)
+    with pytest.raises(InputError, match=r"unsupported format\.json") as raised:
+        ObjectStore(tmp_path / "other")
+    assert "626c1b1" in str(raised.value)
+
+
+def test_empty_store_directories_open_without_a_marker(tmp_path: Path) -> None:
+    (tmp_path / "empty" / "objects").mkdir(parents=True)
+    assert ObjectStore(tmp_path / "empty").aliases() == {}
+    assert not (tmp_path / "empty" / "format.json").exists()
+
+
 def test_payload_and_blob_boundaries_are_revalidated(store: ObjectStore) -> None:
     with pytest.raises(InputError, match="StrictModel"):
         store.put(ObjectKind.CASE, {"title": "unvalidated"})

@@ -236,12 +236,12 @@ their imported membership permanently, even if source files or store aliases mov
 | `problem request [DESCRIPTION] --selection NAME_OR_ID [--name NAME] [--micro-bug]` | Persist the request policy; omitted name is generated and returned. |
 | `problem list` / `problem inspect NAME_OR_ID` | Recover requests, decisions, gaps and validation references. |
 | `problem gap REQUEST "REASON" --expect-revision N` | Append missing-coverage reasoning. |
-| `voice draft --selection NAME_OR_ID [--name NAME] [--out PATH]` | Create an internal draft and report computed selection evidence, without overwriting an existing file. |
+| `voice draft --selection NAME_OR_ID [--name NAME] [--out PATH]` | Create a draft (default `voices/NAME.json`) and report computed selection evidence, without overwriting an existing file; an explicit `--name` already in the catalog is a conflict. |
 | `voice create [NAME] PATH --expect-revision N` | Freeze a reviewed selected-log voice into a compatible Persona; an omitted name uses `default`. |
 | `voice list` / `voice inspect NAME_OR_PERSONA_ID` | Inspect frozen voice names, provenance, policies, recorded evidence and triage. |
 | `voice delete NAME --expect-revision N` | Discard a catalog voice entry; its frozen persona object is retained. |
 | `problem validate REQUEST CANDIDATE --expect-revision N` | Validate a drafted decision and content-bound hidden inputs. |
-| `problem freeze REQUEST CANDIDATE --expect-revision N` | Recheck the validation reference and freeze the existing case model. |
+| `problem freeze REQUEST CANDIDATE --expect-revision N` | Recheck the validation reference and freeze the existing case model; a draft at `cases/NAME/case.json` also points alias `NAME` at the frozen case. |
 
 `--json` works on every command. Selection import also accepts existing
 `--max-bytes` and `--max-events` bounds, and `--agent claude` or `--agent droid` for
@@ -291,17 +291,18 @@ selected candidate session and inclusive range, which must start at an actual
 user message; at least one excerpt must be actual user text. A new candidate can
 be `rejected`, `unresolved` or `drafted`. Record `--state drafted --draft PATH`
 only after capturing the explicit historical baseline using existing
-`case draft SESSION_ID --repo PATH --commit FULL_SHA --start EVENT --end EVENT --out PATH`.
+`case draft SESSION_ID --repo PATH --commit FULL_SHA --start EVENT --end EVENT [--name NAME | --out PATH]`
+(default `cases/NAME/case.json` inside a workspace; `--out` is required outside one).
 For initial uncommitted work, additionally supply its verified
 `--initial-patch PATH`. Use `--dirty-state clean|patch` matching the snapshot and
 record the rationale; unknown dirty state blocks drafted status. Micro requests
 also require `--micro-bug-rationale "WHY THE SCOPE IS SMALL"` for drafted tasks.
-Draft paths inside the configured authoring directory are recorded relative to
-that directory; other paths, such as workspace `drafts/case.json`, are retained
-as absolute paths. Use paths without parent (`..`) components. Drafts and their
+Draft paths inside the workspace, such as `cases/NAME/case.json`, are recorded
+relative to the workspace root; other paths are retained as absolute paths. Use paths without parent (`..`) components. Drafts and their
 directory components must be real files/directories, without symlinks.
 
-The skills curate the case's safe prompt/facts, required criteria, selected voice
+The skills curate the case's safe prompt, phases, facts (each requirement with a
+`check` or a hidden verifier), selected voice
 `persona_id`, hidden files and optional reference patch. Case/fact evidence stays
 within the candidate range. Existing `case` and `persona` commands remain usable
 independently, including manually authored legacy Personas without examples.
@@ -356,26 +357,34 @@ content. Validation is structural, not a demonstrated passing benchmark.
 Calibrate the frozen case before subject spend:
 
 ```sh
-dryheave case calibrate CASE_ID --json
+dryheave case calibrate CASE_ID --judge MODEL[@EFFORT] --json
 dryheave case calibration CALIBRATION_ID --json
 dryheave case calibration CALIBRATION_ID --evidence PATH_FROM_FILES --limit 4000 --json
 ```
 
-The first command returns `data.id` for a standalone immutable calibration and
-`data.calibration.status`. `demonstrated` means every deterministic criterion
-observed an assertion-failing baseline and successful reference. `ineffective`
-means a baseline passed. `unavailable` includes verifier errors, missing reference
-patches or incomplete retained evidence. Judge-only cases are `not_applicable`;
-no judge/model calls run during calibration. Inspect each criterion's baseline
-and reference execution, including `outcome`, `error`, `returncode` and markers.
-The `files` map lists retained output paths. Evidence reads use byte offsets and
-return `next_offset`, byte length and truncation; invalid UTF-8 displays replacement
-characters while the immutable bytes and hashes remain exact.
+The first command returns `data.id` for a standalone immutable calibration,
+`data.calibration.status` and `data.flagged`. Calibration grades every requirement
+and optional fact on the baseline (it should be unmet) and on the reference patch
+(it should be met). A fact with a verifier runs it; the facts without one are judged
+together, one judge call per side, so `--judge` is required when such facts exist.
+`demonstrated` means every fact was unmet on the baseline and met on the reference.
+`ineffective` means a fact was met on the baseline or unmet on the reference (listed
+in `data.flagged`). `unavailable` includes unclear verdicts, verifier errors, missing
+reference patches or incomplete retained evidence. A case without graded facts is
+`not_applicable`. Verifier facts show their baseline and reference execution
+(`outcome`, `error`, `returncode` and markers); judged facts show the judge's
+observation and evidence. The `files` map lists retained output paths. Evidence reads
+use byte offsets and return `next_offset`, byte length and truncation; invalid UTF-8
+displays replacement characters while the immutable bytes and hashes remain exact.
+
+After calibration, pilot the case with `bench`, review it with `transcript` and
+`view`, iterate, then benchmark with `--budget-from`; the README walks through each
+command.
 
 Verifier copies use the same command/environment rules as assessment. They do
 not execute `case.setup`: required trusted tools and declared environment-name
-references must already be available. Suite criteria execute in frozen order on
-one copy per side; other criteria get independent copies. Source repositories
+references must already be available. Verifier facts sharing a `suite_id` execute in frozen order on
+one copy per side; other facts get independent copies. Source repositories
 remain read-only. Commands have frozen finite time/output limits. Cancellation
 stops recorded owned processes and retains working evidence under
 `STORE/calibrations/OPERATION_ID`; retrying starts a fresh calibration after
@@ -401,7 +410,7 @@ IDs with fresh subject workspaces. Retries preserve earlier attempts. New voices
 source selections or task content need new frozen inputs and a new experiment;
 old experiments retain their original behavior.
 
-## Freeze profiles and adaptive simulation
+## Freeze profiles and adaptive stand-in
 
 Friendly setup does not launch agents. For the approved Haiku-default versus
 Sonnet-low configuration comparison, select explicit provider model IDs:
@@ -412,14 +421,20 @@ dryheave profile derive haiku --model claude-sonnet-4-6 --effort low --name sonn
 dryheave profile diff haiku sonnet-low --json
 dryheave experiment setup comparison --case CASE_ID \
   --profile haiku=haiku --profile sonnet-low=sonnet-low \
-  --simulator claude --simulator-model claude-haiku-4-5-20251001 \
-  --simulator-max-calls 3 --simulator-call-seconds 30 --simulator-total-seconds 90 \
+  --stand-in claude --stand-in-model claude-haiku-4-5-20251001 \
+  --stand-in-max-calls 3 --stand-in-call-seconds 30 --stand-in-total-seconds 90 \
   --design-approval
 dryheave run comparison --assess --json
 ```
 
 These model IDs are explicit example choices, not auto-discovered current defaults.
-Calibrate CASE_ID first. Add only explicitly selected `--config`, `--instruction`,
+Calibrate CASE_ID first. `experiment setup` freezes no judge or inspector, so it
+accepts only a case whose facts all have verifiers. `run` ignores pilots: it has no
+`--budget-from` or budget flags, uses the default budget (60 turns, 40 stand-in
+replies, 20 inspections) capped by the stand-in's frozen call and time limits, and
+runs the inspection loop only with `--workflow`. To match a bench pilot's setup, pass
+`--stand-in-max-calls 40 --stand-in-call-seconds 180 --stand-in-total-seconds 3600`
+and run `dryheave run comparison --workflow --assess --json`. Add only explicitly selected `--config`, `--instruction`,
 `--skill` and `--plugin` inputs to profile creation. Both profiles retain the same
 selected bytes and runtime references. Haiku has no effort flag; deriving back
 from Sonnet needs `--model claude-haiku-4-5-20251001 --clear-effort`.
@@ -427,7 +442,7 @@ Do not describe this as an effort-only comparison.
 
 Claude setup requires the runtime reference `CLAUDE_CODE_OAUTH_TOKEN`; no helper
 reads its value. Subjects use their native TUI and stop on native trust/auth/
-permission dialogs. The simulator uses print mode with built-in tools disabled,
+permission dialogs. The stand-in uses print mode with built-in tools disabled,
 strict empty MCP config and bounded separately owned runtime. Managed settings
 remain a recorded fidelity limit. `--design-approval` authorizes ordinary
 in-scope design conversation only; without it the policy is facts-only.
@@ -438,8 +453,8 @@ For Codex 0.154.0, use `profile create terra-low --agent codex --model
 gpt-5.6-terra --effort low`, then derive only `--effort high`. New profiles disable
 plugins and bundled skills; selected config still loads. Selecting plugins needs
 `--plugins selected-plugins` and records unresolved discovery/sync limitations.
-`experiment setup ... --simulator codex` uses a versioned trusted-native adapter,
-not a tool-free controller. `--simulator none` explicitly freezes zero replies.
+`experiment setup ... --stand-in codex` uses a versioned trusted-native adapter,
+not a tool-free controller. `--stand-in none` explicitly freezes zero replies.
 Legacy JSON spec commands remain supported.
 
 New native runs resolve transport from `run --tui-test`, workspace `tui_test`,

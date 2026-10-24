@@ -5,6 +5,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -36,6 +37,54 @@ from dryheave.serialization import (
     parse_model,
     validation_message,
 )
+
+STORE_FORMAT_FILE = "format.json"
+LEGACY_STORE_COMMIT = "626c1b1"
+
+
+class StoreFormat(StrictModel):
+    format: Literal[2]
+
+
+def _legacy_refusal(root: Path, problem: str) -> InputError:
+    return InputError(
+        f"Store {root} {problem}; this Dryheave reads only format 2 stores. "
+        f"Read the old store with the Dryheave CLI from commit {LEGACY_STORE_COMMIT}, "
+        "or start a new store."
+    )
+
+
+def _holds_data(root: Path) -> bool:
+    for name in ("objects", "runs"):
+        try:
+            if directory_names(root / name):
+                return True
+        except FileNotFoundError:
+            continue
+    return False
+
+
+def check_store_format(root: Path) -> bool:
+    try:
+        content = read_bytes(root / STORE_FORMAT_FILE, limit=4096)
+    except FileNotFoundError:
+        if _holds_data(root):
+            raise _legacy_refusal(root, "has objects or runs but no format marker") from None
+        return False
+    try:
+        parse_model(content, StoreFormat)
+    except InputError as error:
+        raise _legacy_refusal(root, f"has an unsupported {STORE_FORMAT_FILE}") from error
+    return True
+
+
+def ensure_store_format(root: Path) -> None:
+    if check_store_format(root):
+        return
+    try:
+        atomic_write(root / STORE_FORMAT_FILE, canonical_json(StoreFormat(format=2)), replace=False)
+    except FileExistsError:
+        check_store_format(root)
 
 
 def default_store_path() -> Path:
@@ -74,6 +123,7 @@ class ObjectStore:
     def __init__(self, root: Path, *, read_budget: int | None = None) -> None:
         self.root = root.expanduser().absolute()
         self.read_budget = read_budget
+        check_store_format(self.root)
 
     def _blob_ceiling(self) -> int:
         if self.read_budget is None:
@@ -152,6 +202,7 @@ class ObjectStore:
     def _publish(
         self, identifier: str, encoded: bytes, files: dict[str, bytes], manifest: Manifest
     ) -> None:
+        ensure_store_format(self.root)
         parent = self.root / "objects"
         staged = parent / f".pending-{uuid4().hex}"
         ensure_directory(staged / "blobs")

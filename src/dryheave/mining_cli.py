@@ -1,4 +1,6 @@
 import argparse
+from collections.abc import Mapping
+from itertools import count
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,7 +18,9 @@ from dryheave.authoring_catalog import (
     selection_for,
     voice_for,
 )
+from dryheave.cases import judged_facts, load_frozen_case
 from dryheave.commands import CommandRegistry
+from dryheave.errors import ConflictError
 from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.logs.base import EvidenceExcerpt, ImportLimits, Session
 from dryheave.logs.service import AGENT_CHOICES
@@ -45,11 +49,16 @@ from dryheave.models import AgentKind, ObjectKind
 from dryheave.personas import Persona
 from dryheave.serialization import parse_model
 from dryheave.storage import ObjectStore
-from dryheave.workspaces import initialized_workspace
+from dryheave.workspace_git import case_alias, case_paths, checkpoint
+from dryheave.workspaces import Workspace, initialized_workspace
 
 
 def _root() -> Path:
     return initialized_workspace().path("authoring")
+
+
+def _workspace() -> Workspace:
+    return initialized_workspace()
 
 
 def _expected(args: argparse.Namespace, root: Path) -> int:
@@ -231,7 +240,8 @@ def _problem(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonVal
 
 
 def _record(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
-    root = _root()
+    workspace = _workspace()
+    root = workspace.path("authoring")
     session_id = store.resolve(args.session)
     decision = ProblemDecision(
         name=args.name,
@@ -253,11 +263,16 @@ def _record(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue
         dirty_state=args.dirty_state,
         dirty_state_rationale=args.dirty_state_rationale,
         micro_bug_rationale=args.micro_bug_rationale,
-        draft_path=_draft_reference(args.draft, root),
+        draft_path=_draft_reference(args.draft, workspace.root),
     )
     return _request_result(
         record_decision(
-            store, root, args.reference, decision, expected_revision=args.expect_revision
+            store,
+            root,
+            args.reference,
+            decision,
+            expected_revision=args.expect_revision,
+            draft_root=workspace.root,
         ),
         args.reference,
     )
@@ -277,27 +292,55 @@ def _gap(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]:
     )
 
 
+def calibrate_next(store: ObjectStore, identifier: str, aliased: Mapping[str, JsonValue]) -> str:
+    alias = aliased.get("alias")
+    reference = alias if isinstance(alias, str) else identifier
+    judge = " --judge MODEL[@EFFORT]" if judged_facts(load_frozen_case(store, identifier)) else ""
+    return f"Calibrate before subject spend with case calibrate {reference}{judge}."
+
+
 def _validate_problem(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
+    workspace = _workspace()
+    freeze = args.problem_command == "freeze"
     catalog = validate_problem(
         store,
-        _root(),
+        workspace.path("authoring"),
         args.reference,
         args.name,
         expected_revision=args.expect_revision,
-        freeze=args.problem_command == "freeze",
+        draft_root=workspace.root,
+        freeze=freeze,
     )
     request = request_for(catalog, args.reference)
     decision = request.decisions[args.name]
-    return {
-        "revision": catalog.revision,
-        "request_revision": request.revision,
-        "decision": decision.model_dump(mode="json"),
-        "valid": True,
-        "id": decision.case_id,
-        "next": "Calibrate the frozen case before subject spend."
-        if decision.case_id
-        else f"Freeze with problem freeze {request.name} {decision.name} --expect-revision {catalog.revision}.",
-    }
+    committed = (
+        checkpoint(
+            workspace,
+            f"case: freeze {decision.name}",
+            case_paths(workspace.root / decision.draft_path),
+        )
+        if freeze and decision.draft_path
+        else {}
+    )
+    aliased = (
+        case_alias(store, workspace, workspace.root / decision.draft_path, decision.case_id)
+        if freeze and decision.draft_path and decision.case_id
+        else {}
+    )
+    return (
+        committed
+        | aliased
+        | {
+            "revision": catalog.revision,
+            "request_revision": request.revision,
+            "decision": decision.model_dump(mode="json"),
+            "valid": True,
+            "id": decision.case_id,
+            "next": calibrate_next(store, decision.case_id, aliased)
+            if decision.case_id
+            else f"Freeze with problem freeze {request.name} {decision.name} --expect-revision {catalog.revision}.",
+        }
+    )
 
 
 def _evidence_warnings(evidence: VoiceEvidence | None) -> list[JsonValue]:
@@ -374,16 +417,27 @@ def _merged_warnings(
     return _evidence_warnings(evidence) + (_sampling_warnings(triage) if triage else [])
 
 
+def _free_voice_path(workspace: Workspace, name: str) -> Path:
+    candidates = (
+        workspace.voices_dir / (f"{name}.json" if number == 1 else f"{name}-{number}.json")
+        for number in count(1)
+    )
+    return next(path for path in candidates if not path.exists())
+
+
 def _voice_draft(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
-    root = _root()
+    workspace = _workspace()
+    root = workspace.path("authoring")
     catalog = read_catalog(root)
     selection = selection_for(catalog, args.selection)
     name = resolve_voice_name(catalog, args.name)
+    if args.name is not None and name in catalog.voices:
+        raise ConflictError(f"A voice named {name!r} already exists; choose another --name.")
     draft = VoiceDraft(
         selection_id=selection.identifier,
         persona=Persona(name=name, instructions="", disclosure_policy="", unknown_answer_policy=""),
     )
-    path = args.out or root / f"voice-{uuid4().hex[:12]}.json"
+    path = args.out or _free_voice_path(workspace, name)
     atomic_write(path.absolute(), draft.model_dump_json(indent=2).encode() + b"\n", replace=False)
     evidence = voice_evidence(store, selection)
     triage = triage_evidence(store, catalog, selection)
@@ -400,12 +454,13 @@ def _voice_draft(args: argparse.Namespace, store: ObjectStore) -> dict[str, Json
 
 
 def _voice_create(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
-    root = _root()
+    workspace = _workspace()
+    root = workspace.path("authoring")
     draft = parse_model(read_bytes(args.path, limit=1024 * 1024), VoiceDraft)
     name = resolve_voice_name(read_catalog(root), args.name)
     catalog = create_voice(store, root, name, draft, expected_revision=args.expect_revision)
     record = catalog.voices[name]
-    return {
+    return checkpoint(workspace, f"voice: create {name}", (args.path,)) | {
         "revision": catalog.revision,
         "voice": record.model_dump(mode="json"),
         "name": name,

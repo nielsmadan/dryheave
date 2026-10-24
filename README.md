@@ -1,7 +1,7 @@
 # Dryheave
 
 Dryheave turns coding-agent sessions into reusable interactive benchmarks. Import
-Codex, Claude or Droid logs, curate a task and simulated user, freeze its
+Codex, Claude or Droid logs, curate a task and user stand-in, freeze its
 historical Git repository and selected native configuration, then compare repeated
 runs with retained evidence. Subjects use their real terminal UI. Hidden checks
 and optional model judgments run after the subject stops; reports keep audit
@@ -49,10 +49,15 @@ a fresh output directory. Build a distributable wheel/sdist with `uv build`.
 
 ## Run your own benchmark
 
-Start a dedicated workspace with `dryheave init ./bench`, enter it, then run
+Start a dedicated workspace with `dryheave init ./bench2`, enter it, then run
 `dryheave skills install`. Workspace discovery also works from nested directories.
-Setup creates private authoring/store/runtime directories without scanning agent
-homes or making model calls. Native runtime paths must fit a 70-byte limit;
+Setup creates private authoring/store/runtime directories under `.dryheave/`, a git
+repository and `.gitignore`, without scanning agent homes or making model calls.
+Authored files live in visible `voices/`, `cases/NAME/` and `reports/` folders
+(`replays/` is scratch, git-ignored); `init --git-commit ask|auto|off` (a numbered
+prompt on terminals) sets `[git] commit` in `dryheave.toml`: `ask` reports
+`commit_paths` for an operator to offer, `auto` commits just the files each
+checkpoint command wrote, `off` never commits. Native runtime paths must fit a 70-byte limit;
 `init --runtime-root /short/new-directory` supplies a shorter location when needed.
 See [workspace setup](docs/user/workspaces.md) for config, ownership and resume behavior.
 Record transport once with `init --tui-test /path/to/tui-test`, or install
@@ -67,58 +72,211 @@ rejections and gaps. Follow [selected-log authoring](docs/user/selected-log-auth
 for the exact commands and Codex/Claude invocation sequences; no hand-authored JSON is
 needed for this operator-guided workflow.
 
+## Walkthrough: from logs to a benchmark
+
+This runs the whole process in a fresh workspace. A case is a task plus the
+requirements the user knew they wanted, written as facts grouped into ordered
+phases. A run measures how much of the problem the agent solves on its own against
+how much the user stand-in has to point out. Placeholders in capitals are yours to
+fill in. Steps 1 to 3 make no model calls. Calibrating judged facts, the pilot and
+the benchmark call models: they need `CLAUDE_CODE_OAUTH_TOKEN` (the stand-in and
+judge are Claude), tui-test for the native subject, and Codex authentication for
+`codex:` variants; `bench` names what is missing before it spends anything.
+
+1. Create the workspace and install the operator skills. `--git-commit` decides
+   what the checkpoint commands do with the files they write: `ask` reports
+   `commit_paths` for an operator to offer, `auto` commits them, `off` never does.
+
+   ```sh
+   dryheave init ./bench2 --git-commit ask --tui-test /path/to/tui-test
+   cd bench2
+   dryheave skills install
+   ```
+
+2. Select the sessions that show how you work and curate a voice from them. The
+   `dryheave-voice-profile` skill fills in `voices/me.json`.
+
+   ```sh
+   dryheave collect scan --agent codex --root /path/to/session-logs
+   dryheave collect select work /path/to/session.jsonl --agent codex
+   dryheave voice draft --selection work --name me --json
+   dryheave collect selections --json
+   dryheave voice create me voices/me.json --expect-revision REVISION
+   ```
+
+3. Draft a case from one session at a verified starting commit. It lands in
+   `cases/my-case/case.json`. Set `persona` to null and `persona_id` to the voice's
+   `data.voice.persona_id` from `voice inspect`, review the intent, then declare `phases` and facts. Each requirement
+   fact names its phase and carries a `check` (the exact pass condition, seen only
+   by the inspector and judge) or a hidden `verifier`; its `text` is what the
+   stand-in knows. `workflow` prompt steps name the `after_phase` they follow. The
+   `dryheave-case` skill walks through every field.
+
+   ```sh
+   dryheave collect selection work --json
+   dryheave collect evidence work --session SESSION_ID --kind user --json
+   dryheave voice inspect me --json
+   dryheave case draft SESSION_ID --repo /path/to/source-repo --commit FULL_SHA --start EVENT_ID --end EVENT_ID --name my-case
+   ```
+
+   ```json
+   {
+     "phases": ["fix"],
+     "allowed_facts": [
+       {"fact_id": "empty-name", "kind": "requirement", "phase": "fix",
+        "text": "An empty name should still greet with a trailing space.",
+        "check": "Calling greet with an empty name returns 'Hello, ' and does not raise.",
+        "curator_authored": true}
+     ],
+     "workflow": [
+       {"step_id": "review", "prompt": "/code-review", "after_phase": "fix"}
+     ]
+   }
+   ```
+
+   Then validate and freeze. Freezing `cases/my-case/case.json` also points the alias
+   `my-case` at the new case ID (replacing an earlier target), so the other commands
+   take `my-case`. (`dryheave store alias set my-case CASE_ID --replace` re-points
+   it by hand.)
+
+   ```sh
+   dryheave case validate cases/my-case/case.json
+   dryheave case freeze cases/my-case/case.json --json
+   ```
+
+4. Calibrate before any benchmark spend. Every requirement and optional fact is
+   graded on the baseline (it must be unmet) and on the reference patch (it must be
+   met). Facts without a verifier are judged, so name a judge; a case whose facts
+   all have verifiers needs none. Inspect `data.flagged` and
+   `data.calibration.status`, and fix flagged facts before going on. `unavailable`
+   with nothing flagged means some fact got no verdict on a side: `data.next` names
+   it, and `facts[].calibration.{baseline,reference}.error` says why for a verifier.
+   A failing verifier must print its failure marker and exit nonzero; the marker
+   with exit code 0 is an error.
+
+   ```sh
+   dryheave case calibrate my-case --judge claude-sonnet-4-6@low --json
+   dryheave case calibration CALIBRATION_ID --json
+   ```
+
+5. Pilot on a weak model. A pilot is a normal `bench` run with one variant named
+   `pilot`, one repetition and the generous default budget (60 turns, 40 stand-in
+   replies, 20 inspections). Haiku 4.5 is the default suggestion; for a hard case
+   pilot on `pilot=claude-sonnet-4-6@low`, so a failure points at the case rather
+   than at a model that cannot do the task. Use the stand-in (`--stand-in`) and
+   judge you will benchmark with (and the same `--inspector` and `--no-workflow`
+   settings, if you use them).
+
+   ```sh
+   dryheave bench my-case --variant pilot=claude-haiku-4-5 --judge claude-sonnet-4-6@low --repetitions 1 --json
+   ```
+
+6. Review what happened. `transcript` prints the three lanes (the conversation the
+   agent saw, the stand-in's decisions, inspections and corrections behind the
+   scenes, and the gaps left at the end) with the call IDs that `replay` takes. The
+   viewer shows the same lanes as the Review card in Attempt detail.
+
+   ```sh
+   dryheave transcript RUN_ID
+   dryheave view RUN_ID --open
+   ```
+
+7. Iterate. A pilot that did not pass can be iterated on or re-piloted on a stronger
+   model. Voice wording is tested without a new run; a misjudged fact is fixed in its
+   `check`, then the inspection is replayed or the run re-graded; a wrong or missing
+   fact is edited, re-frozen and re-calibrated before piloting again. Any change to the
+   case, including a fixed `check`, makes a new case ID, so the benchmark then needs a
+   fresh pilot on it; replay and re-grade only show whether that is worth doing.
+   Adopting a replayed voice means setting the draft's `persona_id` to
+   `data.voice.persona_id` from `dryheave voice inspect me-2 --json`, then freezing,
+   calibrating and piloting again.
+
+   ```sh
+   dryheave replay RUN_ID --attempt ATTEMPT_ID --all-stand-in --voice me-2
+   dryheave replay RUN_ID --attempt ATTEMPT_ID --call CALL_ID --case NEW_CASE_ID
+   dryheave assess RUN_ID --regrade --case NEW_CASE_ID
+   ```
+
+8. Freeze and benchmark. The case that passed the pilot is the one to benchmark.
+   `--budget-from` derives ceil(used x 1.5) + 5 turns, stand-in replies and
+   inspections from the passed pilot, prints them first, and adds the pilot to the
+   summary as a floor variant (`pilot (n=1)`). Use the same case, stand-in, judge,
+   inspector and workflow as the pilot. `bench` writes `reports/RUN_ID.json` and `.html`.
+
+   ```sh
+   dryheave bench my-case --variant base=claude-sonnet-4-6@low --variant changed=claude-sonnet-4-6@high --judge claude-sonnet-4-6@low --budget-from RUN_ID
+   dryheave report RUN_ID
+   dryheave view RUN_ID --open
+   ```
+
+Outcomes read `pass` (every requirement met), `fail` (a requirement unmet, or the
+turn or stand-in budget ran out) or `indeterminate` (disputed or unclear verdicts,
+or a phase the harness never reached). The independence score is the mean credit
+over the requirement facts in reached phases: `own` 1.0, `elicited` 0.75 (the
+stand-in voiced it in an ordinary reply before any fix request), `corrected` 0 and `unmet` 0. The
+`dryheave-results` skill explains the fact split.
+
 Follow the packaged [real workflow](src/dryheave/resources/examples/real-workflow.md)
 (also written by `example write`) for complete JSON shapes and commands:
 
 1. `collect scan/import/show` finds candidate log evidence; `case draft` requires
-   an explicitly verified historical SHA. Curate facts, persona and hidden checks,
-   then `case validate/freeze` and `case calibrate CASE_ID --json` before subject
-   spend. Inspect the standalone record with `case calibration CALIBRATION_ID`;
-   `demonstrated` requires observed baseline failure and reference success. A
-   case may also declare judged yes/no `checks` (with a conditional `only_if`)
-   and `metrics` commands measuring things a script can count, such as a
-   test run; both need a judge, and the three default rubrics (`code-quality`,
-   `codebase-consistency`, `test-quality`) can be overridden by id or dropped
-   via `disabled_rubrics`. See [case authoring](docs/tech/authoring.md).
+   an explicitly verified historical SHA. Curate phases and facts (each requirement
+   with a `check` or a hidden `verifier`), persona and optional `metrics`, then
+   `case validate/freeze` and `case calibrate CASE --judge MODEL[@EFFORT]` before
+   subject spend. Inspect the standalone record with `case calibration
+   CALIBRATION_ID`; `demonstrated` requires every fact unmet on the baseline and met
+   on the reference. The three default rubrics (`code-quality`,
+   `codebase-consistency`, `test-quality`) score quality without gating and can be
+   overridden by id or dropped via `disabled_rubrics`. See
+   [case authoring](docs/tech/authoring.md).
 2. `profile create NAME --agent codex|claude --model MODEL` freezes selected
    inputs without a JSON spec; legacy `profile capture` remains supported.
    Both freeze explicitly selected native config, instruction,
    skill and plugin bytes. `profile derive/diff` records one model, skill or
    workflow change while historical inputs remain immutable.
-3. `experiment setup NAME --case CASE --profile base=PROFILE --simulator
-   claude --simulator-model MODEL` pins a bounded adaptive controller without
+3. `experiment setup NAME --case CASE --profile base=PROFILE --stand-in
+   claude --stand-in-model MODEL` pins a bounded adaptive controller without
    a JSON draft. Legacy `experiment validate/create` retains scoring/spec control.
-   `run NAME --assess` captures and assesses fresh workspaces after owned cleanup;
+   `run NAME --assess` captures and assesses fresh workspaces after owned cleanup
+   (add `--workflow` for the inspection loop; `run` takes no pilot or budget flags);
    `run --resume` reconciles durable
    progress, and explicit retries preserve all earlier attempts.
 4. `assess` audits stopped outputs and runs hidden verifiers and optional judges.
    `report` and `compare` show eligible performance, cost by role and total
    (an API-equivalent estimate with its price table version), tokens including
-   cache, turns, time, help needed and per-case check/metric summaries
-   (checks include cross-repetition agreement) alongside attrition and
-   spending for subject, simulator and judge roles. `assess RUN_ID --regrade
+   cache, turns, time, outcome, independence and per-case criterion/metric summaries
+   (including cross-repetition agreement) alongside attrition and
+   spending for subject, stand-in and judge roles. `assess RUN_ID --regrade
    [--case CASE]` re-grades existing captures without relaunching subjects,
    optionally against a replacement case.
-5. `view [RUN_OR_REPORT]` serves those results as a read-only local website. It
+5. `transcript RUN_ID [--attempt ID]` prints an attempt as three lanes: the
+   conversation the agent saw, what happened behind the scenes (stand-in
+   decisions, inspections, corrections) and the gaps left at the end.
+   `replay RUN_ID --attempt ID (--call ID | --all-stand-in) [--voice NAME]
+   [--case CASE] [--out DIR]` (default `replays/<id>` in a workspace) re-sends stored stand-in or inspector requests with
+   another voice or case and shows old output next to new, writing only to its
+   own output directory. See [results](docs/tech/results.md).
+6. `view [RUN_OR_REPORT]` serves those results as a read-only local website. It
    binds loopback on an OS-selected port, prints the URL before opening anything,
    and runs in the foreground until Ctrl-C; `--open` also launches a browser.
    The packaged page covers runs, variant groups, attempts and retries, attempt
-   detail with dialogue, patches, criteria, checks, metrics, help needed,
-   calibration, audits and judge reasoning in a Results tab (per-variant
+   detail with dialogue, patches, outcome, independence, the per-fact split,
+   criteria, metrics, the Review card, calibration, audits and judge reasoning in a Results tab (per-variant
    comparison) and a Case tab (the frozen case), plus role usage and cost.
    `report RUN_ID --html PATH` writes the same results as one self-contained
-   file; several run IDs give one summary table across the runs. Viewing never
+   file; several run IDs give one summary table across the runs. Inside a workspace,
+   plain `report RUN_ID` writes `reports/RUN_ID.json` and `.html`. Viewing never
    runs, assesses, grades or calls a model.
-6. `export/import` transports curated inputs and structured results. Raw captures,
+7. `export/import` transports curated inputs and structured results. Raw captures,
    source sessions and grading artifacts require explicit sensitive-class flags.
 
 A case captures one person's real workflow, not an idealized task: its `workflow`
 field records the reviews, manual testing, QA and documentation habits they
-actually followed, replayed as `prompt` and `inspect` steps until the work passes
-or a budget runs out. `bench CASE --variant NAME=MODEL[@EFFORT] [--judge
+actually followed, replayed as `prompt` steps, with facts inspected automatically at each
+done point, until every requirement is met or a budget runs out. `bench CASE --variant NAME=MODEL[@EFFORT] [--judge
 MODEL[@EFFORT]]` runs that workflow by default; `--no-workflow` sends only the
 case's initial prompt, for a first-shot comparison against the full workflow.
-`--inspector MODEL[@EFFORT]` grades inspect steps with a separate model instead
+`--inspector MODEL[@EFFORT]` runs the fact inspections with a separate model instead
 of the judge's. `bench` resumes an unfinished earlier run of the same experiment,
 and the experiment includes the built-in price table, so after an update that
 changes that table the same command starts and pays for a new run, while the
@@ -193,7 +351,7 @@ variant's auth reference (`default_source: "codex-home"`), not from the
 variable's name. Bench checks it before the run and each binding resolves it
 again, without writing the default into any environment and without reading the
 file.
-`-mcp:SERVER` removal is Claude-only. The simulator, judge and
+`-mcp:SERVER` removal is Claude-only. The stand-in, judge and
 inspector stay Claude, so `CLAUDE_CODE_OAUTH_TOKEN` is always required. A
 workflow command `/name args` reaches a Codex variant as the skill mention
 `$name args`, and only when the Codex config has a skill of that name: a
@@ -317,10 +475,11 @@ results, captures and evidence stay in the store, so reports, the viewer and
 regrades keep working.
 `store prune-checks` deletes failed launch-check evidence older than an hour.
 
-Read the contracts for [authoring](docs/tech/authoring.md),
+Read the contracts for the [facts model](docs/tech/facts.md), [authoring](docs/tech/authoring.md),
 [profiles](docs/tech/profiles.md), [runner](docs/tech/runner.md),
 [results and bundles](docs/tech/results.md), [drivers](docs/tech/drivers.md),
-[viewer](docs/tech/viewer.md) and [storage](docs/tech/storage.md).
+[viewer](docs/tech/viewer.md) and [storage](docs/tech/storage.md). Design
+rationale lives in [docs/decisions](docs/decisions/).
 
 ## Development
 

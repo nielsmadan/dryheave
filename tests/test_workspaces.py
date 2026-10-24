@@ -62,6 +62,22 @@ def test_init_is_private_idempotent_and_preserves_authoring_data(tmp_path, short
     assert initialized_workspace(root) == first
 
 
+def test_init_marks_a_new_store_with_format_two(tmp_path, short_runtime):
+    import json
+
+    store = initialize_workspace(tmp_path / "workspace", runtime_root=short_runtime).path("store")
+    assert json.loads((store / "format.json").read_text()) == {"format": 2}
+
+
+def test_init_refuses_a_workspace_store_written_by_the_old_format(tmp_path, short_runtime):
+    root = tmp_path / "workspace"
+    store = initialize_workspace(root, runtime_root=short_runtime).path("store")
+    (store / "format.json").unlink()
+    (store / "objects" / ("a" * 64)).mkdir(parents=True)
+    with pytest.raises(InputError, match="626c1b1"):
+        initialize_workspace(root)
+
+
 def test_init_transport_path_is_config_relative_private_and_idempotent(tmp_path, short_runtime):
     root = tmp_path / "workspace"
     first = initialize_workspace(root, runtime_root=short_runtime, tui_test=Path("tools/tui-test"))
@@ -99,7 +115,7 @@ def test_real_cli_nested_discovery_precedence_and_relocation(tmp_path, short_run
     fallback = cli(tmp_path, "store", "path")
     assert fallback.returncode == 0, fallback.stderr
     assert json.loads(fallback.stdout)["data"]["path"] == str(tmp_path / "xdg" / "dryheave")
-    (nested / CONFIG_FILE).write_text('schema_version = 1\nstore = "nearby"\n')
+    (nested / CONFIG_FILE).write_text('schema_version = 2\nstore = "nearby"\n')
     nearest = cli(nested, "store", "path")
     assert nearest.returncode == 0, nearest.stderr
     assert json.loads(nearest.stdout)["data"]["path"] == str(nested / "nearby")
@@ -110,7 +126,7 @@ def test_real_cli_nested_discovery_precedence_and_relocation(tmp_path, short_run
     "content",
     [
         "store = [",
-        "schema_version = 2",
+        "schema_version = 1",
         "schema_version = true",
         "store = 3",
         'other = "bad"',
@@ -118,7 +134,7 @@ def test_real_cli_nested_discovery_precedence_and_relocation(tmp_path, short_run
     ],
 )
 def test_nearest_invalid_config_is_an_error_not_a_parent_fallback(tmp_path, content):
-    (tmp_path / CONFIG_FILE).write_text('schema_version = 1\nstore = "outer"\n')
+    (tmp_path / CONFIG_FILE).write_text('schema_version = 2\nstore = "outer"\n')
     child = tmp_path / "child"
     child.mkdir()
     (child / CONFIG_FILE).write_text(content)
@@ -134,11 +150,11 @@ def test_foreign_config_and_directories_are_preserved(tmp_path, short_runtime):
     root = tmp_path / "workspace"
     root.mkdir()
     config = root / CONFIG_FILE
-    config.write_text("schema_version = 1\n")
+    config.write_text("schema_version = 2\n")
     with pytest.raises(ConflictError, match="foreign or edited"):
         initialize_workspace(root, runtime_root=short_runtime)
     assert set(root.iterdir()) == {config}
-    assert config.read_text() == "schema_version = 1\n"
+    assert config.read_text() == "schema_version = 2\n"
     config.unlink()
     foreign = root / ".dryheave/store"
     foreign.mkdir(parents=True)
@@ -290,8 +306,64 @@ def test_omitted_skill_target_requires_initialized_workspace(tmp_path):
     result = cli(tmp_path, "skills", "install")
     assert result.returncode == 2
     assert "dryheave init" in json.loads(result.stderr)["error"]["message"]
-    (tmp_path / CONFIG_FILE).write_text("schema_version = 1\n")
+    (tmp_path / CONFIG_FILE).write_text("schema_version = 2\n")
     result = cli(tmp_path, "skills", "install")
     assert result.returncode == 1
     assert "not initialized" in json.loads(result.stderr)["error"]["message"]
     assert set(tmp_path.iterdir()) == {tmp_path / CONFIG_FILE}
+
+
+def test_config_is_written_with_a_git_table_and_round_trips(tmp_path, short_runtime):
+    workspace = initialize_workspace(tmp_path, runtime_root=short_runtime, git_commit="auto")
+    text = (tmp_path / CONFIG_FILE).read_text()
+    assert text.endswith('\n[git]\ncommit = "auto"\n')
+    assert "git_commit" not in text
+    assert discover_workspace(tmp_path).config == workspace.config
+    assert workspace.config.git_commit == "auto"
+
+
+def test_git_commit_defaults_to_ask(tmp_path, short_runtime):
+    assert initialize_workspace(tmp_path, runtime_root=short_runtime).config.git_commit == "ask"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        '[git]\ncommit = "sometimes"\n',
+        '[git]\nbranch = "main"\n',
+        'git_commit = "auto"\n',
+        "git = 3\n",
+    ],
+)
+def test_invalid_git_settings_are_errors(tmp_path, short_runtime, extra):
+    initialize_workspace(tmp_path, runtime_root=short_runtime)
+    base = (tmp_path / CONFIG_FILE).read_text().split("\n[git]")[0]
+    (tmp_path / CONFIG_FILE).write_text(base + "\n" + extra)
+    with pytest.raises(InputError):
+        discover_workspace(tmp_path)
+
+
+def test_reinit_changes_only_the_git_mode_and_keeps_the_store(tmp_path, short_runtime):
+    first = initialize_workspace(tmp_path, runtime_root=short_runtime)
+    marker = first.path("store") / "format.json"
+    before = marker.read_bytes()
+    changed = initialize_workspace(tmp_path, git_commit="off")
+    assert changed.config == first.config.model_copy(update={"git_commit": "off"})
+    assert discover_workspace(tmp_path).config.git_commit == "off"
+    assert marker.read_bytes() == before
+    assert initialize_workspace(tmp_path).config.git_commit == "off"
+    assert initialize_workspace(tmp_path, git_commit="auto").config.git_commit == "auto"
+
+
+def test_a_v1_workspace_is_rejected_not_migrated(tmp_path):
+    (tmp_path / CONFIG_FILE).write_text('schema_version = 1\nstore = ".dryheave/store"\n')
+    with pytest.raises(InputError, match=r"schema_version 1.*no migration.*626c1b1"):
+        discover_workspace(tmp_path)
+
+
+def test_authored_folders_sit_at_the_workspace_top_level(tmp_path, short_runtime):
+    workspace = initialize_workspace(tmp_path, runtime_root=short_runtime)
+    assert workspace.voices_dir == tmp_path / "voices"
+    assert workspace.cases_dir == tmp_path / "cases"
+    assert workspace.reports_dir == tmp_path / "reports"
+    assert workspace.replays_dir == tmp_path / "replays"

@@ -23,9 +23,10 @@ from dryheave.result_cli import register_results
 from dryheave.runner_cli import register_runner
 from dryheave.serialization import canonical_json, validation_message
 from dryheave.storage import ObjectStore, default_store_path
+from dryheave.transcript_cli import register_transcript
 from dryheave.viewer_cli import register_viewer
 from dryheave.workspace_cli import register_workspace
-from dryheave.workspaces import discover_workspace
+from dryheave.workspaces import WorkspaceConfig, discover_workspace
 
 
 def _path(_args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
@@ -148,6 +149,7 @@ def build_parser(registrars: Sequence[CommandRegistrar] = ()) -> ArgumentParser:
     register_operators(registry)
     register_workspace(registry)
     register_viewer(registry)
+    register_transcript(registry)
     for registrar in registrars:
         registrar(registry)
     return parser
@@ -184,6 +186,8 @@ def _emit(value: dict[str, JsonValue], *, stream: TextIO, structured: bool) -> N
         data = value.get("data")
         if isinstance(data, dict) and set(data) == {"path"}:
             print(data["path"], file=stream)
+        elif isinstance(data, dict) and set(data) == {"text"}:
+            print(data["text"], file=stream)
         else:
             print(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), file=stream)
 
@@ -203,7 +207,7 @@ def main(argv: Sequence[str] | None = None, *, registrars: Sequence[CommandRegis
             if args.benchmark_workspace is not None:
                 selected_store = args.benchmark_workspace.path("store")
             elif args.command == "init":
-                selected_store = args.path
+                selected_store = args.path / WorkspaceConfig().store
             else:
                 selected_store = default_store_path()
         store = ObjectStore(selected_store)

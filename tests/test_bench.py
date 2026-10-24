@@ -9,18 +9,18 @@ from conftest import codex_manifest, judged_case_benchmark, live_codex_home
 from dryheave.bench import (
     CODEX_SANDBOX_ARGUMENTS,
     JUDGE_BUDGET,
+    STAND_IN_BUDGET,
     RoleChoice,
     VariantChoice,
     attempt_progress_lines,
     bench_draft,
     capture_variants,
     check_case,
-    check_workflow,
     claude_role,
     parse_role,
     parse_variant,
     resumable_run,
-    simulator_budget,
+    run_budget,
     summarize,
     summary_live_config,
     variant_recipe,
@@ -41,7 +41,6 @@ from dryheave.profiles import load_profile
 from dryheave.report_models import (
     AttemptReport,
     AttemptTopline,
-    CheckSummary,
     Distribution,
     GroupMetrics,
     MetricSummary,
@@ -50,10 +49,11 @@ from dryheave.report_models import (
 from dryheave.result_models import (
     Assessment,
     CriterionResult,
-    HelpNeeded,
+    FactResult,
     RoleMetrics,
     UsageCharge,
 )
+from dryheave.runner_models import RunBudget
 from dryheave.serialization import canonical_json
 
 
@@ -292,7 +292,6 @@ def _skill_plan(variants, skills):
     from dryheave.runner import SlashTrial, WorkflowPlan
 
     return WorkflowPlan(
-        True,
         {},
         tuple(
             SlashTrial(variant.name, variant_recipe(variant, variant.agent.value), skills)
@@ -369,46 +368,52 @@ def test_role_command_timeout_follows_the_per_call_budget():
     assert judge.command is not None
     assert judge.command.timeout_seconds == JUDGE_BUDGET.call_seconds == 300
     assert judge.version is None
-    simulator = claude_role(
+    stand_in = claude_role(
         RoleChoice("claude-sonnet-4-6", "low"),
         "claude",
-        simulator_budget(14),
+        STAND_IN_BUDGET,
         conversation_policy="design-approval",
     )
-    assert simulator.conversation_policy == "design-approval"
-    assert (simulator.budget.max_calls, simulator.budget.total_seconds) == (14, 2520)
-    assert simulator_budget(0).total_seconds == 180
-    assert simulator_budget(30).total_seconds == 3600
+    assert stand_in.conversation_policy == "design-approval"
+    assert (stand_in.budget.max_calls, stand_in.budget.total_seconds) == (100, 3600)
+    assert stand_in.command.timeout_seconds == 180
 
 
-def test_check_case_refuses_checks_or_judge_criteria_without_judge(
-    store, graded_benchmark, tmp_path
-):
+def test_run_budget_names_an_out_of_range_figure():
+    assert run_budget(max_turns=60, stand_in_replies=40, max_inspections=20) == RunBudget()
+    with pytest.raises(InputError, match=r"Invalid run budget: .*greater than or equal to 1"):
+        run_budget(max_turns=0, stand_in_replies=40, max_inspections=20)
+
+
+def test_check_case_refuses_judge_criteria_without_judge(store, graded_benchmark, tmp_path):
     _benchmark, case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
     with pytest.raises(InputError, match="--judge"):
         check_case(store, case_id, judged=False)
     assert check_case(store, case_id, judged=True) == case_id
 
 
-@pytest.mark.parametrize("kind", ["checks", "judge-criterion"])
-def test_check_case_refuses_a_checks_only_or_judge_criterion_only_case_without_judge(
+@pytest.mark.parametrize("kind", ["judged-fact", "judge-criterion"])
+def test_check_case_refuses_a_judged_fact_or_judge_criterion_without_judge(
     store, graded_benchmark, kind
 ):
-    from dryheave.cases import CaseCheck, RubricCriterion, load_frozen_case
+    from dryheave.cases import RubricCriterion, TaskFact, load_frozen_case
 
     case_id = graded_benchmark.cases[0]
     case = load_frozen_case(store, case_id)
     update = (
         {
-            "checks": (
-                CaseCheck(
-                    check_id="asked",
-                    question="Did the agent ask which punctuation to use?",
-                    expect="yes",
+            "allowed_facts": (
+                *case.allowed_facts,
+                TaskFact(
+                    fact_id="asked",
+                    phase="fix",
+                    text="Ask which punctuation to use.",
+                    check="The agent asked which punctuation to use before editing.",
+                    curator_authored=True,
                 ),
             )
         }
-        if kind == "checks"
+        if kind == "judged-fact"
         else {
             "criteria": (
                 *case.criteria,
@@ -439,7 +444,7 @@ def test_bench_experiment_is_content_addressed_and_resumable(store, benchmark):
         return bench_draft(
             case_id,
             profiles,
-            simulator=benchmark.simulator,
+            stand_in=benchmark.stand_in,
             judge=None,
             repetitions=2,
             seed=17,
@@ -451,9 +456,9 @@ def test_bench_experiment_is_content_addressed_and_resumable(store, benchmark):
         "sonnet",
         "sonnet",
     ]
-    assert resumable_run(store, identifier, workflow=True) is None
+    assert resumable_run(store, identifier, workflow=True, budget=RunBudget()) is None
     run_id = RunStore(store.root).create(identifier)
-    previous = resumable_run(store, identifier, workflow=True)
+    previous = resumable_run(store, identifier, workflow=True, budget=RunBudget())
     assert previous is not None
     assert (previous.run_id, previous.finished) == (run_id, False)
     scoring = load_role(
@@ -462,7 +467,10 @@ def test_bench_experiment_is_content_addressed_and_resumable(store, benchmark):
     assert scoring.prices == builtin_price_table()
 
 
-def test_bench_resumes_only_a_run_with_the_same_workflow_setting(store, benchmark):
+DEFAULT_BUDGET = RunBudget()
+
+
+def test_bench_resumes_only_a_run_with_the_same_workflow_setting_and_budget(store, benchmark):
     from dryheave.runner_models import RunOptions
     from dryheave.runner_state import ExecutionJournal
 
@@ -473,25 +481,42 @@ def test_bench_resumes_only_a_run_with_the_same_workflow_setting(store, benchmar
     identifier = create_experiment(
         store,
         bench_draft(
-            case_id, profiles, simulator=benchmark.simulator, judge=None, repetitions=1, seed=1
+            case_id, profiles, stand_in=benchmark.stand_in, judge=None, repetitions=1, seed=1
         ),
     )
     runs = RunStore(store.root)
 
-    def frozen_run(workflow):
+    def frozen_run(workflow, budget=DEFAULT_BUDGET, pilot_run=None):
         run_id = runs.create(identifier)
         with runs.open(run_id) as journal:
             ExecutionJournal(journal).configure(
-                RunOptions(mode="offline-fixture", workflow=workflow)
+                RunOptions(
+                    mode="offline-fixture", workflow=workflow, budget=budget, pilot_run=pilot_run
+                )
             )
         return run_id
 
+    def resumable(workflow, budget=DEFAULT_BUDGET, pilot_run=None):
+        return resumable_run(
+            store, identifier, workflow=workflow, budget=budget, pilot_run=pilot_run
+        )
+
+    tight = RunBudget(max_turns=12, stand_in_replies=8, max_inspections=5)
     with_workflow = frozen_run(True)
-    assert resumable_run(store, identifier, workflow=False) is None
-    assert resumable_run(store, identifier, workflow=True).run_id == with_workflow
+    assert resumable(False) is None
+    assert resumable(True).run_id == with_workflow
+    assert resumable(True, tight) is None
     without_workflow = frozen_run(False)
-    assert resumable_run(store, identifier, workflow=False).run_id == without_workflow
-    assert resumable_run(store, identifier, workflow=True).run_id == with_workflow
+    assert resumable(False).run_id == without_workflow
+    assert resumable(True).run_id == with_workflow
+    tightened = frozen_run(True, tight)
+    assert resumable(True, tight).run_id == tightened
+    assert resumable(True).run_id == with_workflow
+    pilot = "a" * 32
+    piloted = frozen_run(True, tight, pilot_run=pilot)
+    assert resumable(True, tight, pilot).run_id == piloted
+    assert resumable(True, tight, "b" * 32) is None
+    assert resumable(True, tight).run_id == tightened
 
 
 def criterion(identifier, outcome):
@@ -500,7 +525,7 @@ def criterion(identifier, outcome):
 
 def test_summary_counts_outcomes_per_variant_and_criterion():
     workflow_topline = AttemptTopline.model_construct(
-        first_inspection="passed", fix_requests=1, workflow="2/2"
+        first_inspection="passed", corrections=1, independence=0.75, workflow="2/2"
     )
 
     def attempt(identifier, variant, outcomes, topline=None):
@@ -508,9 +533,11 @@ def test_summary_counts_outcomes_per_variant_and_criterion():
             attempt_id=identifier,
             variant=variant,
             result=Assessment.model_construct(
-                completion="pass",
+                outcome="pass",
+                outcome_reason="all_met",
                 exclusion_reasons=(),
                 criteria=tuple(criterion(name, value) for name, value in outcomes),
+                facts=(FactResult.model_construct(fact_id="comma", verdict="met"),),
             ),
             topline=topline,
         )
@@ -528,14 +555,17 @@ def test_summary_counts_outcomes_per_variant_and_criterion():
         "correctness": {"fail": 1, "pass": 1},
         "tests": {"pass": 2},
     }
+    assert summary["haiku"]["facts"] == {"comma": {"met": 2}}
     assert summary["haiku"]["measures"] == {}
     assert summary["haiku"]["attempts"][0] == {
         "attempt_id": "a1",
         "stop_reason": "completed",
-        "completion": "pass",
+        "outcome": "pass",
+        "outcome_reason": "all_met",
+        "independence": 0.75,
+        "corrections": 1,
         "exclusions": [],
         "first_inspection": "passed",
-        "fix_requests": 1,
         "workflow": "2/2",
     }
     assert summary["haiku"]["attempts"][1]["workflow"] is None
@@ -544,19 +574,22 @@ def test_summary_counts_outcomes_per_variant_and_criterion():
             {
                 "attempt_id": "a3",
                 "stop_reason": "needs_input",
-                "completion": None,
+                "outcome": None,
+                "outcome_reason": None,
+                "independence": None,
+                "corrections": None,
                 "exclusions": [],
                 "first_inspection": None,
-                "fix_requests": None,
                 "workflow": None,
             }
         ],
+        "facts": {},
         "criteria": {},
         "measures": {},
     }
 
 
-def test_summary_includes_cost_tokens_checks_metrics_and_help_needed():
+def test_summary_includes_cost_tokens_metrics_and_the_pilot_floor():
     def whole(value):
         return Distribution(
             count=1, unknown=0, minimum=value, maximum=value, mean=value, median=value, stdev=0.0
@@ -579,16 +612,7 @@ def test_summary_includes_cost_tokens_checks_metrics_and_help_needed():
         current_exclusions=(),
         roles=(RoleMetrics.model_construct(role="subject", records=role_records),),
         result=Assessment.model_construct(
-            completion="pass",
-            eligible=True,
-            exclusion_reasons=(),
-            criteria=(),
-            help_needed=HelpNeeded(
-                simulator_replies=2,
-                facts_disclosed=("punctuation",),
-                proactive_facts=("punctuation",),
-                on_request_facts=(),
-            ),
+            outcome="pass", eligible=True, exclusion_reasons=(), criteria=(), facts=()
         ),
     )
     group = GroupMetrics.model_construct(
@@ -600,17 +624,6 @@ def test_summary_includes_cost_tokens_checks_metrics_and_help_needed():
         cache_read_tokens=whole(10),
         cache_write_tokens=whole(5),
         total_input_tokens=whole(100),
-        checks=(
-            CheckSummary(
-                case_id="b" * 64,
-                check_id="final-right-view",
-                passes=2,
-                fails=0,
-                not_applicable=0,
-                errors=0,
-                agreement=1.0,
-            ),
-        ),
         metrics=(
             MetricSummary(
                 case_id="b" * 64,
@@ -621,18 +634,23 @@ def test_summary_includes_cost_tokens_checks_metrics_and_help_needed():
             ),
         ),
     )
-    report = RunReport.model_construct(attempts=(attempt,), groups=(group,))
-    measures = summarize(report, {"a1": "completed"})["haiku"]["measures"]
+    from dryheave.report_models import FloorVariant
+
+    floor = FloorVariant.model_construct(
+        run_id="f" * 32, label="pilot (n=1)", budget=RunBudget(), group=group
+    )
+    report = RunReport.model_construct(attempts=(attempt,), groups=(group,), floor=floor)
+    summary = summarize(report, {"a1": "completed"})
+    measures = summary["haiku"]["measures"]
     assert measures["price_versions"] == ["anthropic-2026-10-07"]
-    assert measures["help_needed"] == {
-        "measured_attempts": 1,
-        "facts_disclosed": {"punctuation": 1},
-        "disclosed_proactively": {"punctuation": 1},
-        "disclosed_on_request": {},
-    }
-    assert measures["checks"][0]["agreement"] == 1.0
     assert measures["metrics"][0]["label"] == "Tests passed"
     assert measures["cost_by_role"]["subject"]["mean"] == 0.5
+    pilot = summary["pilot (n=1)"]
+    assert (pilot["floor"], pilot["run_id"], pilot["budget"]) == (
+        True,
+        "f" * 32,
+        {"max_turns": 60, "stand_in_replies": 40, "max_inspections": 20},
+    )
 
 
 def test_bench_requires_the_claude_credential_reference(
@@ -991,9 +1009,9 @@ def test_bench_workflow_derives_slash_commands_and_codex_skills_from_the_experim
     case_id = store.resolve(benchmark.cases[0])
     case = load_frozen_case(store, case_id)
     steps = (
-        PromptStep(step_id="review", prompt="/code-review --quick"),
-        PromptStep(step_id="docs", prompt="Update the docs."),
-        PromptStep(step_id="notes", prompt=" \n/release-notes"),
+        PromptStep(step_id="review", prompt="/code-review --quick", after_phase="fix"),
+        PromptStep(step_id="docs", prompt="Update the docs.", after_phase="fix"),
+        PromptStep(step_id="notes", prompt=" \n/release-notes", after_phase="fix"),
     )
     changed = store.put(
         ObjectKind.CASE,
@@ -1012,7 +1030,7 @@ def test_bench_workflow_derives_slash_commands_and_codex_skills_from_the_experim
     experiment_id = create_experiment(
         store,
         bench_draft(
-            changed, profiles, simulator=benchmark.simulator, judge=None, repetitions=1, seed=0
+            changed, profiles, stand_in=benchmark.stand_in, judge=None, repetitions=1, seed=0
         ),
     )
     plan = bench_workflow(store, experiment_id, workflow=workflow)
@@ -1023,53 +1041,13 @@ def test_bench_workflow_derives_slash_commands_and_codex_skills_from_the_experim
     )
 
 
-def _workflow_case(*, workflow):
-    from dryheave.cases import CaseContent, RubricCriterion
-
-    return CaseContent(
-        title="t",
-        initial_prompt="p",
-        criteria=(
-            RubricCriterion(criterion_id="quality", required=True, rubric="Quality rubric text."),
-        ),
-        workflow=workflow,
-    )
-
-
-def test_check_workflow_refuses_an_inspect_step_without_judge_or_inspector():
-    from dryheave.cases import InspectStep
-
-    case = _workflow_case(workflow=(InspectStep(step_id="check", criteria=("quality",)),))
-    with pytest.raises(InputError, match="--inspector"):
-        check_workflow(case, workflow=True, scoring=ScoringConfig())
-
-
-def test_check_workflow_allows_an_inspect_step_with_an_inspector():
-    from dryheave.cases import InspectStep
-
-    case = _workflow_case(workflow=(InspectStep(step_id="check", criteria=("quality",)),))
-    inspector = claude_role(RoleChoice("claude-haiku-4-5", None), "claude", JUDGE_BUDGET)
-    check_workflow(case, workflow=True, scoring=ScoringConfig(inspector=inspector))
-    check_workflow(case, workflow=True, scoring=ScoringConfig(judge=inspector))
-
-
-def test_check_workflow_ignores_inspect_steps_when_workflows_are_off():
-    from dryheave.cases import InspectStep
-
-    case = _workflow_case(workflow=(InspectStep(step_id="check", criteria=("quality",)),))
-    check_workflow(case, workflow=False, scoring=ScoringConfig())
-
-
-def test_check_workflow_allows_prompt_only_workflows_without_an_inspector():
-    from dryheave.cases import PromptStep
-
-    case = _workflow_case(workflow=(PromptStep(step_id="review", prompt="/code-review"),))
-    check_workflow(case, workflow=True, scoring=ScoringConfig())
-
-
 def test_attempt_progress_lines_name_stop_reason_and_workflow_fields():
     workflow_topline = AttemptTopline.model_construct(
-        first_inspection="failed", fix_requests=2, workflow="1/2"
+        first_inspection="failed",
+        corrections=2,
+        workflow="1/2",
+        outcome="fail",
+        outcome_reason="budget_exhausted",
     )
     report = RunReport.model_construct(
         attempts=(
@@ -1082,7 +1060,10 @@ def test_attempt_progress_lines_name_stop_reason_and_workflow_fields():
     )
     lines = attempt_progress_lines(report, {"a1": "workflow_complete", "a2": "needs_input"})
     assert lines == (
-        "attempt a1 stopped (workflow_complete); workflow 1/2; fix requests 2; first check failed",
+        (
+            "attempt a1 stopped (workflow_complete); outcome fail (budget_exhausted); "
+            "workflow 1/2; corrections 2; first check failed"
+        ),
         "attempt a2 stopped (needs_input)",
     )
 
@@ -1096,10 +1077,129 @@ def test_bench_draft_sets_the_inspector_scoring_recipe(store, benchmark):
     draft = bench_draft(
         case_id,
         profiles,
-        simulator=benchmark.simulator,
+        stand_in=benchmark.stand_in,
         judge=None,
         inspector=inspector,
         repetitions=1,
         seed=0,
     )
     assert draft.scoring.inspector == inspector
+
+
+@pytest.mark.integration
+def test_budget_from_a_passed_pilot_adds_half_and_five_to_what_it_used(store, assessed):
+    from dryheave.bench import pilot_budget
+    from dryheave.runner import load_capture
+
+    capture = load_capture(store, assessed.attempts[0].capture_id)
+    derived = pilot_budget(store, assessed.run_id)
+    replies = sum(call.role == "stand_in" for call in capture.controller_calls)
+    assert (derived.turns, derived.stand_in_replies, derived.inspections) == (
+        capture.accepted_turns,
+        replies,
+        0,
+    )
+    assert derived.budget == RunBudget(
+        max_turns=-(-capture.accepted_turns * 3 // 2) + 5,
+        stand_in_replies=-(-replies * 3 // 2) + 5,
+        max_inspections=5,
+    )
+
+
+@pytest.mark.integration
+def test_budget_from_refuses_a_passed_but_excluded_pilot_and_names_the_exclusion(
+    store, assessed, monkeypatch
+):
+    from dryheave import bench
+    from dryheave.reports import report_run
+
+    def excluded(*args, **kwargs):
+        report = report_run(*args, **kwargs)
+        attempt = report.attempts[0].model_copy(
+            update={"current_exclusions": ("contamination_suspected",)}
+        )
+        return report.model_copy(update={"attempts": (attempt,)})
+
+    assert report_run(store, assessed.run_id).attempts[0].result.outcome == "pass"
+    monkeypatch.setattr(bench, "report_run", excluded)
+    with pytest.raises(InputError, match=r"passed but is excluded \(contamination_suspected\)"):
+        bench.pilot_budget(store, assessed.run_id)
+
+
+@pytest.mark.integration
+def test_budget_from_refuses_a_failed_pilot_and_names_a_stronger_re_pilot(
+    store, graded_benchmark, tmp_path
+):
+    import json
+
+    from conftest import HOST, workflow_benchmark
+    from dryheave.assessments import assess_run
+    from dryheave.bench import pilot_budget
+    from dryheave.runner import run_experiment
+    from dryheave.runner_models import RunOptions
+
+    draft, _ = workflow_benchmark(store, graded_benchmark, tmp_path)
+    (tmp_path / "fact-verdicts.json").write_text(json.dumps([{"interface": "unmet"}]))
+    summary = run_experiment(
+        store,
+        create_experiment(store, draft),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
+    assess_run(store, summary.run_id)
+    with pytest.raises(
+        InputError, match=r"did not pass \(outcome fail \(unmet\)\).*stronger model"
+    ):
+        pilot_budget(store, summary.run_id)
+
+
+@pytest.mark.integration
+def test_budget_from_an_unassessed_pilot_says_to_assess_it_first(store, graded_benchmark):
+    from conftest import HOST
+    from dryheave.bench import pilot_budget
+    from dryheave.runner import run_experiment
+    from dryheave.runner_models import RunOptions
+
+    summary = run_experiment(
+        store,
+        create_experiment(store, graded_benchmark),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
+    with pytest.raises(InputError, match=r"no finished assessment; run `dryheave assess "):
+        pilot_budget(store, summary.run_id)
+
+
+@pytest.mark.integration
+def test_a_pilot_must_share_case_stand_in_scoring_and_workflow_with_the_benchmark(
+    store, graded_benchmark
+):
+    from conftest import HOST
+    from dryheave.bench import check_pilot_matches
+    from dryheave.runner import run_experiment
+    from dryheave.runner_models import RunOptions
+
+    experiment_id = create_experiment(store, graded_benchmark)
+    summary = run_experiment(
+        store, experiment_id, options=RunOptions(mode="offline-fixture"), host=HOST
+    )
+    check_pilot_matches(store, summary.run_id, experiment_id, workflow=False)
+    with pytest.raises(InputError, match="different case, stand-in, scoring or workflow"):
+        check_pilot_matches(store, summary.run_id, experiment_id, workflow=True)
+
+
+@pytest.mark.integration
+def test_budget_from_refuses_a_pilot_with_more_than_one_attempt(store, graded_benchmark):
+    from conftest import HOST
+    from dryheave.bench import pilot_budget
+    from dryheave.runner import run_experiment
+    from dryheave.runner_models import RunOptions
+
+    summary = run_experiment(
+        store,
+        create_experiment(store, graded_benchmark.model_copy(update={"repetitions": 2})),
+        options=RunOptions(mode="offline-fixture"),
+        host=HOST,
+    )
+    with pytest.raises(InputError, match=r"exactly one attempt; run .* has 2"):
+        pilot_budget(store, summary.run_id)

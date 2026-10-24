@@ -503,8 +503,38 @@ def test_judge_reasoning_route_serves_rationale_and_404s_for_unknown_attempts(se
     payload = json.loads(body)
     assert payload["status"] == "unavailable"
     assert payload["criteria"] == []
-    assert payload["checks"] == []
     response, body = _get(server, f"/api/runs/{summary.run_id}/attempts/a-unknown/reasoning")
+    assert response.status == 404
+
+
+@pytest.mark.integration
+def test_review_route_serves_the_three_lanes(served):
+    server, summary = served
+    attempt_id = summary.attempts[0].attempt_id
+    response, body = _get(server, f"/api/runs/{summary.run_id}/attempts/{attempt_id}/review")
+    assert response.status == 200
+    lanes = json.loads(body)["lanes"]
+    assert lanes["conversation"][0]["author"] == "initial"
+    assert lanes["behind_the_scenes"][-1] == {
+        "kind": "stop",
+        "turn": None,
+        "call_id": None,
+        "purpose": None,
+        "status": None,
+        "action": None,
+        "text": None,
+        "reason": None,
+        "cited": [],
+        "phase": None,
+        "handed": [],
+        "rejection": None,
+        "inspection_id": None,
+        "call_ids": [],
+        "facts": [],
+        "detail": "stand_in_stop",
+    }
+    assert lanes["gaps"]["assessed"] is True
+    response, _ = _get(server, f"/api/runs/{summary.run_id}/attempts/a-unknown/review")
     assert response.status == 404
 
 
@@ -574,7 +604,7 @@ def test_hostile_transcript_bytes_round_trip_verbatim_over_http(store, hostile_r
         name = next(
             item
             for item in json.loads(body)["files"]
-            if item.endswith("final/greeting-evidence/stdout.bin")
+            if item.endswith("final/punctuation-evidence/stdout.bin")
         )
         response, body = _get(server, base + "/evidence/" + name)
         served = json.loads(body)

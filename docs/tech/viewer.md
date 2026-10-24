@@ -22,19 +22,23 @@ Routes are fixed: the packaged `/`, `/viewer.css`, `/viewer.js` and the
 `/api/runs/<run-id>/progress`, `/api/runs/<run-id>/calibrations`,
 `/api/cases/<case-id>/calibrations`, `/api/cases/<case-id>`,
 `/api/reports/<object-id>`, `/api/compare` and the per-attempt
-`.../attempts/<attempt-id>/{dialogue,patch,evidence,reasoning}` and
+`.../attempts/<attempt-id>/{dialogue,patch,evidence,reasoning,review}` and
 `.../evidence/<file>` details. Attempt details accept either a run or a portable
 report as their source, so an imported report with omitted captures stays a valid
 degraded view; case-scoped calibrations exist because a portable report owns case
 identities but no run journal. `/api/cases/<case-id>` returns the frozen case
-rendered as data (title, initial prompt, facts, effective rubrics marking
-default/overridden criteria, deterministic (hidden-verifier) criteria by
-description, required flag and command argv, checks, metrics commands, budgets,
-tool requirements, repository/persona identity and baseline commit, and whether
-a reference patch exists) and 404s for an id the store does not retain; it
+rendered as data (title, initial prompt, phases, facts with kind, phase,
+disclosure, text, `check` and verifier command argv, prompt steps with their
+`after_phase`, effective rubrics marking case/default/overridden origin, metrics
+commands, budgets, tool requirements, repository/persona identity and baseline
+commit, and whether a reference patch exists) and 404s for an id the store does not retain; it
 loads only the case's own metadata and its repository's commit identity, never
 the hidden verifier files or the reference patch bytes, and bounds what it
-reads the same way attempt detail bounds blob reads. `.../attempts/<attempt-id>/reasoning` serves the judge's
+reads the same way attempt detail bounds blob reads. `.../attempts/<attempt-id>/review`
+serves the attempt's review lanes (conversation, behind the scenes, gaps) from the
+same pure builder as `dryheave transcript` (see results.md); for a portable report
+it falls back to the capture and the report's embedded assessment and says what is
+missing in `notes`. `.../attempts/<attempt-id>/reasoning` serves the judge's
 per-criterion and per-check rationale for the attempt's CURRENT assessment,
 located from the judge call recorded on that assessment's own role accounting
 (never a superseded or regraded-over judge call); it reports `unavailable` when
@@ -151,32 +155,33 @@ A run list with a text filter, offset paging and a portable-report lookup drives
 eight sections: overview (report identities, variant groups, per-group
 distributions, aggregate role usage and cost), results (a per-variant quality
 and cost comparison — cost per role and total with its price basis, token and
-turn and duration distributions, help needed, and per-criterion pass rate and
-mean score, per-check pass/fail/not-applicable with agreement, and per-metric
-distribution, each union-ed across variants and keyed by case so a variant
+turn and duration distributions, stand-in replies, the Facts summary (outcomes,
+pass rate, independence, corrections, phases unreached, uncovered problems and per-fact rows), per-criterion pass rate and
+mean score, and per-metric distribution, each union-ed across variants and keyed by case so a variant
 missing a measure another has renders `not measured` rather than a blank cell;
 a case ID in any of those rows is a clickable chip that opens the case
 section), attempts (search plus variant, stage and eligibility facets), attempt
 detail (identities including the assessment's `graded_case_id` and
-`rubric_set`, audit, criteria with their calibration and the judge's
-rationale, case-declared checks with their rationale, case metrics, help
-needed, a Workflow card (declared/completed steps, inspection, fix-request
+`rubric_set`, a Review card with the three lanes side by side — conversation
+with each user message's author, behind-the-scenes entries with stand-in purpose,
+handed set, citations, rejections and each inspection's per-fact verdicts, and
+the gaps left at the end — audit, criteria with their calibration and the judge's
+rationale, the fact results and fact account, case metrics, a Workflow card (declared/completed steps, inspection, fix-request
 and dialog counts, first/final inspection verdict, inspection time and the
-workflow's events in order — step, kind, outcome, turn, failed criteria — or
+workflow's events in order — step, kind, outcome, turn, unmet facts — or
 a plain note when the attempt carries no workflow), per-role usage records,
 dialogue, final patch and verifier evidence —
 the judge's rationale is read from a dedicated bounded route and renders
 `reasoning not included` per judged row when the current assessment carries no
-judge response for that criterion or check, and `not judged (deterministic)`
-for a deterministic criterion, which is never judged; a case chip for a
+judge response for that rubric, and `not judged (deterministic)` for a
+verifier execution record, which is never judged; a case chip for a
 regraded attempt opens the case that was actually graded (`graded_case_id`
 when the attempt was regraded, otherwise `case_id`)), case (the frozen case
-rendered as data: title, initial prompt, facts and their disclosure kind,
-effective rubrics marking case-authored/default/overridden origin and any
-disabled defaults, deterministic (hidden-verifier) criteria by description,
-required flag and command argv — never the hidden entrypoint's content, checks
-with their expectation and `only_if` condition, metrics commands with their
-description and command, budgets, tool requirements, repository/persona
+rendered as data: title, initial prompt, phases in order, facts with their
+kind, phase, disclosure, text and `check` or verifier command argv — never the
+hidden entrypoint's content — prompt steps with their `after_phase`, effective
+rubrics marking case-authored/default/overridden origin and any disabled
+defaults, metrics commands with their description and command, budgets, tool requirements, repository/persona
 identity and baseline commit, and whether a reference patch exists; reachable
 by a case chip anywhere in the page or by typing a case ID directly), progress,
 calibration (run-scoped, with a standalone case lookup and a control that
@@ -189,7 +194,7 @@ computes them from the subject role alone, while per-attempt cost and spend say
 that they cover every role and every retained attempt, and pairs state that they
 are latest-compatible. The Results tab opens with the agent-only Summary table
 described under HTML report in results.md, rendered from the report's `topline`
-fields, including the First check, Fix requests and Workflow columns and their
+fields, including the Outcome, Independence, First check, Corrections and Workflow columns and their
 variant-row ratios and means; `views.mjs` and `report_html.py` render the same
 cells from the same derived fields. The Results summary table labels every row with the
 population it covers — all retained attempts (retries included) or eligible

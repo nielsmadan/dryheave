@@ -1,6 +1,6 @@
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,7 +8,7 @@ from threading import Event
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import JsonValue
+from pydantic import Field, JsonValue
 
 from dryheave.assessment_inputs import (
     AssessmentInputs,
@@ -20,21 +20,32 @@ from dryheave.assessment_recovery import reconcile_grading
 from dryheave.case_metrics import run_metrics
 from dryheave.cases import (
     CapturePolicy,
-    DeterministicCriterion,
+    CaseContent,
     FrozenCase,
-    RubricCriterion,
-    effective_workflow,
+    TaskFact,
+    fact_verifier,
+    judged_facts,
     load_frozen_case,
+    needs_judge,
+    verifier_facts,
 )
-from dryheave.controller_models import RoleCall
+from dryheave.controller_models import ControllerRecipe, RoleCall
 from dryheave.controllers import CallContext
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.models import ProcessIdentity
 from dryheave.errors import DryheaveError, InputError
 from dryheave.experiment_models import ScoringConfig
 from dryheave.experiments import load_experiment, load_role
+from dryheave.fact_metrics import (
+    AttemptFacts,
+    Exchange,
+    attempt_outcome,
+    attempt_reached,
+    fact_account,
+)
 from dryheave.final_capture import CaptureBuilder, IgnoreSelection
-from dryheave.grading import GradingContext, grade_criterion
+from dryheave.grading import GradingContext, grade_fact
+from dryheave.inspection import snapshot_digest, verifier_judgment
 from dryheave.integrity import (
     audit_capture,
     exclusions,
@@ -42,19 +53,35 @@ from dryheave.integrity import (
     load_assessment,
 )
 from dryheave.journals import RunStore
-from dryheave.judges import check_results, invoke_judge, judge_projection
-from dryheave.models import JournalEvent, ObjectKind, TrialStage
+from dryheave.judges import (
+    FactInspection,
+    FactJudgment,
+    FinalJudgeInput,
+    RaiseEvent,
+    fact_judge_recipe,
+    final_projection,
+    invoke_final_judge,
+    invoke_judge,
+    judge_fact,
+    judge_projection,
+)
+from dryheave.models import JournalEvent, ObjectKind, StrictModel, TrialStage
 from dryheave.native_recovery import reconcile_store_ownership
 from dryheave.result_models import (
+    FACT_EVIDENCE_CHARACTERS,
+    MAX_UNCOVERED,
     Assessment,
     AssessmentEvidence,
     AuditReview,
-    CheckResult,
     CriterionResult,
-    HelpNeeded,
+    FactAccount,
+    FactResult,
+    FinalInspection,
+    InspectionVerdict,
     MetricsResult,
     RegradeRecord,
     WorkflowOutcome,
+    verifier_verdict,
 )
 from dryheave.rubrics import (
     DEFAULT_RUBRIC_SET,
@@ -67,16 +94,45 @@ from dryheave.runner_models import AttemptState, CapturedAttempt, WorkflowProgre
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json, digest, parse_model
 from dryheave.storage import ObjectStore
+from dryheave.workflow import (
+    InspectionRecord,
+    inspection_records,
+    inspection_verdict,
+    raise_events,
+)
 
 REGRADE_STAGES = frozenset(
     {TrialStage.CAPTURED, TrialStage.AUDITED, TrialStage.GRADING, TrialStage.FINISHED}
 )
+FACT_JUDGE_INTENT_EVENT = "fact-judge-intent"
+FACT_GRADE_EVENT = "fact-grade"
+RUBRIC_INTENT_EVENT = "rubric-intent"
+
+
+class FactGrade(StrictModel):
+    facts: tuple[FactResult, ...] = ()
+    uncovered: tuple[str, ...] = Field(default=(), max_length=MAX_UNCOVERED)
 
 
 @dataclass(frozen=True)
 class GradedCase:
     case_id: str
     case: FrozenCase
+
+
+@dataclass(frozen=True)
+class JournalFacts:
+    inspections: tuple[FactInspection, ...]
+    records: tuple[InspectionRecord, ...]
+    raises: tuple[RaiseEvent, ...]
+
+
+@dataclass(frozen=True)
+class JudgeRuntime:
+    execution: ExecutionJournal
+    state: AttemptState
+    root: Path
+    cancelled: Event
 
 
 def _has_judge(scoring: ScoringConfig | None) -> bool:
@@ -88,16 +144,29 @@ def _judged(inputs: AssessmentInputs) -> bool:
     return _has_judge(inputs.scoring)
 
 
+def _journal_facts(execution: ExecutionJournal, attempt_id: str) -> JournalFacts:
+    events = execution.journal.events
+    records = inspection_records(events, attempt_id)
+    return JournalFacts(
+        inspections=tuple(record.result for record in records if record.result is not None),
+        records=records,
+        raises=raise_events(events, attempt_id),
+    )
+
+
 def _workflow_assist_call_ids(progress: WorkflowProgress | None) -> frozenset[str]:
     if progress is None:
         return frozenset()
     return frozenset(
         call_id
         for event in progress.events
-        if (event.kind == "inspect" and event.outcome == "fix_requested")
-        or (event.kind == "dialog" and event.outcome == "answered")
+        if event.kind == "inspect" and event.outcome == "fix_requested"
         for call_id in event.call_ids
     )
+
+
+def _workflow_enabled(execution: ExecutionJournal) -> bool:
+    return execution.options is not None and execution.options.workflow
 
 
 def _capture_case(store: ObjectStore, inputs: AssessmentInputs) -> FrozenCase | None:
@@ -116,103 +185,109 @@ def _capture_case(store: ObjectStore, inputs: AssessmentInputs) -> FrozenCase | 
         return None
 
 
-def _help_needed(capture: CapturedAttempt | None, case: FrozenCase | None) -> HelpNeeded | None:
-    if capture is None or case is None:
-        return None
+def stand_in_exchanges(
+    capture: CapturedAttempt, raises: tuple[RaiseEvent, ...]
+) -> tuple[Exchange, ...]:
     assisted = _workflow_assist_call_ids(capture.workflow)
-    replies = tuple(
-        call.decision
-        for call in capture.controller_calls
-        if call.role == "simulator"
-        and call.decision is not None
-        and call.decision.action == "reply"
-        and call.decision.screen_kind is None
-        and call.call_id not in assisted
-    )
-    disclosed = tuple(dict.fromkeys(fact_id for reply in replies for fact_id in reply.fact_ids))
-    kinds = {fact.fact_id: fact.disclosure for fact in case.allowed_facts}
-    return HelpNeeded(
-        simulator_replies=len(replies),
-        facts_disclosed=disclosed,
-        proactive_facts=tuple(
-            fact_id for fact_id in disclosed if kinds.get(fact_id) == "proactive"
-        ),
-        on_request_facts=tuple(
-            fact_id for fact_id in disclosed if kinds.get(fact_id) == "on_request"
-        ),
-    )
-
-
-_INSPECTION_VERDICTS = frozenset({"passed", "failed", "unavailable", "reused"})
-
-
-def _inspection_verdict(outcome: str) -> Literal["passed", "failed", "unavailable"]:
-    if outcome == "passed":
-        return "passed"
-    if outcome in ("failed", "reused"):
-        return "failed"
-    if outcome == "unavailable":
-        return "unavailable"
-    raise ValueError(f"unexpected inspection outcome: {outcome}")
-
-
-def _workflow_step_kinds(
-    capture: CapturedAttempt | None, case: FrozenCase | None
-) -> Mapping[str, Literal["prompt", "inspect"]]:
-    if capture is None or case is None or capture.workflow is None or not capture.workflow.steps:
-        return {}
-    steps = effective_workflow(case, enabled=True, inspected=True)
-    return {step.step_id: step.kind for step in steps}
-
-
-def _workflow_outcome(
-    progress: WorkflowProgress | None, step_kinds: Mapping[str, Literal["prompt", "inspect"]]
-) -> WorkflowOutcome | None:
-    if progress is None:
-        return None
-    inspections = [
-        event
-        for event in progress.events
-        if event.kind == "inspect" and event.outcome in _INSPECTION_VERDICTS
-    ]
-    fix_requests = sum(
-        1
-        for event in progress.events
-        if event.kind == "inspect" and event.outcome == "fix_requested"
-    )
-    dialogs_answered = sum(
-        1 for event in progress.events if event.kind == "dialog" and event.outcome == "answered"
-    )
-    first_inspection: Literal["passed", "failed", "unavailable", "none"] = (
-        _inspection_verdict(inspections[0].outcome) if inspections else "none"
-    )
-    last_inspect_step_id = next(
-        (step_id for step_id in reversed(progress.steps) if step_kinds.get(step_id) == "inspect"),
-        None,
-    )
-    final_inspection: Literal["passed", "failed", "unavailable", "not_reached", "none"]
-    if last_inspect_step_id is None:
-        final_inspection = "none"
-    else:
-        last_event = next(
-            (event for event in reversed(inspections) if event.step_id == last_inspect_step_id),
-            None,
+    raised = {event.call_id: event for event in raises}
+    calls = tuple(call for call in capture.controller_calls if call.role == "stand_in")
+    known = {call.call_id for call in calls}
+    exchanges = tuple(
+        Exchange(raised=True, fact_ids=raised[call.call_id].fact_ids)
+        if call.call_id in raised
+        else Exchange(raised=False, fact_ids=call.decision.fact_ids if call.decision else ())
+        for call in calls
+        if call.call_id in raised
+        or (
+            call.status == "completed"
+            and call.decision is not None
+            and call.decision.action == "reply"
+            and call.decision.screen_kind is None
+            and call.call_id not in assisted
         )
-        final_inspection = _inspection_verdict(last_event.outcome) if last_event else "not_reached"
-    inspection_seconds = sum(
-        event.seconds
-        for event in progress.events
-        if event.kind == "inspect" and event.seconds is not None
     )
+    return (
+        *exchanges,
+        *(
+            Exchange(raised=True, fact_ids=event.fact_ids)
+            for event in raises
+            if event.call_id not in known
+        ),
+    )
+
+
+def _attempt_facts(
+    case: FrozenCase,
+    capture: CapturedAttempt,
+    journal: JournalFacts,
+    results: tuple[FactResult, ...],
+    *,
+    workflow: bool,
+) -> AttemptFacts:
+    return AttemptFacts(
+        case=case,
+        results={item.fact_id: item for item in results},
+        inspections=journal.inspections,
+        raises=journal.raises,
+        exchanges=stand_in_exchanges(capture, journal.raises),
+        workflow=workflow,
+    )
+
+
+def _fact_account(
+    case: FrozenCase | None,
+    capture: CapturedAttempt | None,
+    journal: JournalFacts,
+    results: tuple[FactResult, ...],
+    *,
+    workflow: bool,
+) -> FactAccount | None:
+    if case is None or capture is None:
+        return None
+    return fact_account(_attempt_facts(case, capture, journal, results, workflow=workflow))
+
+
+def _inspection_verdict(
+    case: CaseContent, record: InspectionRecord, position: int
+) -> Literal["passed", "failed", "unavailable", "unknown"]:
+    return "unknown" if record.result is None else inspection_verdict(case, position, record.result)
+
+
+def workflow_outcome(
+    case: CaseContent | None,
+    progress: WorkflowProgress | None,
+    stop_reason: str,
+    journal: JournalFacts,
+    *,
+    enabled: bool,
+) -> WorkflowOutcome | None:
+    if not enabled or case is None or progress is None:
+        return None
+    sent = tuple(event.turn for event in progress.events if event.kind == "prompt")
+    verdicts = tuple(
+        _inspection_verdict(case, record, sum(turn < record.turn for turn in sent))
+        for record in journal.records
+    )
+    settled = tuple(verdict for verdict in verdicts if verdict != "unknown")
+    first: InspectionVerdict = settled[0] if settled else "none"
+    final: FinalInspection = verdicts[-1] if verdicts else "none"
     return WorkflowOutcome(
         steps=len(progress.steps),
         completed_steps=progress.position,
-        inspections=len(inspections),
-        fix_requests=fix_requests,
-        dialogs_answered=dialogs_answered,
-        first_inspection=first_inspection,
-        final_inspection=final_inspection,
-        inspection_seconds=inspection_seconds,
+        inspections=len(settled),
+        fix_requests=sum(event.cause == "fix_request" for event in journal.raises),
+        fallbacks=sum(event.cause == "fallback" for event in journal.raises),
+        dialogs_answered=sum(
+            event.kind == "dialog" and event.outcome == "answered" for event in progress.events
+        ),
+        first_inspection=first,
+        final_inspection=final,
+        completed=stop_reason == "workflow_complete",
+        inspection_seconds=sum(
+            event.seconds
+            for event in progress.events
+            if event.kind == "inspect" and event.seconds is not None
+        ),
         events=progress.events,
     )
 
@@ -223,6 +298,7 @@ def _initial(
     state: AttemptState,
     inputs: AssessmentInputs,
     graded: FrozenCase | None,
+    journal: JournalFacts,
 ) -> Assessment:
     capture, trial, experiment = inputs.capture, inputs.trial, inputs.experiment
     captured = _capture_case(store, inputs)
@@ -243,9 +319,9 @@ def _initial(
         quarantine_id=state.quarantine_id,
         case_id=trial.case_id if trial else capture.case_id if capture else None,
         profile_id=trial.profile_id if trial else capture.profile_id if capture else None,
-        simulator_id=experiment.simulator_id
+        stand_in_id=experiment.stand_in_id
         if experiment
-        else capture.simulator_id
+        else capture.stand_in_id
         if capture
         else None,
         scoring_id=experiment.scoring_id if experiment else capture.scoring_id if capture else None,
@@ -268,38 +344,25 @@ def _initial(
         accepted_turns=capture.accepted_turns if capture else None,
         subject_seconds=capture.subject_seconds if capture else None,
         setup_seconds=capture.setup_seconds if capture else None,
-        help_needed=_help_needed(capture, captured),
-        workflow=_workflow_outcome(
-            capture.workflow if capture else None, _workflow_step_kinds(capture, captured)
+        workflow=workflow_outcome(
+            captured,
+            capture.workflow if capture else None,
+            capture.stop_reason if capture else "",
+            journal,
+            enabled=_workflow_enabled(execution),
         ),
         roles=role_metrics(inputs, state, ()),
     )
 
 
-def _completion(criteria: tuple[CriterionResult, ...]) -> str:
-    required = [item.outcome for item in criteria if item.required]
-    if not required or any(outcome in {"error", "not_run"} for outcome in required):
-        return "indeterminate"
-    return "fail" if "fail" in required else "pass"
-
-
 def _saved_results(
     execution: ExecutionJournal, state: AttemptState
-) -> tuple[dict[str, CriterionResult], bool, tuple[RoleCall, ...]]:
+) -> tuple[dict[str, CriterionResult], tuple[RoleCall, ...]]:
     results = {}
     for event in execution.events_for(state.attempt_id, "criterion-result"):
         result = parse_model(canonical_json(event.data), CriterionResult)
         results[result.criterion_id] = result
-    calls = saved_judge_calls(execution, state)
-    return results, bool(calls), calls
-
-
-def _saved_checks(execution: ExecutionJournal, state: AttemptState) -> dict[str, CheckResult]:
-    results = (
-        parse_model(canonical_json(event.data), CheckResult)
-        for event in execution.events_for(state.attempt_id, "check-result")
-    )
-    return {result.check_id: result for result in results}
+    return results, saved_judge_calls(execution, state)
 
 
 def _measure(
@@ -339,13 +402,51 @@ def _save_criterion(
     execution.evidence(state, "criterion-result", result)
 
 
+def _judge_call[T](
+    runtime: JudgeRuntime,
+    recipe: ControllerRecipe,
+    index: int,
+    invoke: Callable[[ArtifactWriter, CallContext], tuple[RoleCall, T]],
+) -> tuple[RoleCall, T]:
+    execution, state = runtime.execution, runtime.state
+    call_id = "j-" + uuid4().hex
+    execution.evidence(
+        state, "judge-intent", RoleCall(call_id=call_id, role="judge", status="intent")
+    )
+
+    def own(identities: tuple[ProcessIdentity, ...]) -> None:
+        execution.own(execution.attempts[state.attempt_id], identities)
+
+    context = CallContext(
+        call_id=call_id,
+        index=index,
+        deadline=time.monotonic() + min(recipe.budget.call_seconds, recipe.budget.total_seconds),
+        cancelled=runtime.cancelled,
+        inherited=os.environ,
+        on_identities=own,
+        runtime_root=execution.attempt_root(state) / "role-runtime" / call_id,
+    )
+    call, value = invoke(
+        ArtifactWriter(
+            runtime.root / "judge" / call_id,
+            recipe.budget.max_input_bytes + 8 * recipe.budget.max_output_bytes,
+        ),
+        context,
+    )
+    execution.evidence(state, "judge-result", call)
+    if runtime.cancelled.is_set():
+        raise KeyboardInterrupt
+    return call, value
+
+
+def _roots(state: AttemptState) -> tuple[str, ...]:
+    workspace = str(Path(state.workspace))
+    return tuple(dict.fromkeys((workspace, os.path.realpath(workspace))))
+
+
 def _judge(
-    execution: ExecutionJournal,
-    state: AttemptState,
-    inputs: AssessmentInputs,
-    root: Path,
-    cancelled: Event,
-) -> tuple[RoleCall, tuple[CriterionResult, ...], tuple[CheckResult, ...]]:
+    runtime: JudgeRuntime, inputs: AssessmentInputs, index: int
+) -> tuple[RoleCall, tuple[CriterionResult, ...]]:
     if (
         inputs.case is None
         or inputs.capture is None
@@ -354,60 +455,243 @@ def _judge(
     ):
         raise InputError("Judge requires verified case, capture and scoring inputs.")
     recipe = inputs.scoring.judge
-    call_id = "j-" + uuid4().hex
-    call = RoleCall(call_id=call_id, role="judge", status="intent")
-    execution.evidence(state, "judge-intent", call)
-
-    def own(identities: tuple[ProcessIdentity, ...]) -> None:
-        execution.own(execution.attempts[state.attempt_id], identities)
-
-    context = CallContext(
-        call_id=call_id,
-        index=0,
-        deadline=time.monotonic() + min(recipe.budget.call_seconds, recipe.budget.total_seconds),
-        cancelled=cancelled,
-        inherited=os.environ,
-        on_identities=own,
-        runtime_root=execution.attempt_root(state) / "role-runtime" / call_id,
+    request = judge_projection(
+        inputs.case,
+        inputs.capture,
+        inputs.files,
+        roots=_roots(runtime.state),
+        limit=recipe.budget.max_input_bytes,
     )
-    workspace = str(Path(state.workspace))
-    call, results, answers, _ = invoke_judge(
-        recipe,
-        judge_projection(
-            inputs.case,
-            inputs.capture,
-            inputs.files,
-            roots=tuple(dict.fromkeys((workspace, os.path.realpath(workspace)))),
-            limit=recipe.budget.max_input_bytes,
-        ),
-        ArtifactWriter(
-            root / "judge" / call_id,
-            recipe.budget.max_input_bytes + 8 * recipe.budget.max_output_bytes,
-        ),
-        context,
+
+    def invoke(
+        artifacts: ArtifactWriter, context: CallContext
+    ) -> tuple[RoleCall, tuple[CriterionResult, ...]]:
+        call, results, _ = invoke_judge(recipe, request, artifacts, context)
+        return call, results
+
+    return _judge_call(runtime, recipe, index, invoke)
+
+
+type FinalAnswer = tuple[dict[str, FactJudgment], tuple[str, ...]]
+
+
+def _ask_facts(
+    runtime: JudgeRuntime,
+    inputs: AssessmentInputs,
+    facts: tuple[TaskFact, ...],
+    index: int,
+) -> tuple[RoleCall, FinalAnswer]:
+    if inputs.case is None or inputs.capture is None or inputs.scoring is None:
+        raise InputError("Fact grading requires verified case, capture and scoring inputs.")
+    if inputs.scoring.judge is None:
+        raise InputError("Fact grading requires a judge.")
+    recipe = fact_judge_recipe(inputs.scoring.judge, len(facts))
+    request: FinalJudgeInput = final_projection(
+        inputs.case,
+        inputs.capture,
+        inputs.files,
+        facts,
+        roots=_roots(runtime.state),
+        limit=recipe.budget.max_input_bytes,
     )
-    execution.evidence(state, "judge-result", call)
-    if cancelled.is_set():
-        raise KeyboardInterrupt
-    return call, results, check_results(inputs.case.checks, answers)
+
+    def invoke(artifacts: ArtifactWriter, context: CallContext) -> tuple[RoleCall, FinalAnswer]:
+        call, judgments, uncovered = invoke_final_judge(recipe, request, artifacts, context)
+        settled = {item.fact_id: item for item in judgments} if call.status == "completed" else {}
+        return call, (settled, uncovered)
+
+    return _judge_call(runtime, recipe, index, invoke)
 
 
-def _grade(
+def _phase(fact: TaskFact) -> str:
+    if fact.phase is None:
+        raise InputError(f"Graded fact {fact.fact_id} has no phase.")
+    return fact.phase
+
+
+def _fact_result(
+    fact: TaskFact, judgment: FactJudgment, source: Literal["verifier", "judge"]
+) -> FactResult:
+    return FactResult(
+        fact_id=fact.fact_id,
+        kind=fact.kind,
+        phase=_phase(fact),
+        verdict=judgment.verdict,
+        observation=judgment.observation,
+        evidence=judgment.evidence,
+        source=source,
+    )
+
+
+def uncalibrated_verifiers(criteria: Iterable[CriterionResult]) -> tuple[str, ...]:
+    return tuple(
+        item.criterion_id
+        for item in criteria
+        if item.kind == "deterministic"
+        and item.required
+        and item.outcome == "error"
+        and (
+            item.calibration is None
+            or item.calibration.reference is None
+            or item.calibration.reference.outcome != "pass"
+        )
+    )
+
+
+def _verifier_result(fact: TaskFact, result: CriterionResult) -> FactResult | None:
+    if result.execution is None or verifier_verdict(result.execution) is None:
+        return None
+    return _fact_result(fact, verifier_judgment(fact, result.execution), "verifier")
+
+
+def _last_inspection(inspections: tuple[FactInspection, ...]) -> FactInspection | None:
+    return next(
+        (item for item in reversed(inspections) if item.status == "completed"),
+        None,
+    )
+
+
+def _comparable_inspection(
+    inspection: FactInspection | None, original: FrozenCase | None, graded: FrozenCase | None
+) -> FactInspection | None:
+    if inspection is None or original is None or graded is None:
+        return inspection
+    before = {fact.fact_id: judge_fact(fact) for fact in original.allowed_facts}
+    after = {fact.fact_id: judge_fact(fact) for fact in graded.allowed_facts}
+    kept = tuple(
+        item
+        for item in inspection.judgments
+        if item.fact_id in before and before[item.fact_id] == after.get(item.fact_id)
+    )
+    return inspection.model_copy(update={"judgments": kept})
+
+
+def _disagreements(
+    facts: tuple[TaskFact, ...],
+    judged: Mapping[str, FactJudgment],
+    inspected: Mapping[str, str],
+) -> tuple[TaskFact, ...]:
+    settled = {"met", "unmet"}
+    return tuple(
+        fact
+        for fact in facts
+        if fact.fact_id in judged
+        and judged[fact.fact_id].verdict in settled
+        and inspected.get(fact.fact_id) in settled
+        and inspected[fact.fact_id] != judged[fact.fact_id].verdict
+    )
+
+
+def _disputed(
+    fact: TaskFact, judgment: FactJudgment, inspected: str, *, rejudged: bool
+) -> FactResult:
+    skipped = "" if rejudged else "re-judge skipped, judge call budget spent; "
+    evidence = (
+        f"{skipped}final judge {judgment.verdict}, last inspection {inspected}: {judgment.evidence}"
+    )
+    return _fact_result(fact, judgment, "judge").model_copy(
+        update={"verdict": "disputed", "evidence": evidence[:FACT_EVIDENCE_CHARACTERS]}
+    )
+
+
+def _judge_facts(
+    runtime: JudgeRuntime,
+    inputs: AssessmentInputs,
+    facts: tuple[TaskFact, ...],
+    inspection: FactInspection | None,
+) -> tuple[FactGrade, tuple[RoleCall, ...]]:
+    recipe = inputs.scoring.judge if inputs.scoring else None
+    calls: list[RoleCall] = []
+
+    def ask(subset: tuple[TaskFact, ...]) -> FinalAnswer:
+        if recipe is None or len(calls) >= recipe.budget.max_calls:
+            return {}, ()
+        call, answer = _ask_facts(runtime, inputs, subset, len(calls))
+        calls.append(call)
+        return answer
+
+    judged, uncovered = ask(facts)
+    missing = tuple(fact for fact in facts if fact.fact_id not in judged)
+    if missing:
+        more, extra = ask(missing)
+        judged, uncovered = judged | more, (*uncovered, *extra)
+    inspected = (
+        {item.fact_id: item.verdict for item in inspection.judgments}
+        if inspection is not None
+        and inputs.capture is not None
+        and inspection.snapshot_digest == snapshot_digest(inputs.capture.workspace)
+        else {}
+    )
+    contested = _disagreements(facts, judged, inspected)
+    rejudged = recipe is not None and len(calls) < recipe.budget.max_calls
+    again, extra = ask(contested) if contested else ({}, ())
+    agreed = {
+        fact.fact_id: again[fact.fact_id]
+        for fact in contested
+        if fact.fact_id in again and again[fact.fact_id].verdict == inspected[fact.fact_id]
+    }
+    results = tuple(
+        _fact_result(fact, agreed.get(fact.fact_id, judged[fact.fact_id]), "judge")
+        if fact not in contested or fact.fact_id in agreed
+        else _disputed(
+            fact,
+            again.get(fact.fact_id, judged[fact.fact_id]),
+            inspected[fact.fact_id],
+            rejudged=rejudged,
+        )
+        for fact in facts
+        if fact.fact_id in judged
+    )
+    return (
+        FactGrade(
+            facts=results,
+            uncovered=tuple(dict.fromkeys((*uncovered, *extra)))[:MAX_UNCOVERED],
+        ),
+        tuple(calls),
+    )
+
+
+def _fact_phase(
+    runtime: JudgeRuntime,
+    inputs: AssessmentInputs,
+    inspection: FactInspection | None,
+) -> tuple[FactGrade, tuple[RoleCall, ...]]:
+    execution, state = runtime.execution, runtime.state
+    saved = execution.events_for(state.attempt_id, FACT_GRADE_EVENT)
+    if saved:
+        return parse_model(canonical_json(saved[-1].data), FactGrade), ()
+    facts = judged_facts(inputs.case) if inputs.case else ()
+    delivered = inputs.capture is not None and inputs.capture.accepted_turns > 0
+    if (
+        not facts
+        or not delivered
+        or not _judged(inputs)
+        or execution.events_for(state.attempt_id, FACT_JUDGE_INTENT_EVENT)
+    ):
+        grade = FactGrade()
+        calls: tuple[RoleCall, ...] = ()
+    else:
+        execution.record(
+            state, FACT_JUDGE_INTENT_EVENT, {"facts": [fact.fact_id for fact in facts]}
+        )
+        grade, calls = _judge_facts(runtime, inputs, facts, inspection)
+    execution.evidence(state, FACT_GRADE_EVENT, grade)
+    return grade, calls
+
+
+def _grade(  # noqa: PLR0913
     execution: ExecutionJournal,
     state: AttemptState,
     inputs: AssessmentInputs,
     store: ObjectStore,
     cancelled: Event,
     hidden_case_id: str | None,
-) -> tuple[
-    tuple[CriterionResult, ...],
-    tuple[CheckResult, ...],
-    tuple[MetricsResult, ...],
-    tuple[RoleCall, ...],
-]:
+    *,
+    inspection: FactInspection | None,
+) -> tuple[FactGrade, tuple[CriterionResult, ...], tuple[MetricsResult, ...], tuple[RoleCall, ...]]:
     if inputs.case is None or inputs.capture is None:
-        return (), (), (), ()
-    results, judge_intent, calls = _saved_results(execution, state)
+        return FactGrade(), (), (), ()
+    results, calls = _saved_results(execution, state)
     root = execution.assessment_root(state) / uuid4().hex
     hidden = store.read_blobs(hidden_case_id or inputs.capture.case_id)
 
@@ -428,99 +712,109 @@ def _grade(
         event.data.get("criterion_id")
         for event in execution.events_for(state.attempt_id, "criterion-intent")
     }
+    facts = verifier_facts(inputs.case)
     resumed_suites = {
-        item.suite_id
-        for item in inputs.case.criteria
-        if isinstance(item, DeterministicCriterion)
-        and item.suite_id
-        and (item.criterion_id in results or item.criterion_id in intents)
+        fact_verifier(fact).suite_id
+        for fact in facts
+        if fact_verifier(fact).suite_id and (fact.fact_id in results or fact.fact_id in intents)
     }
-    for criterion in inputs.case.criteria:
+    for fact in facts:
         if cancelled.is_set():
             raise KeyboardInterrupt
-        if criterion.criterion_id in results or not isinstance(criterion, DeterministicCriterion):
+        if fact.fact_id in results:
             continue
-        if criterion.criterion_id in intents or criterion.suite_id in resumed_suites:
+        if fact.fact_id in intents or fact_verifier(fact).suite_id in resumed_suites:
             result = CriterionResult(
-                criterion_id=criterion.criterion_id,
+                criterion_id=fact.fact_id,
                 kind="deterministic",
-                required=criterion.required,
+                required=fact.kind == "requirement",
                 outcome="error",
                 error="interrupted_verifier",
             )
         else:
-            execution.record(state, "criterion-intent", {"criterion_id": criterion.criterion_id})
-            result = grade_criterion(context, criterion)
-        results[criterion.criterion_id] = result
+            execution.record(state, "criterion-intent", {"criterion_id": fact.fact_id})
+            result = grade_fact(context, fact)
+        results[fact.fact_id] = result
         _save_criterion(execution, state, result)
     metrics = _measure(execution, state, inputs.case, context)
-    criteria = graded_criteria(inputs.case, judged=_judged(inputs))
-    judged, checks, calls = _judge_phase(
-        execution, state, inputs, results, (judge_intent, calls), (root, cancelled)
+    runtime = JudgeRuntime(execution, state, root, cancelled)
+    judged, fact_calls = _fact_phase(runtime, inputs, inspection)
+    verified = tuple(
+        settled
+        for fact in facts
+        if (settled := _verifier_result(fact, results[fact.fact_id])) is not None
     )
-    graded = results | judged
-    return tuple(graded[item.criterion_id] for item in criteria), checks, metrics, calls
+    by_id = {item.fact_id: item for item in (*verified, *judged.facts)}
+    grade = FactGrade(
+        facts=tuple(
+            by_id[fact.fact_id] for fact in inputs.case.allowed_facts if fact.fact_id in by_id
+        ),
+        uncovered=judged.uncovered,
+    )
+    rubrics, rubric_calls = _judge_phase(runtime, inputs, (*calls, *fact_calls))
+    criteria = graded_criteria(inputs.case, judged=_judged(inputs))
+    return (
+        grade,
+        (
+            *(results[fact.fact_id] for fact in facts),
+            *(rubrics[item.criterion_id] for item in criteria),
+        ),
+        metrics,
+        rubric_calls,
+    )
 
 
 def _judge_phase(
-    execution: ExecutionJournal,
-    state: AttemptState,
-    inputs: AssessmentInputs,
-    graded: Mapping[str, CriterionResult],
-    saved: tuple[bool, tuple[RoleCall, ...]],
-    runtime: tuple[Path, Event],
-) -> tuple[dict[str, CriterionResult], tuple[CheckResult, ...], tuple[RoleCall, ...]]:
-    judge_intent, calls = saved
+    runtime: JudgeRuntime, inputs: AssessmentInputs, calls: tuple[RoleCall, ...]
+) -> tuple[dict[str, CriterionResult], tuple[RoleCall, ...]]:
+    execution, state = runtime.execution, runtime.state
+    saved = {
+        result.criterion_id: result
+        for result in _saved_results(execution, state)[0].values()
+        if result.kind == "judge"
+    }
     results: dict[str, CriterionResult] = {}
     if inputs.case is None:
-        return results, (), calls
+        return results, calls
     criteria = graded_criteria(inputs.case, judged=_judged(inputs))
-    case_checks = inputs.case.checks if _judged(inputs) else ()
-    checks = _saved_checks(execution, state)
-    rubrics = [
-        item
-        for item in criteria
-        if isinstance(item, RubricCriterion) and item.criterion_id not in graded
-    ]
-    pending = [item for item in case_checks if item.check_id not in checks]
+    rubrics = [item for item in criteria if item.criterion_id not in saved]
+    started = bool(execution.events_for(state.attempt_id, RUBRIC_INTENT_EVENT))
     recipe = inputs.scoring.judge if inputs.scoring else None
     delivered = inputs.capture is None or inputs.capture.accepted_turns > 0
     if (
-        (rubrics or pending)
-        and not judge_intent
+        rubrics
+        and not started
         and delivered
         and recipe is not None
-        and recipe.budget.max_calls
+        and len(calls) < recipe.budget.max_calls
     ):
-        call, judgments, answered = _judge(execution, state, inputs, runtime[0], runtime[1])
+        execution.record(
+            state, RUBRIC_INTENT_EVENT, {"criteria": [item.criterion_id for item in rubrics]}
+        )
+        started = True
+        call, judgments = _judge(runtime, inputs, len(calls))
         calls = (*calls, call)
         for result in judgments:
             results[result.criterion_id] = result
             _save_criterion(execution, state, result)
-        for check in answered:
-            checks[check.check_id] = check
-            execution.evidence(state, "check-result", check)
     for criterion in rubrics:
         if criterion.criterion_id not in results:
             result = CriterionResult(
                 criterion_id=criterion.criterion_id,
                 kind="judge",
-                required=criterion.required,
-                outcome="error" if judge_intent else "not_run",
+                required=False,
+                outcome="error" if started else "not_run",
                 error="interrupted_judge"
-                if judge_intent
-                else "judge_not_available"
-                if delivered
-                else "subject_accepted_no_prompt",
+                if started
+                else "subject_accepted_no_prompt"
+                if not delivered
+                else "judge_budget_exhausted"
+                if recipe is not None and len(calls) >= recipe.budget.max_calls
+                else "judge_not_available",
             )
             results[criterion.criterion_id] = result
             _save_criterion(execution, state, result)
-    for item in case_checks:
-        if item.check_id not in checks:
-            check = CheckResult(check_id=item.check_id, outcome="error")
-            checks[item.check_id] = check
-            execution.evidence(state, "check-result", check)
-    return results, tuple(checks[item.check_id] for item in case_checks), calls
+    return saved | results, calls
 
 
 def _evidence(
@@ -574,7 +868,8 @@ def _assess_one(
 ) -> str:
     inputs = load_assessment_inputs(store, execution, state)
     case = graded.case if graded and inputs.case else inputs.case
-    initial = _initial(store, execution, state, inputs, case)
+    journal = _journal_facts(execution, state.attempt_id)
+    initial = _initial(store, execution, state, inputs, case, journal)
     if execution.regrade_id is not None:
         initial = _carried_reviews(store, state.assessment_id, initial)
     if graded is not None:
@@ -599,8 +894,8 @@ def _assess_one(
     if state.stage == TrialStage.AUDITED:
         execution.save(state.model_copy(update={"stage": TrialStage.GRADING}))
         state = execution.attempts[state.attempt_id]
+    grade = FactGrade()
     criteria: tuple[CriterionResult, ...] = ()
-    checks: tuple[CheckResult, ...] = ()
     metrics: tuple[MetricsResult, ...] = ()
     calls: tuple[RoleCall, ...] = ()
     if (
@@ -609,21 +904,41 @@ def _assess_one(
         and initial.audit.cleanup == "stopped"
         and initial.audit.capture_complete
     ):
-        criteria, checks, metrics, calls = _grade(
-            execution, state, grading, store, cancelled, graded.case_id if graded else None
+        grade, criteria, metrics, calls = _grade(
+            execution,
+            state,
+            grading,
+            store,
+            cancelled,
+            graded.case_id if graded else None,
+            inspection=_comparable_inspection(
+                _last_inspection(journal.inspections), inputs.case, case
+            ),
         )
     elif case:
-        criteria = tuple(
-            CriterionResult(
-                criterion_id=item.criterion_id,
-                kind=item.kind,
-                required=item.required,
-                outcome="not_run",
-                error="audit_exclusion",
-            )
-            for item in graded_criteria(case, judged=_judged(inputs))
+        criteria = (
+            *(
+                CriterionResult(
+                    criterion_id=fact.fact_id,
+                    kind="deterministic",
+                    required=fact.kind == "requirement",
+                    outcome="not_run",
+                    error="audit_exclusion",
+                )
+                for fact in verifier_facts(case)
+            ),
+            *(
+                CriterionResult(
+                    criterion_id=item.criterion_id,
+                    kind="judge",
+                    required=False,
+                    outcome="not_run",
+                    error="audit_exclusion",
+                )
+                for item in graded_criteria(case, judged=_judged(inputs))
+            ),
         )
-    _, _, saved_calls = _saved_results(execution, state)
+    _, saved_calls = _saved_results(execution, state)
     calls = calls or saved_calls
     if inputs.error is None:
         try:
@@ -633,10 +948,25 @@ def _assess_one(
             initial = initial.model_copy(
                 update={"audit": audit, "exclusion_reasons": exclusions(audit)}
             )
+    workflow = _workflow_enabled(execution)
+    account = _fact_account(case, inputs.capture, journal, grade.facts, workflow=workflow)
+    outcome, reason = (
+        attempt_outcome(
+            case,
+            {item.fact_id: item for item in grade.facts},
+            attempt_reached(
+                _attempt_facts(case, inputs.capture, journal, grade.facts, workflow=workflow)
+            ),
+            initial.stop_reason,
+        )
+        if case is not None and inputs.capture is not None
+        else ("indeterminate", "grading_error")
+    )
     reasons = initial.exclusion_reasons
-    completion = _completion(criteria)
-    if completion == "indeterminate":
+    if outcome == "indeterminate":
         reasons = (*reasons, "unscorable")
+    if uncalibrated_verifiers(criteria):
+        reasons = (*reasons, "verifier_uncalibrated")
     if any(
         call.cleanup and (not call.cleanup.known_writers_stopped or call.cleanup.errors)
         for call in calls
@@ -649,13 +979,13 @@ def _assess_one(
     result = initial.model_copy(
         update={
             "phase": "finished",
+            "facts": grade.facts,
+            "uncovered": grade.uncovered,
             "criteria": criteria,
-            "checks": checks,
             "metrics": metrics,
-            "completion": completion,
-            "deterministic_completion": _completion(
-                tuple(item for item in criteria if item.kind == "deterministic")
-            ),
+            "outcome": outcome,
+            "outcome_reason": reason,
+            "fact_account": account,
             "exclusion_reasons": tuple(dict.fromkeys(reasons)),
             "eligible": not reasons,
             "roles": role_metrics(inputs, state, calls),
@@ -748,10 +1078,6 @@ def _regrade_command(run_id: str, case_id: str | None) -> str:
     return f"dryheave assess {run_id} --regrade" + (f" --case {case_id}" if case_id else "")
 
 
-def _needs_judge(case: FrozenCase) -> bool:
-    return bool(case.checks) or any(isinstance(item, RubricCriterion) for item in case.criteria)
-
-
 def _validate_regrade(
     store: ObjectStore,
     experiment_id: str,
@@ -770,9 +1096,9 @@ def _validate_regrade(
             raise InputError(
                 "A replacement case must share the original case's repository_id and initial_prompt."
             )
-        if not _has_judge(scoring) and _needs_judge(graded.case if graded else original):
+        if not _has_judge(scoring) and needs_judge(graded.case if graded else original):
             raise InputError(
-                "Regrade needs a judge for the case's rubric criteria or checks, "
+                "Regrade needs a judge for the case's rubric criteria or judged facts, "
                 "but the experiment's scoring has none."
             )
 

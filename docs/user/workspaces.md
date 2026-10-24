@@ -12,7 +12,9 @@ dryheave store path
 
 `init [PATH]` defaults to the current directory. It writes a private
 `dryheave.toml`, a workspace ownership record and private owned authoring, store
-and runtime directories. It neither scans agent homes nor launches a model.
+and runtime directories, runs `git init` (unless it is already the top level of a
+git repository; a workspace nested inside another repository gets its own) and writes a `.gitignore`. It neither scans agent homes nor
+launches a model.
 `skills install` uses this workspace's `.agents/skills` directory, including from
 nested directories. Explicit `--target PATH` remains available outside workspaces.
 Select a directory your operator agent actually discovers.
@@ -20,12 +22,70 @@ Select a directory your operator agent actually discovers.
 The generated config contains:
 
 ```toml
-schema_version = 1
+schema_version = 2
 authoring = ".dryheave/authoring"
 store = ".dryheave/store"
 runtime = ".dryheave/rt"
 skills = ".agents/skills"
+
+[git]
+commit = "ask"
 ```
+
+## Layout and git
+
+`.dryheave/` holds only the store, runtime and the authoring catalog. Everything
+you or an agent author is visible at the workspace top level and meant to be
+committed:
+
+| Folder | Content |
+|---|---|
+| `voices/` | Voice drafts (`voices/NAME.json`; a taken name gets `-2`, `-3`, ...). |
+| `cases/NAME/` | `case.json`, `reference.patch` and metric scripts. `case draft` writes `cases/NAME/case.json` by default (`--name NAME`, default `case-<session>`; `--out PATH` overrides). |
+| `reports/` | `report RUN` writes `reports/RUN.json` and `reports/RUN.html`; `bench` writes the same for its run. `report --html PATH` keeps writing only that file. |
+| `replays/` | Default `replay` output (`replays/<id>`). Scratch: git-ignored, never committed. |
+
+`.gitignore` lists `.dryheave/`, `__pycache__/`, tool caches and `replays/`;
+re-running `init` appends missing lines without touching your own. Problem
+decisions record `--draft` paths relative to the workspace root.
+
+`init --git-commit ask|auto|off` (and `[git] commit`) controls the checkpoint
+commands (`voice create`, `case draft`, `case calibrate`, `case freeze`,
+`problem freeze`, `bench`, `report`):
+
+- `ask` (default): nothing is committed; the result lists `commit_paths`
+  (workspace-relative POSIX paths) so an operator can offer a commit.
+- `auto`: the command commits only those explicit paths, taken literally, with a fixed message
+  (`voice: create NAME`, `case: draft NAME`, `case: calibrate NAME`,
+  `case: freeze NAME`, `bench: RUN`, `report: RUN`). The commit is built in a
+  temporary index seeded from HEAD, so unrelated staged, intent-to-add or unstaged
+  changes are left alone and your index is only touched, for those paths, after the
+  commit lands (a failed index sync is reported as `commit.index_sync_error`).
+  The commit's parent is the HEAD recorded before the index was seeded, and HEAD
+  moves only if it still points there, so a commit you make from another terminal
+  meanwhile is kept and the checkpoint fails instead of reverting it. The
+  `pre-commit`, `prepare-commit-msg`, `commit-msg` and `post-commit` hooks run
+  through `git hook run` with `GIT_EDITOR=:`; `post-commit` runs after your index
+  is synced. This needs git 2.36 or later: on an older git every checkpoint fails
+  with a message naming the version found. A pre-commit hook that unstages the
+  paths leaves nothing to commit, and a commit-msg hook that empties the message
+  aborts the commit.
+  A merge in progress makes the commit fail,
+  `case freeze` commits the draft plus the hidden files and reference patch it
+  names (and, for a draft at `cases/NAME/case.json`, points the store alias `NAME`
+  at the new case ID, replacing an earlier target and reporting `alias`; the alias
+  lives in the store, is never committed, and `store alias set --replace` re-points it
+  by hand), `case calibrate` commits the `case.json` and referenced files of `cases/<REF>/` only when REF is a case folder
+  name (calibrating by case ID commits nothing), and nothing new to commit is a no-op. A failed commit
+  (hook rejection, missing identity) is reported under `commit.state = "failed"`
+  with the error; the command's own work stays done.
+- `off`: nothing is offered or committed.
+
+Without `--git-commit`, `init` shows a numbered prompt when stdin and stdout are
+terminals (and `--json` is absent); otherwise it uses `ask`. Re-running `init`
+on an existing workspace adds the repository, `.gitignore` and the chosen mode
+without touching the store; a workspace with the old v1 config is not migrated.
+A missing `git` executable is an error unless the mode is `off`.
 
 Relative paths resolve from the config's directory, so moving a workspace moves
 those defaults with it. Absolute paths stay absolute. Paths must be distinct and

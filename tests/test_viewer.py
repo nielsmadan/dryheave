@@ -4,11 +4,12 @@ import re
 
 import pytest
 
-from conftest import HOST, HOSTILE, judged_case_benchmark
+from conftest import HOST, HOSTILE, INTERFACE_FACT, judged_case_benchmark
 from dryheave import journals, storage, viewer
 from dryheave.assessments import assess_run
 from dryheave.bundles import export_bundle, import_bundle
 from dryheave.calibrations import calibrate_case
+from dryheave.cases import PromptStep, TaskFact, load_frozen_case
 from dryheave.errors import InputError, LimitError, NotFoundError
 from dryheave.experiments import create_experiment
 from dryheave.models import ObjectKind
@@ -122,7 +123,7 @@ def test_hostile_transcript_patch_and_evidence_round_trip_verbatim(store, hostil
     assert patch.sha256 == digest(patch.content.encode())
     listing = service.evidence("run", run_id, attempt_id)
     stdout_files = [
-        name for name in listing.files if name.endswith("final/greeting-evidence/stdout.bin")
+        name for name in listing.files if name.endswith("final/punctuation-evidence/stdout.bin")
     ]
     assert stdout_files
     served = service.evidence_file("run", run_id, attempt_id, stdout_files[0])
@@ -263,18 +264,57 @@ def test_portable_report_with_omitted_captures_is_a_degraded_view(store, assesse
     reasoning = service.reasoning("report", report_id, attempt_id)
     assert reasoning.status == "unavailable"
     assert reasoning.criteria == ()
-    assert reasoning.checks == ()
     with pytest.raises(NotFoundError, match="no retained attempt"):
         service.dialogue("report", report_id, "a-unknown")
     with pytest.raises(InputError, match="SHA-256"):
         service.portable_report("not-an-object")
 
 
+def test_review_lanes_come_from_the_run_journal(store, assessed):
+    service = ViewerService(store)
+    attempt_id = assessed.attempts[0].attempt_id
+    view = service.review("run", assessed.run_id, attempt_id)
+    assert view.status == "ok"
+    lanes = view.lanes
+    assert [(line.role, line.author) for line in lanes.conversation] == [
+        ("user", "initial"),
+        ("assistant", None),
+        ("user", "stand_in"),
+        ("assistant", None),
+    ]
+    assert [(scene.kind, scene.purpose, scene.action) for scene in lanes.behind_the_scenes] == [
+        ("stand_in", "reply", "reply"),
+        ("stand_in", "reply", "stop"),
+        ("stop", None, None),
+    ]
+    assert (lanes.outcome, lanes.gaps.assessed, lanes.gaps.facts) == ("pass", True, ())
+    with pytest.raises(NotFoundError, match="no retained attempt"):
+        service.review("run", assessed.run_id, "a-unknown")
+
+
+def test_review_of_a_portable_report_without_captures_says_what_is_missing(
+    store, assessed, tmp_path
+):
+    bundle = tmp_path / "summary.tar"
+    export_bundle(store, assessed.run_id, bundle)
+    imported = ObjectStore(tmp_path / "imported")
+    report_id = import_bundle(imported, bundle).roots[0]
+    service = ViewerService(imported)
+    attempt_id = service.portable_report(report_id).attempts[0].attempt_id
+    lanes = service.review("report", report_id, attempt_id).lanes
+    assert lanes.conversation == ()
+    assert lanes.notes == (
+        "The capture could not be read (not_found).",
+        "Neither a run journal nor a capture is available for this attempt.",
+    )
+    assert (lanes.outcome, lanes.gaps.assessed) == ("pass", True)
+
+
 def test_compare_reuses_report_semantics(store, assessed):
     service = ViewerService(store)
     comparison = service.compare(assessed.run_id, assessed.run_id)
     assert comparison.paired_count == 1
-    assert comparison.pairs[0].before_completion == "pass"
+    assert comparison.pairs[0].before_outcome == "pass"
     with pytest.raises(InputError, match="both comparison variants"):
         service.compare(assessed.run_id, assessed.run_id, before_variant="base")
 
@@ -770,23 +810,37 @@ def test_case_route_serves_the_frozen_case_as_data(store, graded_benchmark, tmp_
     assert rubrics["codebase-consistency"].origin == "default"
     assert "test-quality" not in rubrics
     assert view.disabled_rubrics == ("test-quality",)
-    (deterministic,) = view.deterministic
-    assert deterministic.criterion_id == "greeting"
-    assert deterministic.required is True
-    assert deterministic.description == "Validate punctuation and correct name handling."
-    assert deterministic.command.argv[-1] == "{verifier}/hidden.py"
-    checks = {item.check_id: item for item in view.checks}
-    assert checks["asked"].expect == "yes"
-    assert checks["asked"].only_if is None
-    assert checks["confirmed"].only_if is not None
-    assert (checks["confirmed"].only_if.check_id, checks["confirmed"].only_if.answer) == (
-        "asked",
-        "yes",
+    assert view.phases == ("fix",)
+    facts = {item.fact_id: item for item in view.facts}
+    punctuation = facts["punctuation"]
+    assert (punctuation.kind, punctuation.phase) == ("requirement", "fix")
+    assert punctuation.verifier is not None
+    assert punctuation.verifier.argv[-1] == "{verifier}/hidden.py"
+    assert view.workflow == ()
+    case = load_frozen_case(store, case_id)
+    staged = store.put(
+        ObjectKind.CASE,
+        case.model_copy(
+            update={
+                "allowed_facts": (*case.allowed_facts, TaskFact.model_validate(INTERFACE_FACT)),
+                "workflow": (
+                    PromptStep(step_id="review", prompt="Please review.", after_phase="fix"),
+                ),
+            }
+        ),
+        files=store.read_blobs(case_id),
+        references=(case.persona_id, case.repository_id),
     )
+    staged_view = service.case(staged)
+    interface = {item.fact_id: item for item in staged_view.facts}["interface"]
+    assert (interface.check, interface.verifier) == (INTERFACE_FACT["check"], None)
+    assert [
+        (item.step_id, item.after_phase, item.prompt, item.slash) for item in staged_view.workflow
+    ] == [("review", "fix", "Please review.", False)]
     (metrics,) = view.metrics
     assert metrics.metrics_id == "greeting-metrics"
     assert metrics.command.argv[-1].endswith("measure.py")
-    assert view.budgets.max_turns > 0
+    assert view.budgets.subject_seconds > 0
     assert view.repository_id and view.persona_id
     assert view.baseline_commit
     assert view.reference_patch is True
@@ -815,12 +869,7 @@ def test_judge_reasoning_is_served_for_the_current_assessment(store, graded_benc
     assert rationale["quality"] == "Judged quality."
     assert rationale["code-quality"] == "Judged code quality."
     assert rationale["codebase-consistency"] == "Judged consistency."
-    assert rationale["greeting"] is None
-    check_rationale = {item.check_id: item.rationale for item in view.checks}
-    assert check_rationale == {
-        "asked": "Asked about punctuation.",
-        "confirmed": "Confirmed before finishing.",
-    }
+    assert rationale["punctuation"] is None
     with pytest.raises(NotFoundError, match="no retained attempt"):
         service.reasoning("run", summary.run_id, "a-unknown")
 
@@ -832,7 +881,6 @@ def test_judge_reasoning_is_unavailable_without_a_judge(store, assessed):
     assert view.status == "unavailable"
     assert view.reason_code == "not_retained"
     assert view.criteria == ()
-    assert view.checks == ()
 
 
 @pytest.mark.integration
@@ -873,14 +921,6 @@ def test_regraded_judge_reasoning_ignores_the_superseded_assessment(
                         "rationale": "Regraded consistency.",
                     },
                 ],
-                "checks": [
-                    {"check_id": "asked", "answer": "yes", "rationale": "Regraded: asked."},
-                    {
-                        "check_id": "confirmed",
-                        "answer": "yes",
-                        "rationale": "Regraded: confirmed.",
-                    },
-                ],
             }
         )
     )
@@ -893,6 +933,3 @@ def test_regraded_judge_reasoning_ignores_the_superseded_assessment(
     assert view.assessment_id == second_assessment_id
     rationale = {item.criterion_id: item.rationale for item in view.criteria}
     assert rationale["quality"] == "Regraded quality."
-    check_rationale = {item.check_id: item.rationale for item in view.checks}
-    assert check_rationale["asked"] == "Regraded: asked."
-    assert check_rationale["confirmed"] == "Regraded: confirmed."

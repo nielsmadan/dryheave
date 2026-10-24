@@ -20,7 +20,7 @@ The subject fixture never launches the profile's executable.
 
 The task fixes `normalize_label`: trim surrounding whitespace, collapse internal
 Unicode whitespace, and raise `ValueError` for empty input. Its initial prompt
-requires a clarification before editing; the simulator supplies the empty-input
+requires a clarification before editing; the stand-in supplies the empty-input
 rule. A separate hidden Python verifier checks ordinary, Unicode and empty cases
 and emits `DRYHEAVE_LABEL_ALL_CHECKS_EXECUTED` after all checks pass.
 

@@ -171,7 +171,8 @@ def register_runner(registry: CommandRegistry) -> None:
     run.add_argument(
         "--workflow",
         action="store_true",
-        help="Follow the case's declared or default workflow instead of today's single pass.",
+        help="Inspect the facts at each done point, raise unmet requirements and send the "
+        "case's prompt steps; without it the run stops at the stand-in's first stop.",
     )
     run.add_argument("--runtime-root", type=Path)
     run.add_argument("--tui-test", type=Path)

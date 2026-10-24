@@ -1,5 +1,8 @@
 import argparse
+import hashlib
+import json
 import shlex
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -9,11 +12,14 @@ from dryheave.assessments import assess_run, regrade_run, review_assessment
 from dryheave.bundles import SENSITIVE_CLASSES, export_bundle, import_bundle
 from dryheave.commands import CommandRegistry
 from dryheave.errors import CancelledError, InputError
+from dryheave.filesystem import atomic_write
 from dryheave.report_export import write_report_html
-from dryheave.report_models import RunSetup
+from dryheave.report_models import RunReport, RunSetup
 from dryheave.reports import compare_runs, report_run, run_setups
 from dryheave.result_models import AuditReview
 from dryheave.storage import ObjectStore
+from dryheave.workspace_git import checkpoint
+from dryheave.workspaces import Workspace
 
 REPORT_SENSITIVE_CLASSES = ("assessment-evidence",)
 MAX_REPORT_REFERENCES = 16
@@ -46,7 +52,48 @@ def _assess(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue
     }
 
 
+def report_stem(reports: Sequence[RunReport]) -> str:
+    if len(reports) == 1:
+        return reports[0].run_id
+    joined = "\n".join(sorted(report.run_id for report in reports))
+    return f"combined-{hashlib.sha256(joined.encode()).hexdigest()[:12]}"
+
+
+def report_payload(
+    reports: Sequence[RunReport], setups: Sequence[RunSetup | None]
+) -> dict[str, JsonValue]:
+    if len(reports) == 1:
+        return reports[0].model_dump(mode="json")
+    return {
+        "reports": [report.model_dump(mode="json") for report in reports],
+        "setups": [setup.model_dump(mode="json") for setup in setups if setup is not None],
+    }
+
+
+def write_workspace_report(
+    store: ObjectStore,
+    workspace: Workspace,
+    reports: Sequence[RunReport],
+    setups: Sequence[RunSetup | None],
+    *,
+    include_reasoning: bool,
+) -> tuple[Path, Path]:
+    stem = report_stem(reports)
+    data = workspace.reports_dir / f"{stem}.json"
+    text = json.dumps(report_payload(reports, setups), indent=2, ensure_ascii=False) + "\n"
+    atomic_write(data, text.encode("utf-8"))
+    page = write_report_html(
+        store,
+        list(zip(reports, setups, strict=True)),
+        workspace.reports_dir / f"{stem}.html",
+        include_reasoning=include_reasoning,
+        replace=True,
+    )
+    return data, page
+
+
 def _report(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
+    workspace: Workspace | None = args.benchmark_workspace
     if args.html is None and (args.force or args.include_sensitive):
         raise InputError("--force and --include-sensitive require --html.")
     if len(args.references) > MAX_REPORT_REFERENCES:
@@ -59,21 +106,28 @@ def _report(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue
     setups: tuple[RunSetup | None, ...] = (
         run_setups(store, reports) if len(reports) > 1 else (None,)
     )
+    include_reasoning = "assessment-evidence" in args.include_sensitive
+    message = f"report: {report_stem(reports)}"
     if args.html is not None:
         path = write_report_html(
             store,
             list(zip(reports, setups, strict=True)),
             args.html,
-            include_reasoning="assessment-evidence" in args.include_sensitive,
+            include_reasoning=include_reasoning,
             replace=args.force,
         )
-        return {"path": str(path)}
-    if len(reports) == 1:
-        return reports[0].model_dump(mode="json")
-    return {
-        "reports": [report.model_dump(mode="json") for report in reports],
-        "setups": [setup.model_dump(mode="json") for setup in setups if setup is not None],
-    }
+        return checkpoint(workspace, message, (path,)) | {"path": str(path)}
+    payload = report_payload(reports, setups)
+    if workspace is None:
+        return payload
+    written = write_workspace_report(
+        store, workspace, reports, setups, include_reasoning=include_reasoning
+    )
+    return (
+        payload
+        | checkpoint(workspace, message, written)
+        | {"written": [str(path) for path in written]}
+    )
 
 
 def _compare(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
@@ -144,7 +198,10 @@ def register_results(registry: CommandRegistry) -> None:
         help="Run or portable report IDs; several give one combined report.",
     )
     report.add_argument(
-        "--html", type=Path, help="Write a self-contained shareable HTML report to this path."
+        "--html",
+        type=Path,
+        help="Write a self-contained shareable HTML report to this path "
+        "(default inside a workspace: reports/RUN.json and reports/RUN.html).",
     )
     report.add_argument(
         "--force", action="store_true", help="With --html, overwrite an existing destination."

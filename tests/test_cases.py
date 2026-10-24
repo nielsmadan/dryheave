@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from dryheave.cases import (
-    DeterministicCriterion,
+    FactVerifier,
     FrozenCase,
     TaskFact,
     draft_case,
@@ -25,6 +25,11 @@ from dryheave.repositories import capture_repository, load_repository, materiali
 from dryheave.storage import ObjectStore
 
 FIXTURES = Path(__file__).parent / "fixtures"
+GREETING_VERIFIER = FactVerifier(
+    command=CommandSpec(argv=(sys.executable, "{verifier}/check.py")),
+    entrypoint="check.py",
+    expected_stdout="GREETING_CHECK_EXECUTED",
+)
 
 
 def curated(store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path):
@@ -44,24 +49,21 @@ def curated(store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp
     verifier.write_text(
         'from greet import greet\nassert greet("Ada") == "Hello, Ada"\nprint("GREETING_CHECK_EXECUTED")\n'
     )
-    criterion = DeterministicCriterion(
-        criterion_id="greeting",
-        description="The greeting uses the requested comma and name.",
-        command=CommandSpec(argv=(sys.executable, "{verifier}/check.py")),
-        entrypoint="check.py",
-        expected_stdout="GREETING_CHECK_EXECUTED",
-    )
     return draft.model_copy(
         update={
             "persona": persona,
             "intent_confirmed": True,
             "facts_reviewed": True,
             "unresolved_issues": (),
-            "criteria": (criterion,),
+            "phases": ("fix",),
             "hidden_files": {"check.py": str(verifier)},
             "allowed_facts": (
                 TaskFact(
-                    fact_id="punctuation", text="Use a comma after Hello.", curator_authored=True
+                    fact_id="punctuation",
+                    phase="fix",
+                    text="Use a comma after Hello.",
+                    curator_authored=True,
+                    verifier=GREETING_VERIFIER,
                 ),
             ),
         }
@@ -99,7 +101,8 @@ def test_draft_requires_real_curation(store: ObjectStore, tmp_path: Path) -> Non
     draft = draft_case(store, session_id)
     issues = validate_case(store, draft, tmp_path)
     assert any("starting commit" in issue for issue in issues)
-    assert any("grading" in issue or "verifier" in issue for issue in issues)
+    assert "At least one requirement fact is required." in issues
+    assert "Declare at least one phase in phases." in issues
     assert any("subject-safe" in issue for issue in issues)
     with pytest.raises(InputError):
         freeze_case(store, draft, tmp_path)
@@ -125,17 +128,11 @@ def test_grading_rejects_empty_and_missing_checks(
 ) -> None:
     draft = curated(store, historical_repo, tmp_path)
     with pytest.raises(ValidationError, match="hidden entrypoint"):
-        DeterministicCriterion(
-            criterion_id="fake",
-            description="Always succeeds without checking anything",
-            command=CommandSpec(argv=("true",)),
-            entrypoint="check.py",
-            expected_stdout="DONE",
+        FactVerifier(
+            command=CommandSpec(argv=("true",)), entrypoint="check.py", expected_stdout="DONE"
         )
     with pytest.raises(ValidationError, match="execution evidence"):
-        DeterministicCriterion(
-            criterion_id="fake",
-            description="Always succeeds without checking anything",
+        FactVerifier(
             command=CommandSpec(argv=("python3", "{verifier}/check.py")),
             entrypoint="check.py",
             expected_stdout=" ",
@@ -211,31 +208,26 @@ def test_replay_validation_needs_no_sessions_and_rejects_bad_closure(
     assert load_frozen_case(store, identifier).title == case.title
     with pytest.raises(ValidationError, match="facts_reviewed"):
         FrozenCase.model_validate(case.model_dump() | {"facts_reviewed": False})
-    with pytest.raises(ValidationError, match="required"):
-        FrozenCase.model_validate(case.model_dump() | {"criteria": ()})
+    with pytest.raises(ValidationError, match="requirement fact"):
+        FrozenCase.model_validate(case.model_dump() | {"allowed_facts": ()})
 
 
 @pytest.mark.integration
-def test_reviewed_empty_facts_can_freeze_and_load(
+def test_context_only_facts_cannot_freeze(
     store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path
 ) -> None:
+    context = TaskFact(
+        fact_id="audience", kind="context", text="Users are in Germany.", curator_authored=True
+    )
     draft = curated(store, historical_repo, tmp_path).model_copy(
-        update={
-            "initial_prompt": "Add a greet command that prints Hello, followed by the name.",
-            "allowed_facts": (),
-        }
+        update={"allowed_facts": (context,), "hidden_files": {}}
     )
-    assert validate_case(store, draft, tmp_path) == ()
-    case = load_frozen_case(store, freeze_case(store, draft, tmp_path))
-    assert case.allowed_facts == ()
-    assert case.facts_reviewed is True
-    assert subject_context(case) == {"initial_prompt": draft.initial_prompt, "allowed_facts": []}
-    unreviewed = draft.model_copy(update={"facts_reviewed": False})
-    assert validate_case(store, unreviewed, tmp_path) == (
-        "Curator must review allowed facts and mark facts_reviewed.",
+    assert validate_case(store, draft, tmp_path) == (
+        "At least one requirement fact is required.",
+        "Phase fix has no requirement fact.",
     )
-    with pytest.raises(InputError, match="facts_reviewed"):
-        freeze_case(store, unreviewed, tmp_path)
+    with pytest.raises(InputError, match="requirement fact"):
+        freeze_case(store, draft, tmp_path)
 
 
 @pytest.mark.integration
@@ -302,15 +294,8 @@ def test_authoring_rejects_invalid_persona_inputs_before_publication(
 
 @pytest.mark.parametrize("marker", ["", " ", "x" * 1001])
 def test_failure_execution_marker_requires_bounded_nonblank_text(marker):
-    from pydantic import ValidationError
-
-    from dryheave.cases import DeterministicCriterion
-    from dryheave.models import CommandSpec
-
     with pytest.raises(ValidationError):
-        DeterministicCriterion(
-            criterion_id="check",
-            description="Check the explicit failure evidence contract.",
+        FactVerifier(
             command=CommandSpec(argv=("python3", "{verifier}/check.py")),
             entrypoint="check.py",
             expected_stdout="CHECKS_PASSED",
@@ -318,11 +303,24 @@ def test_failure_execution_marker_requires_bounded_nonblank_text(marker):
         )
 
 
-LEGACY_CONTENT = {
-    "schema_version": 1,
+REQUIREMENT = {
+    "fact_id": "punctuation",
+    "kind": "requirement",
+    "phase": "fix",
+    "text": "Use a comma after Hello.",
+    "check": "greet('Ada') returns 'Hello, Ada'.",
+    "disclosure": "on_request",
+    "verifier": None,
+    "evidence": [],
+    "curator_authored": True,
+}
+
+CONTENT = {
+    "schema_version": 2,
     "title": "Fix the greeting",
     "initial_prompt": "Fix the greeting punctuation.",
-    "allowed_facts": [],
+    "allowed_facts": [REQUIREMENT],
+    "phases": ["fix"],
     "evidence": [
         {
             "session_id": "a" * 64,
@@ -333,7 +331,7 @@ LEGACY_CONTENT = {
     ],
     "setup": [],
     "tool_requirements": [],
-    "budgets": {"max_turns": 4, "subject_seconds": 180, "setup_seconds": 120},
+    "budgets": {"subject_seconds": 180, "setup_seconds": 120},
     "capture_policy": {
         "max_files": 20000,
         "max_bytes": 64 * 1024 * 1024,
@@ -345,7 +343,6 @@ LEGACY_CONTENT = {
         {
             "criterion_id": "quality",
             "kind": "judge",
-            "required": True,
             "rubric": "The greeting keeps its public interface.",
         }
     ],
@@ -353,23 +350,24 @@ LEGACY_CONTENT = {
     "facts_reviewed": True,
     "unresolved_issues": [],
 }
+FROZEN = {
+    "repository_id": "b" * 64,
+    "persona_id": "c" * 64,
+    "source_session_id": "a" * 64,
+    "source_path_hash": "d" * 64,
+    "source_start_event": "e1",
+    "source_end_event": "e1",
+    "hidden_files": {},
+    "reference_patch_file": None,
+}
 
 
-def test_legacy_frozen_case_and_draft_serialize_byte_identically() -> None:
+def test_frozen_case_and_draft_serialize_byte_identically() -> None:
     from dryheave.cases import CaseDraft
     from dryheave.serialization import canonical_json, parse_model
 
-    frozen = LEGACY_CONTENT | {
-        "repository_id": "b" * 64,
-        "persona_id": "c" * 64,
-        "source_session_id": "a" * 64,
-        "source_path_hash": "d" * 64,
-        "source_start_event": "e1",
-        "source_end_event": "e1",
-        "hidden_files": {},
-        "reference_patch_file": None,
-    }
-    draft = LEGACY_CONTENT | {
+    frozen = CONTENT | FROZEN
+    draft = CONTENT | {
         "source_session_id": "a" * 64,
         "start_event": "e1",
         "end_event": "e1",
@@ -386,84 +384,215 @@ def test_legacy_frozen_case_and_draft_serialize_byte_identically() -> None:
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
+        ({"schema_version": 1}, "schema_version"),
+        ({"checks": []}, "checks"),
+        ({"budgets": {"max_turns": 4}}, "max_turns"),
         (
-            {
-                "checks": [
-                    {"check_id": "asked", "question": "Did the agent ask?", "expect": "yes"},
-                    {"check_id": "asked", "question": "Did the agent ask?", "expect": "no"},
-                ]
+            {"criteria": [CONTENT["criteria"][0] | {"required": True}]},
+            "required",
+        ),
+        (
+            {"criteria": [{"criterion_id": "greeting", "kind": "deterministic"}]},
+            "criteria",
+        ),
+        (
+            {"workflow": [{"kind": "inspect", "step_id": "check", "criteria": ["quality"]}]},
+            "workflow",
+        ),
+    ],
+)
+def test_case_content_refuses_removed_v1_shapes(changes, message) -> None:
+    from dryheave.cases import CaseContent
+    from dryheave.serialization import canonical_json
+
+    with pytest.raises(ValidationError, match=message):
+        CaseContent.model_validate_json(canonical_json(CONTENT | changes))
+
+
+@pytest.mark.parametrize(
+    ("fact", "message"),
+    [
+        (REQUIREMENT | {"phase": None}, "requirement fact punctuation must name its phase"),
+        (
+            REQUIREMENT | {"kind": "optional", "phase": None},
+            "optional fact punctuation must name its phase",
+        ),
+        (REQUIREMENT | {"check": None}, "requirement fact punctuation needs a check or a verifier"),
+        (
+            REQUIREMENT | {"kind": "optional", "check": None},
+            "optional fact punctuation needs a check or a verifier",
+        ),
+        (
+            REQUIREMENT | {"kind": "context", "check": None},
+            "context fact punctuation cannot have a phase",
+        ),
+        (
+            REQUIREMENT | {"kind": "context", "phase": None},
+            "context fact punctuation cannot have a check",
+        ),
+        (
+            REQUIREMENT
+            | {
+                "kind": "context",
+                "phase": None,
+                "check": None,
+                "verifier": GREETING_VERIFIER.model_dump(mode="json"),
             },
-            "check IDs must be unique",
+            "context fact punctuation cannot have a verifier",
+        ),
+        (REQUIREMENT | {"check": "TODO: describe"}, "substantive pass condition"),
+    ],
+)
+def test_task_fact_rejects_invalid_kind_shapes(fact, message) -> None:
+    from dryheave.serialization import canonical_json
+
+    with pytest.raises(ValidationError, match=message):
+        TaskFact.model_validate_json(canonical_json(fact))
+
+
+def test_task_fact_accepts_a_verifier_in_place_of_a_check() -> None:
+    from dryheave.serialization import canonical_json
+
+    fact = TaskFact.model_validate_json(
+        canonical_json(
+            REQUIREMENT | {"check": None, "verifier": GREETING_VERIFIER.model_dump(mode="json")}
+        )
+    )
+    assert (fact.check, fact.verifier) == (None, GREETING_VERIFIER)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        (
+            {"allowed_facts": [REQUIREMENT | {"phase": "review"}]},
+            "fact punctuation names undeclared phase review; declared phases: fix",
+        ),
+        ({"phases": ["fix", "fix"]}, "phase names must be unique"),
+        (
+            {"workflow": [{"step_id": "review", "prompt": "/code-review", "after_phase": "ship"}]},
+            "workflow step review runs after undeclared phase ship",
         ),
         (
             {
-                "checks": [
-                    {
-                        "check_id": "kept",
-                        "question": "Was the setting kept?",
-                        "expect": "yes",
-                        "only_if": {"check_id": "asked", "answer": "yes"},
-                    },
-                    {"check_id": "asked", "question": "Did the agent ask?", "expect": "yes"},
-                ]
+                "phases": ["fix", "polish"],
+                "allowed_facts": [
+                    REQUIREMENT,
+                    REQUIREMENT | {"fact_id": "docs", "phase": "polish"},
+                ],
+                "workflow": [
+                    {"step_id": "docs", "prompt": "Update the docs.", "after_phase": "polish"},
+                    {"step_id": "review", "prompt": "/code-review", "after_phase": "fix"},
+                ],
             },
-            "only_if must reference an earlier check",
-        ),
-        (
-            {
-                "checks": [
-                    {
-                        "check_id": "asked",
-                        "question": "Did the agent ask?",
-                        "expect": "yes",
-                        "only_if": {"check_id": "asked", "answer": "yes"},
-                    }
-                ]
-            },
-            "only_if must reference an earlier check",
+            "workflow step review runs after phase fix, earlier than the step before it",
         ),
         ({"disabled_rubrics": ["style"]}, "default rubric IDs: style"),
         ({"disabled_rubrics": ["test-quality", "test-quality"]}, "must be unique"),
     ],
 )
-def test_case_content_rejects_invalid_checks_and_disabled_rubrics(changes, message) -> None:
+def test_case_content_rejects_inconsistent_phases_and_steps(changes, message) -> None:
     from dryheave.cases import CaseContent
     from dryheave.serialization import canonical_json
 
     with pytest.raises(ValidationError, match=message):
-        CaseContent.model_validate_json(canonical_json(LEGACY_CONTENT | changes))
+        CaseContent.model_validate_json(canonical_json(CONTENT | changes))
 
 
-def test_case_checks_and_disabled_rubrics_round_trip() -> None:
-    from dryheave.cases import CaseContent
+def test_task_fact_accepts_check_starting_with_todo() -> None:
+    from dryheave.serialization import canonical_json
+
+    fact = TaskFact.model_validate_json(
+        canonical_json(REQUIREMENT | {"check": "Todo items are listed newest first."})
+    )
+    assert fact.check == "Todo items are listed newest first."
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"phases": [], "allowed_facts": []}, "Declare at least one phase in phases."),
+        ({"allowed_facts": []}, "At least one requirement fact is required."),
+        (
+            {"allowed_facts": [REQUIREMENT | {"kind": "optional"}]},
+            "At least one requirement fact is required.",
+        ),
+        ({"phases": ["fix", "polish"]}, "Phase polish has no requirement fact."),
+        (
+            {"allowed_facts": [REQUIREMENT, REQUIREMENT]},
+            "Allowed fact IDs must be unique.",
+        ),
+        (
+            {"allowed_facts": [REQUIREMENT | {"fact_id": "code-quality"}]},
+            "Fact ID code-quality collides with a grading criterion ID.",
+        ),
+    ],
+)
+def test_frozen_case_requires_complete_phases(changes, message) -> None:
+    from dryheave.serialization import canonical_json
+
+    with pytest.raises(ValidationError, match=message):
+        FrozenCase.model_validate_json(canonical_json(CONTENT | FROZEN | changes))
+
+
+def test_frozen_case_requires_hidden_verifier_entrypoint() -> None:
+    from dryheave.serialization import canonical_json
+
+    fact = REQUIREMENT | {"verifier": GREETING_VERIFIER.model_dump(mode="json")}
+    with pytest.raises(ValidationError, match="hidden verifier entrypoint is missing"):
+        FrozenCase.model_validate_json(canonical_json(CONTENT | FROZEN | {"allowed_facts": [fact]}))
+
+
+def test_phases_and_ordered_prompt_steps_round_trip() -> None:
+    from dryheave.cases import CaseContent, PromptStep
     from dryheave.serialization import canonical_json, parse_model
 
-    payload = LEGACY_CONTENT | {
-        "checks": [
-            {"check_id": "asked", "question": "Did the agent ask first?", "expect": "yes"},
+    payload = CONTENT | {
+        "phases": ["fix", "polish"],
+        "allowed_facts": [
+            REQUIREMENT,
+            REQUIREMENT | {"fact_id": "docs", "phase": "polish", "kind": "requirement"},
+            REQUIREMENT | {"fact_id": "tone", "phase": "polish", "kind": "optional"},
+            REQUIREMENT | {"fact_id": "audience", "kind": "context", "phase": None, "check": None},
+        ],
+        "workflow": [
+            {"kind": "prompt", "step_id": "review", "prompt": "/code-review", "after_phase": "fix"},
             {
-                "check_id": "kept",
-                "question": "Was the old setting kept?",
-                "expect": "no",
-                "only_if": {"check_id": "asked", "answer": "yes"},
+                "kind": "prompt",
+                "step_id": "hint",
+                "prompt": "fix the findings",
+                "answer_hint": "fix Critical and Should Fix findings",
+                "after_phase": "fix",
+            },
+            {
+                "kind": "prompt",
+                "step_id": "docs",
+                "prompt": "Update docs.",
+                "after_phase": "polish",
             },
         ],
         "disabled_rubrics": ["test-quality"],
     }
     content = parse_model(canonical_json(payload), CaseContent)
-    assert content.checks[1].only_if.check_id == "asked"
-    assert content.disabled_rubrics == ("test-quality",)
-    assert parse_model(canonical_json(content), CaseContent) == content
+    assert content.workflow[0] == PromptStep(
+        step_id="review", prompt="/code-review", after_phase="fix"
+    )
+    assert [fact.kind for fact in content.allowed_facts] == [
+        "requirement",
+        "requirement",
+        "optional",
+        "context",
+    ]
+    assert canonical_json(content) == canonical_json(payload)
+    assert "answer_hint" not in canonical_json(content.workflow[0]).decode()
 
 
-def test_legacy_case_without_workflow_keeps_its_object_id(store: ObjectStore) -> None:
+def test_case_without_workflow_omits_empty_optional_fields(store: ObjectStore) -> None:
     from dryheave.cases import CaseContent
-    from dryheave.models import ObjectKind
+    from dryheave.serialization import canonical_json, parse_model
 
-    case = CaseContent(title="Pin case", initial_prompt="Do the thing.")
-    assert "workflow" not in case.model_dump(mode="json")
-    identifier = store.put(ObjectKind.CASE, case)
-    assert identifier == "0e6bc5d8d7c84486d392c055305d09b2fe5238faa2335e5044261a83df4667b7"
+    case = parse_model(canonical_json(CONTENT), CaseContent)
+    assert {"workflow", "metrics", "disabled_rubrics"}.isdisjoint(case.model_dump(mode="json"))
 
 
 @pytest.mark.parametrize(
@@ -482,32 +611,8 @@ def test_prompt_step_names_its_slash_skill(
 ) -> None:
     from dryheave.cases import PromptStep, is_slash
 
-    step = PromptStep(step_id="review", prompt=prompt)
+    step = PromptStep(step_id="review", prompt=prompt, after_phase="fix")
     assert (step.slash, is_slash(prompt), step.skill_name) == (slash, slash, skill_name)
-
-
-def test_workflow_round_trips_prompt_and_inspect_steps() -> None:
-    from dryheave.cases import CaseContent, InspectStep, PromptStep
-    from dryheave.serialization import canonical_json, parse_model
-
-    payload = LEGACY_CONTENT | {
-        "workflow": [
-            {"kind": "prompt", "step_id": "review", "prompt": "/code-review --quick"},
-            {
-                "kind": "prompt",
-                "step_id": "hint",
-                "prompt": "fix the findings",
-                "answer_hint": "fix Critical and Should Fix findings",
-            },
-            {"kind": "inspect", "step_id": "inspect-quality", "criteria": ["quality"]},
-        ]
-    }
-    content = parse_model(canonical_json(payload), CaseContent)
-    assert content.workflow[0] == PromptStep(step_id="review", prompt="/code-review --quick")
-    assert content.workflow[1].answer_hint == "fix Critical and Should Fix findings"
-    assert content.workflow[2] == InspectStep(step_id="inspect-quality", criteria=("quality",))
-    assert canonical_json(content) == canonical_json(payload)
-    assert "answer_hint" not in canonical_json(content.workflow[0]).decode()
 
 
 @pytest.mark.parametrize(
@@ -515,158 +620,85 @@ def test_workflow_round_trips_prompt_and_inspect_steps() -> None:
     [
         (
             [
-                {"kind": "prompt", "step_id": "dup", "prompt": "/code-review"},
-                {"kind": "prompt", "step_id": "dup", "prompt": "update the docs"},
+                {"step_id": "dup", "prompt": "/code-review", "after_phase": "fix"},
+                {"step_id": "dup", "prompt": "update the docs", "after_phase": "fix"},
             ],
             "workflow step IDs must be unique",
         ),
         (
-            [{"kind": "inspect", "step_id": "inspect-unknown", "criteria": ["not-a-criterion"]}],
-            "inspects unknown criteria",
-        ),
-        (
-            [{"kind": "inspect", "step_id": "inspect-disabled", "criteria": ["test-quality"]}],
-            "inspects unknown criteria",
-        ),
-        (
-            [{"kind": "inspect", "step_id": "inspect-dup", "criteria": ["quality", "quality"]}],
-            "inspects duplicate criteria",
-        ),
-        (
-            [{"kind": "prompt", "step_id": "no-turn", "prompt": "/clear"}],
+            [{"step_id": "no-turn", "prompt": "/clear", "after_phase": "fix"}],
             "command with no model turn",
         ),
         (
-            [{"kind": "prompt", "step_id": "no-turn", "prompt": "/compact please"}],
+            [{"step_id": "no-turn", "prompt": "/compact please", "after_phase": "fix"}],
             "command with no model turn",
         ),
         (
-            [{"kind": "prompt", "step_id": "mention", "prompt": " $code-review --quick"}],
+            [{"step_id": "mention", "prompt": " $code-review --quick", "after_phase": "fix"}],
             (
                 r"step mention starts with '\$': write skill steps as /name; "
                 r"Codex receives them as \$name"
             ),
         ),
         (
-            [{"kind": "prompt", "step_id": "shell", "prompt": "!git status"}],
+            [{"step_id": "shell", "prompt": "!git status", "after_phase": "fix"}],
             "step shell starts with '!': write skill steps as /name",
         ),
+        ([{"step_id": "late", "prompt": "Review it."}], "after_phase"),
     ],
 )
 def test_case_content_rejects_invalid_workflow_steps(workflow, message) -> None:
     from dryheave.cases import CaseContent
     from dryheave.serialization import canonical_json
 
-    payload = LEGACY_CONTENT | {
-        "disabled_rubrics": ["test-quality"],
-        "workflow": workflow,
-    }
     with pytest.raises(ValidationError, match=message):
-        CaseContent.model_validate_json(canonical_json(payload))
+        CaseContent.model_validate_json(canonical_json(CONTENT | {"workflow": workflow}))
 
 
-def test_inspect_step_rejects_answer_hint_field() -> None:
-    from dryheave.cases import InspectStep
-    from dryheave.serialization import canonical_json
+def test_fact_selectors_split_by_kind_and_verifier() -> None:
+    from dryheave.cases import (
+        CaseContent,
+        graded_facts,
+        judged_facts,
+        requirement_facts,
+        verifier_facts,
+    )
+    from dryheave.serialization import canonical_json, parse_model
 
-    with pytest.raises(ValidationError, match="answer_hint"):
-        InspectStep.model_validate_json(
-            canonical_json(
-                {"step_id": "inspect", "criteria": ["quality"], "answer_hint": "not allowed"}
-            )
-        )
-
-
-def test_inspect_step_may_cite_a_non_disabled_default_rubric() -> None:
-    from dryheave.cases import CaseContent, InspectStep
-    from dryheave.serialization import canonical_json
-
-    payload = LEGACY_CONTENT | {
-        "workflow": [
-            {"kind": "inspect", "step_id": "inspect-code-quality", "criteria": ["code-quality"]}
-        ]
+    verified = REQUIREMENT | {
+        "fact_id": "verified",
+        "check": None,
+        "verifier": GREETING_VERIFIER.model_dump(mode="json"),
     }
-    content = CaseContent.model_validate_json(canonical_json(payload))
-    assert content.workflow == (
-        InspectStep(step_id="inspect-code-quality", criteria=("code-quality",)),
+    optional = REQUIREMENT | {"fact_id": "tone", "kind": "optional"}
+    context = REQUIREMENT | {"fact_id": "audience", "kind": "context", "phase": None, "check": None}
+    case = parse_model(
+        canonical_json(CONTENT | {"allowed_facts": [REQUIREMENT, verified, optional, context]}),
+        CaseContent,
     )
 
+    def ids(facts) -> list[str]:
+        return [fact.fact_id for fact in facts]
 
-@pytest.mark.parametrize(
-    ("enabled", "inspected", "has_required", "expected"),
-    [
-        (False, True, True, ()),
-        (True, False, True, ()),
-        (True, True, False, ()),
-    ],
-)
-def test_effective_workflow_default_cases(enabled, inspected, has_required, expected) -> None:
-    from dryheave.cases import CaseContent, RubricCriterion, effective_workflow
-
-    criteria = (
-        (RubricCriterion(criterion_id="quality", required=True, rubric="Quality rubric text."),)
-        if has_required
-        else (
-            RubricCriterion(criterion_id="quality", required=False, rubric="Quality rubric text."),
-        )
-    )
-    case = CaseContent(title="t", initial_prompt="p", criteria=criteria)
-    assert effective_workflow(case, enabled=enabled, inspected=inspected) == expected
+    assert ids(graded_facts(case)) == ["punctuation", "verified", "tone"]
+    assert ids(requirement_facts(case)) == ["punctuation", "verified"]
+    assert ids(verifier_facts(case)) == ["verified"]
+    assert ids(judged_facts(case)) == ["punctuation", "tone"]
 
 
-def test_effective_workflow_builds_the_default_inspect_step() -> None:
-    from dryheave.cases import CaseContent, InspectStep, RubricCriterion, effective_workflow
+def test_a_case_needs_a_judge_for_judged_facts_or_rubric_criteria() -> None:
+    from dryheave.cases import CaseContent, needs_judge
+    from dryheave.serialization import canonical_json, parse_model
 
-    case = CaseContent(
-        title="t",
-        initial_prompt="p",
-        criteria=(
-            RubricCriterion(criterion_id="quality", required=True, rubric="Quality rubric text."),
-            RubricCriterion(criterion_id="style", required=False, rubric="Style rubric text here."),
-        ),
-    )
-    assert effective_workflow(case, enabled=True, inspected=True) == (
-        InspectStep(step_id="inspect-required", criteria=("quality",)),
-    )
+    verified = REQUIREMENT | {"check": None, "verifier": GREETING_VERIFIER.model_dump(mode="json")}
+    rubric = {"criterion_id": "quality", "kind": "judge", "rubric": "Keeps the interface."}
 
+    def case(**changes) -> CaseContent:
+        return parse_model(canonical_json(CONTENT | changes), CaseContent)
 
-def test_effective_workflow_prefers_the_declared_workflow() -> None:
-    from dryheave.cases import CaseContent, PromptStep, RubricCriterion, effective_workflow
-
-    workflow = (PromptStep(step_id="review", prompt="/code-review --quick"),)
-    case = CaseContent(
-        title="t",
-        initial_prompt="p",
-        criteria=(
-            RubricCriterion(criterion_id="quality", required=True, rubric="Quality rubric text."),
-        ),
-        workflow=workflow,
-    )
-    assert effective_workflow(case, enabled=True, inspected=True) == workflow
-    assert effective_workflow(case, enabled=True, inspected=False) == workflow
-    assert effective_workflow(case, enabled=False, inspected=True) == ()
-
-
-@pytest.mark.integration
-def test_frozen_case_keeps_declared_checks(
-    store: ObjectStore, historical_repo: tuple[Path, str, str, str], tmp_path: Path
-) -> None:
-    from dryheave.cases import CaseCheck, CheckCondition
-
-    checks = (
-        CaseCheck(check_id="asked", question="Did the agent ask first?", expect="yes"),
-        CaseCheck(
-            check_id="kept",
-            question="Was the old greeting kept?",
-            expect="no",
-            only_if=CheckCondition(check_id="asked", answer="yes"),
-        ),
-    )
-    draft = curated(store, historical_repo, tmp_path).model_copy(
-        update={"checks": checks, "disabled_rubrics": ("test-quality",)}
-    )
-    case = load_frozen_case(store, freeze_case(store, draft, tmp_path))
-    assert (case.checks, case.disabled_rubrics) == (checks, ("test-quality",))
+    assert needs_judge(case(allowed_facts=[REQUIREMENT], criteria=[])) is True
+    assert needs_judge(case(allowed_facts=[verified], criteria=[rubric])) is True
+    assert needs_judge(case(allowed_facts=[verified], criteria=[])) is False
 
 
 METRICS_COMMAND = {
@@ -696,21 +728,13 @@ def test_case_content_rejects_invalid_metrics_commands(changes, message) -> None
     from dryheave.serialization import canonical_json
 
     with pytest.raises(ValidationError, match=message):
-        CaseContent.model_validate_json(canonical_json(LEGACY_CONTENT | changes))
+        CaseContent.model_validate_json(canonical_json(CONTENT | changes))
 
 
 def test_frozen_case_requires_hidden_metrics_entrypoint() -> None:
     from dryheave.serialization import canonical_json
 
-    frozen = LEGACY_CONTENT | {
-        "repository_id": "b" * 64,
-        "persona_id": "c" * 64,
-        "source_session_id": "a" * 64,
-        "source_path_hash": "d" * 64,
-        "source_start_event": "e1",
-        "source_end_event": "e1",
-        "metrics": [METRICS_COMMAND],
-    }
+    frozen = CONTENT | FROZEN | {"metrics": [METRICS_COMMAND]}
     with pytest.raises(ValidationError, match="hidden metrics entrypoint is missing"):
         FrozenCase.model_validate_json(canonical_json(frozen | {"hidden_files": {}}))
     case = FrozenCase.model_validate_json(

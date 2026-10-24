@@ -10,40 +10,43 @@ from pydantic import JsonValue
 from dryheave.bench import (
     CLAUDE_AUTH_VARIABLE,
     JUDGE_BUDGET,
+    STAND_IN_BUDGET,
     VariantChoice,
     attempt_progress_lines,
     bench_draft,
     bench_workflow,
     capture_variants,
     check_case,
+    check_pilot_matches,
     check_snapshots,
-    check_workflow,
     claude_role,
     discard_check,
     launch_check,
     parse_role,
     parse_variant,
+    pilot_budget,
     resumable_run,
-    simulator_budget,
+    run_budget,
     slash_commands,
     summarize,
     summary_live_config,
 )
-from dryheave.cases import load_frozen_case
 from dryheave.commands import CommandRegistry
 from dryheave.drivers.auth import check_codex_auth
 from dryheave.drivers.base import TransportError
 from dryheave.errors import DryheaveError, InputError, MissingSkillError, SnapshotChangedError
-from dryheave.experiment_models import ScoringConfig
 from dryheave.experiments import create_experiment
 from dryheave.host import HostContext
 from dryheave.journals import RunStore
 from dryheave.models import AgentKind
+from dryheave.report_models import RunReport
 from dryheave.reports import report_run
+from dryheave.result_cli import write_workspace_report
 from dryheave.runner import WorkflowPlan, cancellation_signals, run_experiment, run_status
 from dryheave.runner_cli import assess_captured_run
-from dryheave.runner_models import RunOptions
+from dryheave.runner_models import RunBudget, RunOptions
 from dryheave.storage import ObjectStore
+from dryheave.workspace_git import checkpoint
 from dryheave.workspaces import Workspace, resolve_transport, validate_runtime_root
 
 RESUME_ADVICE: dict[type[DryheaveError], str] = {
@@ -115,9 +118,8 @@ def _execute(
     store: ObjectStore,
     experiment_id: str,
     resume: str | None,
-    paths: tuple[Path, Path],
+    options: RunOptions | None,
     *,
-    workflow: bool,
     host: HostContext,
 ) -> str:
     cancelled = Event()
@@ -127,14 +129,7 @@ def _execute(
                 store,
                 None if resume else experiment_id,
                 resume=resume,
-                options=None
-                if resume
-                else RunOptions(
-                    mode="native",
-                    runtime_root=str(paths[0]),
-                    transport=str(paths[1]),
-                    workflow=workflow,
-                ),
+                options=options,
                 cancelled=cancelled,
                 host=host,
             )
@@ -147,26 +142,67 @@ def _execute(
     return summary.run_id
 
 
+BUDGET_FLAGS = (
+    ("max_turns", "--max-turns"),
+    ("stand_in_replies", "--stand-in-replies"),
+    ("max_inspections", "--max-inspections"),
+)
+
+
+def _budget(args: argparse.Namespace, store: ObjectStore) -> RunBudget:
+    given = [flag for name, flag in BUDGET_FLAGS if getattr(args, name) is not None]
+    if args.budget_from is None:
+        defaults = RunBudget().model_dump()
+        return run_budget(
+            **{
+                name: defaults[name] if getattr(args, name) is None else getattr(args, name)
+                for name, _ in BUDGET_FLAGS
+            }
+        )
+    if given:
+        raise InputError(f"--budget-from derives the budget; drop {', '.join(given)}.")
+    derived = pilot_budget(store, args.budget_from)
+    _progress(derived.describe())
+    return derived.budget
+
+
+def _checkpoint_report(
+    store: ObjectStore, workspace: Workspace | None, report: RunReport
+) -> dict[str, JsonValue]:
+    message = f"bench: {report.run_id}"
+    try:
+        written = (
+            write_workspace_report(store, workspace, [report], (None,), include_reasoning=False)
+            if workspace is not None
+            else ()
+        )
+    except (DryheaveError, OSError) as error:
+        return checkpoint(workspace, message, ()) | {"report_error": str(error)}
+    return checkpoint(workspace, message, written) | {"reports": [str(path) for path in written]}
+
+
+def _next_hint(run_id: str, workspace: Workspace | None) -> str:
+    if workspace is not None:
+        return "dryheave view --open   # reports are in the workspace's reports/ folder"
+    return f"dryheave view --open   # or: dryheave report {run_id} --html report.html"
+
+
 def _bench(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     variants = tuple(map(parse_variant, args.variant))
     judge = parse_role(args.judge) if args.judge else None
     inspector = parse_role(args.inspector) if args.inspector else None
     case_id = check_case(store, args.case, judged=judge is not None)
+    budget = _budget(args, store)
     host = HostContext(os.environ, Path.home())
     if CLAUDE_AUTH_VARIABLE not in host.environment:
         raise InputError(
-            f"{CLAUDE_AUTH_VARIABLE} is not set; subjects, simulator and judge cannot authenticate. "
+            f"{CLAUDE_AUTH_VARIABLE} is not set; subjects, stand-in and judge cannot authenticate. "
             "Launch bench from a shell where your Claude credential is injected."
         )
     if any(variant.agent == AgentKind.CODEX for variant in variants):
         check_codex_auth(host.environment)
     judge_recipe = claude_role(judge, args.claude, JUDGE_BUDGET) if judge else None
     inspector_recipe = claude_role(inspector, args.claude, JUDGE_BUDGET) if inspector else None
-    check_workflow(
-        load_frozen_case(store, case_id),
-        workflow=args.workflow,
-        scoring=ScoringConfig(judge=judge_recipe, inspector=inspector_recipe),
-    )
     paths = _native_paths(args)
     profiles = capture_variants(
         store, variants, {AgentKind.CLAUDE: args.claude, AgentKind.CODEX: args.codex}
@@ -174,10 +210,10 @@ def _bench(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]
     draft = bench_draft(
         case_id,
         profiles,
-        simulator=claude_role(
-            parse_role(args.simulator),
+        stand_in=claude_role(
+            parse_role(args.stand_in),
             args.claude,
-            simulator_budget(args.simulator_replies),
+            STAND_IN_BUDGET,
             conversation_policy="design-approval",
         ),
         judge=judge_recipe,
@@ -186,7 +222,11 @@ def _bench(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]
         seed=args.seed,
     )
     experiment_id = create_experiment(store, draft)
-    previous = resumable_run(store, experiment_id, workflow=args.workflow)
+    if args.budget_from is not None:
+        check_pilot_matches(store, args.budget_from, experiment_id, workflow=args.workflow)
+    previous = resumable_run(
+        store, experiment_id, workflow=args.workflow, budget=budget, pilot_run=args.budget_from
+    )
     if previous is not None and previous.finished and not (args.new_run or args.check_only):
         _progress(f"run {previous.run_id} already finished; pass --new-run to spend on another")
         run_id = previous.run_id
@@ -212,8 +252,16 @@ def _bench(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]
             store,
             experiment_id,
             resume,
-            paths,
-            workflow=args.workflow,
+            None
+            if resume is not None and previous is not None and previous.configured
+            else RunOptions(
+                mode="native",
+                runtime_root=str(paths[0]),
+                transport=str(paths[1]),
+                workflow=args.workflow,
+                budget=budget,
+                pilot_run=args.budget_from,
+            ),
             host=host,
         )
     status = run_status(store, run_id)
@@ -222,13 +270,14 @@ def _bench(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]
     stop_reasons = {state.attempt_id: state.stop_reason for state in status.attempts}
     for line in attempt_progress_lines(report, stop_reasons):
         _progress(line)
-    return {
+    workspace: Workspace | None = args.benchmark_workspace
+    return _checkpoint_report(store, workspace, report) | {
         "run_id": run_id,
         "experiment_id": experiment_id,
         "profiles": dict(profiles),
         "live_config": summary_live_config(journal.events),
         "results": summarize(report, stop_reasons),
-        "next": (f"dryheave view --open   # or: dryheave report {run_id} --html report.html"),
+        "next": _next_hint(run_id, workspace),
     }
 
 
@@ -250,7 +299,8 @@ def register_bench(registry: CommandRegistry) -> None:
     parser.add_argument(
         "--inspector",
         metavar="MODEL[@EFFORT]",
-        help="Workflow inspect steps; defaults to the judge's model when a judge is set.",
+        help="Judges the facts at each done point; defaults to the judge's model when a judge "
+        "is set.",
     )
     parser.add_argument(
         "--no-workflow",
@@ -259,12 +309,30 @@ def register_bench(registry: CommandRegistry) -> None:
         default=True,
         help="Run the case's initial prompt only, without its declared or default workflow.",
     )
-    parser.add_argument("--simulator", default="claude-sonnet-4-6@low", metavar="MODEL[@EFFORT]")
+    parser.add_argument("--stand-in", default="claude-sonnet-4-6@low", metavar="MODEL[@EFFORT]")
+    defaults = RunBudget()
     parser.add_argument(
-        "--simulator-replies",
+        "--max-turns",
         type=int,
-        default=14,
-        help="Most replies the simulated user may send; each gets 180 seconds.",
+        help=f"Most subject turns the agent may take before the attempt ends "
+        f"(default {defaults.max_turns}).",
+    )
+    parser.add_argument(
+        "--stand-in-replies",
+        type=int,
+        help="Most calls to the user stand-in; each gets 180 seconds, "
+        f"and all replies together are capped at one hour (default {defaults.stand_in_replies}).",
+    )
+    parser.add_argument(
+        "--max-inspections",
+        type=int,
+        help=f"Most workflow inspections of the agent's work (default {defaults.max_inspections}).",
+    )
+    parser.add_argument(
+        "--budget-from",
+        metavar="PILOT_RUN",
+        help="Derive turns, stand-in replies and inspections from a passed pilot run: "
+        "ceil(used x 1.5) + 5 each. The pilot then joins the summary as a floor variant.",
     )
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)

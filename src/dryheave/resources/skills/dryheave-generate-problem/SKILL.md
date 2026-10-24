@@ -56,7 +56,7 @@ description: Mine and curate supported Dryheave benchmark problems from explicit
    `--text-offset N --text-limit 4000`, joining chunks before parsing. Record missing
    keys as evidence gaps; historical dirty state still needs independent evidence.
 4. Identify task category, exact user-start and inclusive end event, user intent,
-   independent grading opportunities, historical full baseline SHA and any initial
+   independent grading opportunities (observable requirements), historical full baseline SHA and any initial
    uncommitted patch. Verify the SHA against the read-only source repository and
    task history; current HEAD is not a substitute. Record explicit uncertainty.
    A micro-bug flag is a selection preference, never proof of scope or correctness.
@@ -80,49 +80,61 @@ description: Mine and curate supported Dryheave benchmark problems from explicit
 6. Use `dryheave-voice-profile` for a reviewed selected-log voice. Resolve the
    voice by name, never by a pasted ID: run `dryheave voice inspect default --json`
    when the user names no voice, or `voice inspect NAME --json` when they name one.
-   Take `data.id` as the `persona_id`. `voice list --json` recovers existing names
+   Take `data.voice.persona_id` as the `persona_id`. `voice list --json` recovers existing names
    if `default` is absent. Read `data.evidence`: when `sufficient` is false, report
    `genuine` against `threshold` alongside the case rather than presenting the
    voice as characterized. Create a case
-   draft through `case draft SESSION_ID --repo SOURCE_REPO --commit FULL_SHA --start START --end END --out PATH`.
-   Add `--initial-patch PATH` only for verified historical dirty state. Store
-   curator drafts and hidden files under the workspace authoring directory.
+   draft through `case draft SESSION_ID --repo SOURCE_REPO --commit FULL_SHA --start START --end END --name NAME --json`,
+   which writes `cases/NAME/case.json` in the workspace.
+   Add `--initial-patch PATH` only for verified historical dirty state. Keep hidden
+   files and the reference patch beside the draft in `cases/NAME/`. In `ask` mode
+   offer to commit the reported `commit_paths` with `case: draft NAME`; in `auto`
+   report `commit.state`; in `off` say nothing.
    Edit the generated JSON yourself using `dryheave-case` and the public packaged
    `real-workflow.md` (`example write --target FRESH_DIRECTORY`). Ordinary users
    describe preferences and review the result; they need no hand-authored JSON.
-7. Curate title, prompt, safe facts and substantive hidden criteria. Set
-   `persona: null` and the resolved voice's `persona_id`. Keep all case/fact excerpts
-   inside this candidate's source range. Hide future solution, tests, reference
-   fixes and grading internals. Resolve issues before setting review flags.
-   Deterministic checks need trusted hidden entrypoints, bounded argv, success and
-   assertion-failure markers; syntax/import/runtime errors remain verifier errors.
+7. Curate title, prompt, `phases` and `allowed_facts` as `dryheave-case` describes:
+   each requirement fact has a phase, the user-visible `text`, and a precise `check`
+   or a hidden `verifier`. Set `persona: null` and the resolved voice's
+   `persona_id`. Keep all case/fact excerpts inside this candidate's source range.
+   Hide future solution, tests, reference fixes and grading internals; they belong in
+   `check`, `hidden_files` and `reference_patch`, never in fact `text`. Resolve
+   issues before setting review flags. Deterministic verifiers need trusted hidden
+   entrypoints, bounded argv, success and assertion-failure markers; syntax/import/
+   runtime errors remain verifier errors.
 8. Look past this candidate's chosen end event for the author's actual
-   follow-ups — skill invocations such as `/code-review` or `/qa`, manual
-   testing they reported back, docs requests, re-reviews, and how they
-   answered any skill's dialogs — and encode them in order as `workflow`:
-   a `PromptStep` per follow-up prompt (with an `answer_hint` for any dialog
-   it triggers) and an `InspectStep` naming the criteria the author checked
-   at that point. Write that inspect criterion as a dedicated, observable
-   fact — what the user would see using the result, never a file, type or
-   symbol — separate from the correctness criterion from step 7, which stays
-   held out for final grading. Ask the author when a follow-up's intent is
-   unclear rather than guessing one.
-9. Re-run `problem record` for the same candidate with `--state drafted --draft PATH`,
+   follow-ups: skill invocations such as `/code-review` or `/qa`, docs requests,
+   re-reviews, and how they answered any skill's dialogs. Encode them in order as
+   `workflow` prompt steps, each with an `after_phase` (the phase whose requirements
+   must be met before it is sent) and an `answer_hint` for any dialog it triggers.
+   There are no inspect steps: facts are inspected automatically. Ask the author
+   when a follow-up's intent is unclear rather than guessing one.
+9. Re-run `problem record` for the same candidate with `--state drafted --draft cases/NAME/case.json`,
    all reviewed evidence/rationales, and `--dirty-state clean` or `patch` matching
    the repository snapshot. Then run `problem validate REQUEST CANDIDATE --expect-revision REVISION`.
    Use its returned revision for `problem freeze REQUEST CANDIDATE --expect-revision REVISION`.
    These helpers bind draft and hidden-file bytes. Any request edit invalidates
-   prior validation; any file edit requires validation again. Inspect the frozen
-   `case_id`, then run `dryheave case calibrate CASE_ID --json` before subject
-   spend. Retain `data.id` and review `data.calibration.status`: `demonstrated`
-   requires observed baseline failure/reference success for each deterministic
-   criterion; `ineffective` identifies a passing baseline; `unavailable` includes
-   missing references and verifier errors; judge-only cases are `not_applicable`.
-   Inspect `case calibration CALIBRATION_ID --json` and its retained `files` with
-   `--evidence PATH` (paged using `--offset N --limit N`). Verifier copies do not
-   run `case.setup`; provide required tools and declared environment references.
-   Correct the draft/hidden verifier and freeze a new case before recalibrating;
-   an older calibration always describes its original immutable case ID.
+   prior validation; any file edit requires validation again. Freezing in `ask` mode
+   reports `commit_paths`: offer to commit them with `case: freeze NAME`. Freezing a
+   draft at `cases/NAME/case.json` also points the alias `NAME` at the frozen case
+   (reported as `data.alias`). `data.alias_error` means it did not move: when
+   `NAME` already points at another kind of object, rename the case folder or move
+   that alias first, as the message says, and never `--replace` it; only after an
+   I/O failure run `dryheave store alias set NAME CASE_ID --replace`. Inspect the frozen
+   `case_id` and ask which judge model to use. Then run
+   `dryheave case calibrate NAME --judge MODEL[@EFFORT] --json` (the judge is
+   required when any fact has no verifier) before subject spend. Retain `data.id`
+   and review `data.calibration.status` and `data.flagged`: `demonstrated` means
+   every requirement and optional fact was unmet on the baseline and met on the
+   reference; `ineffective` lists facts met on the baseline or unmet on the
+   reference; `unavailable` includes unclear verdicts, missing references and
+   verifier errors. Inspect `case calibration CALIBRATION_ID --json` and its
+   retained `files` with `--evidence PATH` (paged using `--offset N --limit N`).
+   Verifier copies do not run `case.setup`; provide required tools and declared
+   environment references. Correct the draft/hidden verifier and freeze a new case
+   before recalibrating; an older calibration always describes its original
+   immutable case ID. Then pilot, review and iterate with `dryheave-case` (steps 11
+   to 15) before any benchmark.
 10. Return frozen/drafted/rejected/unresolved candidates separately, their scope
    and baseline reasoning, gaps and next action. Use `problem inspect REQUEST` to
    recover progress and `problem list` to find requests. Changing sources requires

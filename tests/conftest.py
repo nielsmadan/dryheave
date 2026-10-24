@@ -5,6 +5,7 @@ import sys
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -32,6 +33,11 @@ class ExamplePayload(StrictModel):
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def default_store_in_tmp(tmp_path_factory, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path_factory.mktemp("xdg-data")))
 
 
 @pytest.fixture
@@ -274,8 +280,8 @@ def build_historical_repo(root: Path) -> tuple[Path, str, str, str]:
 
 
 def build_benchmark(store, historical_repo, root: Path) -> ExperimentDraft:
-    from dryheave.cases import DeterministicCriterion, TaskFact, draft_case, freeze_case
-    from dryheave.controller_models import ControllerRecipe, ScriptStep, SimulatorDecision
+    from dryheave.cases import FactVerifier, TaskFact, draft_case, freeze_case
+    from dryheave.controller_models import ControllerRecipe, ScriptStep, StandInDecision
     from dryheave.experiment_models import FixtureTurn, VariantSpec
     from dryheave.logs.service import import_session
     from dryheave.models import CommandSpec
@@ -303,23 +309,21 @@ def build_benchmark(store, historical_repo, root: Path) -> ExperimentDraft:
                     unknown_answer_policy="Say when a fact is unknown.",
                     reviewed_subject_safe=True,
                 ),
+                "phases": ("fix",),
                 "allowed_facts": (
                     TaskFact(
                         fact_id="punctuation",
+                        phase="fix",
                         text="Use a comma after Hello.",
                         curator_authored=True,
+                        verifier=FactVerifier(
+                            command=CommandSpec(argv=(sys.executable, "{verifier}/hidden.py")),
+                            entrypoint="hidden.py",
+                            expected_stdout="PRIVATE_VERIFIER_SENTINEL",
+                        ),
                     ),
                 ),
                 "hidden_files": {"hidden.py": str(verifier)},
-                "criteria": (
-                    DeterministicCriterion(
-                        criterion_id="greeting",
-                        description="Validate punctuation and correct name handling.",
-                        command=CommandSpec(argv=(sys.executable, "{verifier}/hidden.py")),
-                        entrypoint="hidden.py",
-                        expected_stdout="PRIVATE_VERIFIER_SENTINEL",
-                    ),
-                ),
             }
         ),
         root,
@@ -331,11 +335,11 @@ def build_benchmark(store, historical_repo, root: Path) -> ExperimentDraft:
         name="Greeting",
         cases=("task",),
         variants=(VariantSpec(name="base", profile="subject"),),
-        simulator=ControllerRecipe(
+        stand_in=ControllerRecipe(
             script=(
                 ScriptStep(
                     assistant="Which punctuation?",
-                    decision=SimulatorDecision(
+                    decision=StandInDecision(
                         action="reply",
                         text="Use a comma after Hello.",
                         fact_ids=("punctuation",),
@@ -344,7 +348,7 @@ def build_benchmark(store, historical_repo, root: Path) -> ExperimentDraft:
                 ),
                 ScriptStep(
                     assistant="Done.",
-                    decision=SimulatorDecision(
+                    decision=StandInDecision(
                         action="stop", reason="The subject reported its implementation."
                     ),
                 ),
@@ -398,9 +402,17 @@ def build_graded_benchmark(store, benchmark) -> ExperimentDraft:
         case.model_copy(
             update={
                 "reference_patch_file": "reference.patch",
-                "criteria": tuple(
-                    item.model_copy(update={"expected_failure_stdout": "GREETING_ASSERTION_FAILED"})
-                    for item in case.criteria
+                "allowed_facts": tuple(
+                    item.model_copy(
+                        update={
+                            "verifier": item.verifier.model_copy(
+                                update={"expected_failure_stdout": "GREETING_ASSERTION_FAILED"}
+                            )
+                        }
+                    )
+                    if item.verifier
+                    else item
+                    for item in case.allowed_facts
                 ),
             }
         ),
@@ -456,11 +468,11 @@ def build_hostile_run(store, graded_benchmark) -> tuple[str, str]:
         files=files,
         references=(case.persona_id, case.repository_id),
     )
-    script = graded_benchmark.simulator.script
+    script = graded_benchmark.stand_in.script
     draft = graded_benchmark.model_copy(
         update={
             "cases": (changed,),
-            "simulator": graded_benchmark.simulator.model_copy(
+            "stand_in": graded_benchmark.stand_in.model_copy(
                 update={"script": (script[0].model_copy(update={"assistant": HOSTILE}), script[1])}
             ),
             "fixture": (
@@ -491,16 +503,36 @@ def build_calibrated(store, graded_benchmark) -> str:
     return calibrate_case(store, graded_benchmark.cases[0])
 
 
+FINAL_JUDGE = """
+import json, pathlib, sys
+root = pathlib.Path(ROOT)
+request = json.load(sys.stdin)
+if "facts" not in request:
+    print((root / "response.json").read_text())
+    raise SystemExit(0)
+count = len(list(root.glob("fact-request-*.json")))
+(root / f"fact-request-{count}.json").write_text(json.dumps(request))
+verdicts = root / "fact-verdicts.json"
+answers = json.loads(verdicts.read_text()) if verdicts.exists() else [{}]
+answer = answers[min(count, len(answers) - 1)]
+judgments = [
+    {
+        "fact_id": item["fact_id"],
+        "verdict": answer.get(item["fact_id"], "met"),
+        "observation": "The greeting reads as asked.",
+        "evidence": "greet.py:2",
+    }
+    for item in request["facts"]
+    if answer.get(item["fact_id"]) != "missing"
+]
+print(json.dumps({"judgments": judgments, "uncovered": answer.get("uncovered", [])}))
+"""
+
+
 def judged_case_benchmark(store, graded_benchmark, tmp_path):
     import json as jsonlib
 
-    from dryheave.cases import (
-        CaseCheck,
-        CheckCondition,
-        MetricsCommand,
-        RubricCriterion,
-        load_frozen_case,
-    )
+    from dryheave.cases import MetricsCommand, RubricCriterion, load_frozen_case
     from dryheave.controller_models import ControllerRecipe
     from dryheave.experiment_models import ScoringConfig
     from dryheave.models import CommandSpec, ObjectKind
@@ -523,19 +555,6 @@ def judged_case_benchmark(store, graded_benchmark, tmp_path):
                     criterion_id="quality", rubric="The greeting keeps its public interface."
                 ),
             ),
-            "checks": (
-                CaseCheck(
-                    check_id="asked",
-                    question="Did the agent ask which punctuation to use?",
-                    expect="yes",
-                ),
-                CaseCheck(
-                    check_id="confirmed",
-                    question="Did the agent confirm the punctuation before finishing?",
-                    expect="yes",
-                    only_if=CheckCondition(check_id="asked", answer="yes"),
-                ),
-            ),
             "metrics": (
                 MetricsCommand(
                     metrics_id="greeting-metrics",
@@ -552,12 +571,7 @@ def judged_case_benchmark(store, graded_benchmark, tmp_path):
         ObjectKind.CASE, case, files=files, references=(case.persona_id, case.repository_id)
     )
     script = tmp_path / "judge.py"
-    script.write_text(
-        "import pathlib,sys\n"
-        f"root = pathlib.Path({str(tmp_path)!r})\n"
-        "sys.stdin.buffer.read()\n"
-        'print((root / "response.json").read_text())\n'
-    )
+    script.write_text(FINAL_JUDGE.replace("ROOT", repr(str(tmp_path))))
     (tmp_path / "response.json").write_text(
         jsonlib.dumps(
             {
@@ -576,18 +590,6 @@ def judged_case_benchmark(store, graded_benchmark, tmp_path):
                         "criterion_id": "codebase-consistency",
                         "outcome": "pass",
                         "rationale": "Judged consistency.",
-                    },
-                ],
-                "checks": [
-                    {
-                        "check_id": "asked",
-                        "answer": "yes",
-                        "rationale": "Asked about punctuation.",
-                    },
-                    {
-                        "check_id": "confirmed",
-                        "answer": "yes",
-                        "rationale": "Confirmed before finishing.",
                     },
                 ],
             }
@@ -615,33 +617,57 @@ outcome = outcomes[min(count, len(outcomes) - 1)]
 if outcome == "broken":
     print("not json")
     raise SystemExit(0)
-rationale = "The greeting reads oddly when used." if outcome == "fail" else "Reads well."
+def judged(fact_id):
+    value = outcome.get(fact_id, "pass") if isinstance(outcome, dict) else outcome
+    verdict = {"pass": "met", "fail": "unmet"}.get(value, value)
+    observation = "The greeting reads oddly when used." if verdict == "unmet" else "Reads well."
+    return {
+        "fact_id": fact_id,
+        "verdict": verdict,
+        "observation": observation,
+        "evidence": "greet.py:2",
+    }
 print(json.dumps({
-    "judgments": [
-        {"criterion_id": item["criterion_id"], "outcome": outcome, "rationale": rationale}
-        for item in request["criteria"]
-    ],
+    "judgments": [judged(item["fact_id"]) for item in request["facts"]],
     "usage": {"output": 7, "provenance": "fixture"},
 }))
 """
+INTERFACE_FACT = {
+    "fact_id": "interface",
+    "phase": "fix",
+    "text": "Keep greet's public interface.",
+    "check": "greet still takes exactly one name argument and returns a string.",
+    "curator_authored": True,
+}
 
 
-def workflow_benchmark(store, graded_benchmark, tmp_path, *, outcomes=("pass",), workflow=None):
+def workflow_benchmark(  # noqa: PLR0913
+    store, graded_benchmark, tmp_path, *, outcomes=("pass",), workflow=None, facts=(), phases=None
+):
     import json as jsonlib
 
-    from dryheave.cases import load_frozen_case
+    from dryheave.cases import TaskFact, load_frozen_case
     from dryheave.controller_models import ControllerRecipe
     from dryheave.models import CommandSpec, ObjectKind
 
     benchmark, case_id = judged_case_benchmark(store, graded_benchmark, tmp_path)
-    if workflow is not None:
-        case = load_frozen_case(store, case_id)
-        case_id = store.put(
-            ObjectKind.CASE,
-            case.model_copy(update={"workflow": workflow}),
-            files=store.read_blobs(case_id),
-            references=(case.persona_id, case.repository_id),
-        )
+    case = load_frozen_case(store, case_id)
+    case_id = store.put(
+        ObjectKind.CASE,
+        case.model_copy(
+            update={
+                "allowed_facts": (
+                    *case.allowed_facts,
+                    TaskFact.model_validate(INTERFACE_FACT),
+                    *(TaskFact.model_validate(fact) for fact in facts),
+                ),
+                "workflow": workflow or (),
+                "phases": phases or case.phases,
+            }
+        ),
+        files=store.read_blobs(case_id),
+        references=(case.persona_id, case.repository_id),
+    )
     root = tmp_path / "inspector"
     root.mkdir()
     (root / "outcomes.json").write_text(jsonlib.dumps(list(outcomes)))
@@ -658,6 +684,52 @@ def workflow_benchmark(store, graded_benchmark, tmp_path, *, outcomes=("pass",),
             "scoring": benchmark.scoring.model_copy(update={"inspector": inspector}),
         }
     ), root
+
+
+FIXED_GREETING = 'def greet(name):\n    return "Hello, " + name\n'
+FIX_REPLY = "When I greet someone there is no comma after Hello."
+
+
+def broken_then_fixed(benchmark, *, max_calls=4):
+    from dryheave.controller_models import RoleBudget, ScriptStep, StandInDecision
+    from dryheave.experiment_models import FixtureTurn
+
+    broken = benchmark.fixture[1].model_copy(update={"files": {"added.txt": "new task file\n"}})
+    return benchmark.model_copy(
+        update={
+            "fixture": (
+                benchmark.fixture[0],
+                broken,
+                FixtureTurn(
+                    prompt=FIX_REPLY, assistant="Fixed.", files={"greet.py": FIXED_GREETING}
+                ),
+            ),
+            "stand_in": benchmark.stand_in.model_copy(
+                update={
+                    "budget": RoleBudget(max_calls=max_calls),
+                    "script": (
+                        *benchmark.stand_in.script,
+                        ScriptStep(
+                            match="contains",
+                            assistant="Done.",
+                            decision=StandInDecision(
+                                action="reply",
+                                text=FIX_REPLY,
+                                fact_ids=("interface",),
+                                reason="Using the greeting shows the comma is missing.",
+                            ),
+                        ),
+                        ScriptStep(
+                            assistant="Fixed.",
+                            decision=StandInDecision(
+                                action="stop", reason="The greeting now works."
+                            ),
+                        ),
+                    ),
+                },
+            ),
+        }
+    )
 
 
 DIALOG_RULE = "\u2500" * 60
@@ -1021,3 +1093,24 @@ def hostile_run(store, graded_benchmark, request) -> tuple[str, str]:
     if rebuilds_repository(request):
         return build_hostile_run(store, graded_benchmark)
     return request.getfixturevalue("baseline").hostile_run
+
+
+@pytest.fixture
+def git_identity(monkeypatch):
+    for name, value in {
+        "GIT_AUTHOR_NAME": "Fixture",
+        "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+        "GIT_COMMITTER_NAME": "Fixture",
+        "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+
+@pytest.fixture
+def short_runtime():
+    path = (Path(".cache") / ("w" + uuid4().hex[:5])).absolute()
+    yield path
+    if path.exists():
+        shutil.rmtree(path)

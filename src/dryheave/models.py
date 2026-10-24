@@ -62,7 +62,7 @@ class ObjectKind(StrEnum):
     CASE = "case"
     PROFILE = "profile"
     EXPERIMENT = "experiment"
-    SIMULATOR = "simulator"
+    STAND_IN = "stand-in"
     SCORING = "scoring"
     RESULT = "result"
     CAPTURE = "capture"

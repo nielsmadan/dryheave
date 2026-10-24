@@ -57,7 +57,7 @@ the selected agent version and retain its exact generated argv.
 Freeze selected settings/instructions/skill resources with `profile capture`,
 inspect the saved profile, then preflight. Pin the subject executable/version,
 model, effort, native arguments, trust/permission choices and launcher explicitly.
-Do the same for simulator and optional judge recipes. See the
+Do the same for user stand-in and optional judge recipes. See the
 [packaged real workflow](../../src/dryheave/resources/examples/real-workflow.md).
 
 ```sh
@@ -73,7 +73,7 @@ The absolute runtime root plus `/` and a 10-character attempt child must fit
 `too-long`; Dryheave never silently relocates it. Every attempt creates fresh
 repository/profile/runtime directories. Preserve the foreground runner until it
 returns; the transport controller owns its terminal and known writers. Unknown
-UI, permission, auth and trust dialogs can stop as `needs_input`. The simulator
+UI, permission, auth and trust dialogs can stop as `needs_input`. The stand-in
 cannot approve them. Do not resend a prompt after ambiguous native delivery.
 
 Normal HOME is preserved by default for browser/device/native tool configuration.
@@ -85,7 +85,7 @@ sources/auth/permission observations. An isolated HOME is an explicit policy
 with recorded tool/auth consequences, not a complete host sandbox.
 
 Historical snapshots isolate repository objects and retain selected reachable
-ancestry. They do not prevent the subject, simulator, judge or verifier from
+ancestry. They do not prevent the subject, stand-in, judge or verifier from
 accessing the host, network, original sources, browser or devices. Audit checks
 retain observed suspicious access and corruption separately from task quality;
 missing telemetry makes coverage partial. Do not present native audit as access
@@ -103,7 +103,7 @@ gives its `CODEX_AUTH_FILE` reference one. It binds `auth.json` under
 `$CODEX_HOME` or `~/.codex` (your own Codex login) when its variable is unset,
 and accepts a `~/` value. A relative or `~user/` value, or a file that does not
 exist, is refused at launch. References from `--auth-file-env` and
-`--simulator-auth-file-env` carry no default, whatever the variable is called:
+`--stand-in-auth-file-env` carry no default, whatever the variable is called:
 the variable must hold an absolute path, so they never fall back to your login.
 Normal token refresh can write through the link to its original source, so
 `acknowledge_source_writes: true` is mandatory in the frozen recipe. Cleanup
@@ -118,7 +118,7 @@ authentication mechanism for the selected native version. Consult
 Explicit shell launchers preserve their declared semantics, but startup files,
 wrapper definitions, permissions and auth availability remain unverified effects.
 
-The subject, adaptive simulator and optional judge are separate roles that may
+The subject, adaptive stand-in and optional judge are separate roles that may
 each incur charges. Reports retain unknown usage and all-attempt spend, including
 failed launches, interruptions, retries and audit exclusions. A saved dated price
 table gives an estimate under that version/currency; it is not a current market
@@ -127,7 +127,7 @@ can establish zero model spending; absent native telemetry cannot.
 
 ## Compatibility evidence
 
-Friendly setup also has a version-gated Claude 2.1.278 print-mode simulator and
+Friendly setup also has a version-gated Claude 2.1.278 print-mode stand-in and
 judge adapter. It uses `--tools ''`, `--strict-mcp-config` with an empty server
 set, empty setting sources, explicit disabled hooks/plugins and
 `--no-session-persistence`. It never uses `--bare` (which disables OAuth), a
@@ -176,6 +176,6 @@ Never treat a transport-only smoke or synthetic offline pass as a native agent p
 
 Frozen inputs, exact argv and observed/requested versions support repeatable
 comparisons. Live model services, browser/device/network state, host tools and
-unobserved descendants can still vary. Compare matched cases, scoring, simulator,
+unobserved descendants can still vary. Compare matched cases, scoring, stand-in,
 repetition, seed and mode; report sample count/spread without inferring significance
 from a pair of trials.

@@ -752,7 +752,7 @@ SHIPPED_PROMPTS = {
 
 
 @pytest.mark.parametrize("name", sorted(SHIPPED_PROMPTS))
-def test_shipped_permission_and_mode_prompts_never_reach_the_simulated_user(name):
+def test_shipped_permission_and_mode_prompts_never_reach_the_stand_in(name):
     agent, text = SHIPPED_PROMPTS[name]
     screen = Screen(text=text, exited=None, cursor={"x": 0, "y": 0})
     assert (dialog(agent, screen).reason, answerable_screen(agent, screen)) == (
@@ -835,7 +835,7 @@ UNCHROMED_PROMPTS = {
 
 
 @pytest.mark.parametrize("name", sorted(UNCHROMED_PROMPTS))
-def test_prompts_without_question_tool_chrome_never_reach_the_simulated_user(name):
+def test_prompts_without_question_tool_chrome_never_reach_the_stand_in(name):
     agent, text = UNCHROMED_PROMPTS[name]
     screen = Screen(text=text, exited=None, cursor={"x": 0, "y": 0})
     assert (dialog(agent, screen).reason, answerable_screen(agent, screen)) == (
@@ -932,7 +932,7 @@ def test_codex_question_chrome_needs_both_the_question_header_and_the_submit_foo
     ] == [True, False, False]
 
 
-def test_droid_screens_never_reach_the_simulated_user():
+def test_droid_screens_never_reach_the_stand_in():
     screen = Screen(text=FIX_SCOPE_SCREEN, exited=None, cursor={"x": 0, "y": 0})
     assert (dialog(AgentKind.DROID, screen).reason, answerable_screen(AgentKind.DROID, screen)) == (
         UNRECOGNIZED,

@@ -1,9 +1,9 @@
 ---
 name: dryheave-voice-profile
-description: Curate a reusable Dryheave user voice from explicitly selected imported coding-agent sessions. Use when asked to create a voice profile, capture my conversational style, or prepare the simulated user for a mined benchmark. Do not infer native permissions from writing style.
+description: Curate a reusable Dryheave user voice from explicitly selected imported coding-agent sessions. Use when asked to create a voice profile, capture my conversational style, or prepare the user stand-in for a mined benchmark. Do not infer native permissions from writing style.
 ---
 
-# Curate the simulated user's voice
+# Curate the user stand-in's voice
 
 ## Instructions
 
@@ -112,7 +112,7 @@ only the excerpts that survived.
    judge and report, not to assume. Select short conversational excerpts that
    show a trait you can point at. Exclude secrets, solutions, reference fixes,
    hidden tests and answers to the benchmark task. Do not copy full logs.
-11. Measure the user's typing mechanics before writing any trait. A simulator
+11. Measure the user's typing mechanics before writing any trait. A stand-in
    copies surface form far more readily than it follows a description of style,
    so these carry most of the resemblance. Measure only text the user typed:
    the CLI's `genuine` set can still hold text the user did not write, such as a
@@ -154,7 +154,7 @@ only the excerpts that survived.
      together, think aloud across clauses joined by "and", "so" or "then", or give
      a reason for an ask ("If I have to check it by hand anyway, no point in...").
      Read the messages for these moves rather than searching for set phrases;
-   - the user's actual wording in each situation the simulator answers: approving
+   - the user's actual wording in each situation the stand-in answers: approving
      a proposal, telling the agent to go on, correcting a misunderstanding,
      steering a change the user already has in mind, and reporting a problem after
      trying the result. Measure each situation's traits within that situation, not
@@ -186,7 +186,7 @@ only the excerpts that survived.
    explaining why each retained excerpt demonstrates voice without injected
    instructions or solution content.
 13. Write `persona.instructions` in this order: VOICE, MECHANICS, SITUATIONS, a
-   NEVER line and AUTHORITY. The simulator reads every rule as applying to the
+   NEVER line and AUTHORITY. The stand-in reads every rule as applying to the
    reply in hand, so write each block for that reader.
 
    VOICE comes first, in four to six sentences, each with a quoted message: how
@@ -194,7 +194,7 @@ only the excerpts that survived.
    the change they want or describe what they saw, whether they say "we" for the
    shared work, whether they float statements as questions or chain short
    questions, and how they give reasons. A persona that opens with statistics
-   reads as a rulebook, and the simulator answers it with careful, correct and
+   reads as a rulebook, and the stand-in answers it with careful, correct and
    generic replies that a reader still recognizes as a model.
 
    MECHANICS follows, built from step 11, kept to about a dozen lines:
@@ -204,7 +204,7 @@ only the excerpts that survived.
      marks and `...`; never an em dash, en dash or semicolon". State the majority
      behavior as the rule and an exception as an exception with its frequency.
    - Never summarize mechanics with a loose label such as "lowercase-leaning",
-     "casual", "terse" or "types fast". A simulator exaggerates a label into a
+     "casual", "terse" or "types fast". A stand-in exaggerates a label into a
      style the user does not have; lowercase starts and a lowercase `i` are the
      usual result.
    - Give typos as a rate with the slip kinds you found ("about one message in
@@ -221,47 +221,47 @@ only the excerpts that survived.
 
    SITUATIONS follows MECHANICS:
    - Give the problem report shape from step 11 its own rule, with its length. A
-     simulator handed a list of facts writes all of them up as one polished
+     stand-in handed a list of facts writes all of them up as one polished
      specification unless the persona says how much this user puts in one
      message, how loosely they word it and whether they hedge.
    - Give asking for a change its own rule, separate from reporting a symptom.
      Case facts often state how something should behave, which is what the user
      already has in mind. If step 11 found the user proposing changes when
-     steering, tell the simulator to say such a fact as this user's suggestion in
+     steering, tell the stand-in to say such a fact as this user's suggestion in
      their own proposal forms ("We should...", "So can we...?", "I think we...?"),
      and that a suggestion is already the ask, with no "Can you fix..." to close
-     it. Without this rule a simulator lists every symptom it was shown and asks
+     it. Without this rule a stand-in lists every symptom it was shown and asks
      the agent to work out the fix, which is a bug report, not this user.
-   - Write that choice as a test on the facts the simulator holds, not as two
+   - Write that choice as a test on the facts the stand-in holds, not as two
      options side by side: when a fact the reply may share says how the thing
      should behave, propose that; describe the symptom only when no such fact
-     applies. Offered "report the symptom, or propose the change", a simulator
+     applies. Offered "report the symptom, or propose the change", a stand-in
      takes the first every time, and every reply after an inspection comes out
      in the same symptom frame.
    - Say how much of the symptom survives next to a proposal, from step 11:
      usually a few loose words or none, since the suggestion implies what went
-     wrong. The protocol has the simulator say what it saw, and it is handed an
+     wrong. The protocol has the stand-in say what it saw, and it is handed an
      inspection written by a careful tester, so without this rule it repeats
      that tester's detail, which element overlaps which and where, and then
      adds the proposal as a polished closing question. The user never measured
      those details and does not type them.
-   - Give one rule per simulator situation with two to four of the user's own
+   - Give one rule per stand-in situation with two to four of the user's own
      variants, quoted, with the situation's own rates from step 11, and tell the
-     simulator to pick one variant and adapt it rather than blend them. List
+     stand-in to pick one variant and adapt it rather than blend them. List
      the variants and proposal forms most common first, each with its count:
-     a stateless simulator takes the first form it is shown every time, so a
+     a stateless stand-in takes the first form it is shown every time, so a
      form the user typed twice in a hundred messages, listed first, becomes
      every reply's opening. Otherwise
      an approval comes out as a polite "Yes, please apply it" that mixes a rare
      "Please do both." into the common "yes, do it.", and a single prescribed
      form such as "ask for the fix as a Can you question" becomes the closing
      line of every reply.
-   - The simulator protocol forces some elements into every reply of a
+   - The stand-in protocol forces some elements into every reply of a
      situation, such as asking for a fix after an inspection. Give the user's
      own ways of doing that, and name the bare form a model defaults to ("Can you
      fix that?") as not the user's unless step 11 found it common there.
-   - Tell the simulator not to reuse the frame of its own earlier messages in the
-     dialogue. A simulator that found one shape that satisfies the persona writes
+   - Tell the stand-in not to reuse the frame of its own earlier messages in the
+     dialogue. A stand-in that found one shape that satisfies the persona writes
      every reply in it, and a run of replies all built as symptom, symptom, "Can
      you fix...?" is a template no person types.
 
@@ -273,33 +273,32 @@ only the excerpts that survived.
    what the user opens a correction with ("No,", "Uhm,", or the fact itself),
    and that a new problem after a partial fix starts with the problem, or with
    the user's own acknowledgement such as "Alright,", never with praise.
-14. Write every persona field in the user's own mechanics. The simulator copies
+14. Write every persona field in the user's own mechanics. The stand-in copies
    the register of the whole persona, not only the examples: a dash or semicolon
    in `instructions`, `disclosure_policy` or `unknown_answer_policy` reappears in
    its replies. Use in your own sentences only the punctuation the user types,
    and before creating the voice search all three fields for each mark that step
    11 found absent, typographic dashes and curly quotes above all. In
-   `disclosure_policy`, tell the simulator to put a disclosed fact in the user's
+   `disclosure_policy`, tell the stand-in to put a disclosed fact in the user's
    own loose words, never in the fact's text: case facts are precise curator
-   prose, and a simulator that repeats them sounds like the curator. Say in
+   prose, and a stand-in that repeats them sounds like the curator. Say in
    particular that a fact's summary phrase for an outcome ("keep a consistent
    shape", "stay aligned") becomes the concrete change or symptom the user would
    mention, in the way step 11 found the user proposing fixes. Do not tell the
-   simulator never to volunteer a fix when the facts state behavior the user
+   stand-in never to volunteer a fix when the facts state behavior the user
    wants: the protocol already decides when a fact may be shared, and once it may,
    a fact about how something should behave is the user's own idea and comes out
    as their suggestion. Keep the ban for causes, code, file contents and tests.
-   Tell the simulator to share one fact at a time, the one the latest message
-   makes most pressing, and to leave the rest for later turns, since this user
-   rarely says everything at once.
+   Pacing is the harness's job, so do not tell the stand-in how many facts to
+   share at once.
 15. Choose examples whose mechanics match the measured proportions. If most typed
    messages start with a capital letter, most examples must too; a set dominated
    by short lowercase acknowledgements teaches a lowercase voice. Include several
-   multi-sentence messages so the simulator sees how the user capitalizes and
+   multi-sentence messages so the stand-in sees how the user capitalizes and
    punctuates within a message, keep typo-bearing examples near the measured
    rate, and keep each opener near its measured share. Include the user's own
    problem reports and fix requests when the chosen sessions have them, since
-   those are the replies a simulator writes most often after an inspection, and
+   those are the replies a stand-in writes most often after an inspection, and
    messages where the user proposes a change, thinks aloud or chains questions,
    since those show the voice that mechanics rules cannot.
 16. Ground every policy in a retained excerpt. Before writing a trait, name the
@@ -320,6 +319,13 @@ only the excerpts that survived.
    evidence and the triage. Inspect with `voice inspect NAME --json`, which
    reports the same computed evidence and the same triage from the record, and
    whose `warnings` carries the sampling warnings read back from that triage.
+   By default the draft is `voices/NAME.json` (a numeric suffix is added if that exists); use the `path` that `voice draft` reports. `voice create` reports `git_commit` and
+   `commit_paths`: in `ask` mode offer to commit exactly those paths with
+   `voice: create NAME` (`git commit -m "voice: create NAME" -- PATH`, adding the
+   file first if untracked); in `auto` report `commit.state` (`committed`,
+   `nothing_to_commit` or `failed` with its `error`); in `off` say nothing.
+   Wording problems found later in a pilot are tested without a new run:
+   `dryheave replay RUN_ID --attempt ATTEMPT_ID --all-stand-in --voice NEW_NAME`.
    Pass the voice **name** to `dryheave-generate-problem`, which resolves `default`
    when none is given. A later voice change needs a new name; existing
    experiments retain their frozen persona.

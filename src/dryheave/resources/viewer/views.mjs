@@ -1,12 +1,12 @@
 import { badge, block, bullets, caseLink, definitions, el, heading, idChip, note, section, table } from "./dom.mjs";
 import { NO_VARIANT } from "./filters.mjs";
 import {
-  CHECK_MARKS,
   INSPECTION_CLASSES,
   INSPECTION_MARKS,
+  OUTCOME_CLASSES,
+  OUTCOME_MARKS,
   TOPLINE_LEGEND,
   UNKNOWN,
-  checkLabel,
   describeAudit,
   describeCalibration,
   describeCompletion,
@@ -250,8 +250,8 @@ function resultsSummaryTable(groups) {
       moneyCell((group) => group.cost_by_role?.subject),
     ],
     [
-      `Cost by role: simulator (API-equivalent estimate, ${RETAINED})`,
-      moneyCell((group) => group.cost_by_role?.simulator),
+      `Cost by role: stand-in (API-equivalent estimate, ${RETAINED})`,
+      moneyCell((group) => group.cost_by_role?.stand_in),
     ],
     [
       `Cost by role: judge (API-equivalent estimate, ${RETAINED})`,
@@ -277,8 +277,8 @@ function resultsSummaryTable(groups) {
     [`Accepted turns (${ELIGIBLE})`, (group) => formatDistribution(group.accepted_turns, whole)],
     [`Subject duration (${ELIGIBLE})`, (group) => formatDistribution(group.durations, formatSeconds)],
     [
-      `Simulator replies, help needed (${ELIGIBLE})`,
-      (group) => formatDistribution(group.simulator_replies, whole),
+      `Ordinary stand-in replies, fix requests excluded (${ELIGIBLE})`,
+      (group) => formatDistribution(group.stand_in_replies, whole),
     ],
   ];
   return table(
@@ -290,28 +290,80 @@ function resultsSummaryTable(groups) {
   );
 }
 
-function factsDisclosedText(summary) {
-  if (!summary) {
-    return "not measured";
-  }
-  const facts = summary.facts ?? [];
-  const suffix = summary.unmeasured ? ` (${summary.unmeasured} attempt(s) not measured)` : "";
-  if (facts.length === 0) {
-    return `none disclosed${suffix}`;
-  }
-  return `${facts.map((item) => `${item.fact_id} (${item.kind} ×${item.count})`).join(", ")}${suffix}`;
+function counts(values) {
+  const entries = Object.entries(values ?? {}).sort((left, right) => (left[0] < right[0] ? -1 : 1));
+  return entries.length === 0 ? "none" : entries.map(([key, value]) => `${key} ${value}`).join(", ");
 }
 
-function helpNeededTable(groups) {
-  return table(
-    "Simulator replies and facts disclosed by variant, among eligible attempts.",
-    ["Variant", "Simulator replies", "Facts disclosed"],
-    groups.map((group) => [
-      groupLabel(group),
-      formatDistribution(group.simulator_replies, (value) => formatNumber(value, 0)),
-      factsDisclosedText(group.help_needed),
-    ]),
-  );
+function phaseCorrections(corrections) {
+  if (corrections.length === 0) {
+    return "none";
+  }
+  return corrections
+    .map((item) => `${item.phase}: ${item.rounds} rounds (${item.raised.length > 0 ? item.raised.join(", ") : "none raised"})`)
+    .join("; ");
+}
+
+function factGroupColumn(facts) {
+  if (!facts) {
+    return [UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN];
+  }
+  const reasons = Object.keys(facts.outcome_reasons ?? {}).length > 0 ? ` (${counts(facts.outcome_reasons)})` : "";
+  return [
+    `${counts(facts.outcomes)}${reasons}`,
+    facts.pass_rate === null ? UNKNOWN : formatRate(facts.pass_rate),
+    formatDistribution(facts.independence),
+    formatDistribution(facts.corrections, (value) => formatNumber(value, 0)),
+    formatCount(facts.unreached_attempts),
+    formatCount(facts.uncovered ?? 0),
+  ];
+}
+
+function factCell(facts, caseId, factId) {
+  const row = (facts?.facts ?? []).find((item) => item.case_id === caseId && item.fact_id === factId);
+  if (!row) {
+    return "not measured";
+  }
+  return [
+    `met ${row.met}/${row.attempts}`,
+    `own ${row.own}, asked ${row.elicited}, corrected ${row.corrected}, unmet ${row.unmet}, unreached ${row.unreached}`,
+    `raised ${row.raised_rate === null ? UNKNOWN : formatRate(row.raised_rate)}`,
+    `first check met ${row.first_inspection_met_rate === null ? "no inspection" : formatRate(row.first_inspection_met_rate)}`,
+    `regressions ${row.regressions}`,
+    `disputed ${row.disputed}, unclear ${row.unclear}`,
+  ].join(" · ");
+}
+
+function factsResultsTables(groups, labels) {
+  const columns = groups.map((group) => factGroupColumn(group.facts));
+  const measures = ["Outcomes", "Pass rate", "Independence", "Corrections", "Phases unreached", "Uncovered problems"];
+  const keys = new Map();
+  for (const group of groups) {
+    for (const item of group.facts?.facts ?? []) {
+      keys.set(`${item.case_id}\u0000${item.fact_id}`, item);
+    }
+  }
+  const rows = [...keys.values()];
+  return [
+    table(
+      "Outcomes over the latest attempt per trial; independence, corrections and facts over eligible attempts.",
+      ["Measure", ...groups.map(groupLabel)],
+      measures.map((label, index) => [label, ...columns.map((column) => column[index])]),
+    ),
+    rows.length === 0
+      ? note("No fact results are retained for any variant.")
+      : table(
+          "Per fact: final verdicts, how each met fact was reached, how often the user stand-in raised it, and the first inspection's verdict.",
+          ["Case", "Fact", "Kind", "Phase", ...groups.map(groupLabel)],
+          rows.map((item) => [
+            caseLink(item.case_id, labelNames(labels, item.case_id)),
+            item.fact_id,
+            item.kind,
+            item.phase ?? "–",
+            ...groups.map((group) => factCell(group.facts, item.case_id, item.fact_id)),
+          ]),
+        ),
+  ];
 }
 
 function criteriaResultsTable(groups, labels) {
@@ -331,34 +383,6 @@ function criteriaResultsTable(groups, labels) {
           return "not measured";
         }
         return `${formatCount(item.passes)}/${formatCount(item.graded)} pass · mean score ${formatNumber(item.scores.mean, 2)}`;
-      }),
-    ]),
-  );
-}
-
-function checksResultsTable(groups, labels) {
-  const keys = unionCaseKeys(groups, "checks", "check_id");
-  if (keys.length === 0) {
-    return note("No case checks are retained for any variant.");
-  }
-  return table(
-    "Per-check outcomes and agreement across repetitions by variant, among eligible attempts.",
-    ["Case", "Check", ...groups.map(groupLabel)],
-    keys.map(([caseId, checkId]) => [
-      caseLink(caseId, labelNames(labels, caseId)),
-      checkId,
-      ...groups.map((group) => {
-        const item = findByCaseAndId(group.checks, caseId, checkId, "check_id");
-        if (!item) {
-          return "not measured";
-        }
-        return [
-          `pass ${formatCount(item.passes)}`,
-          `fail ${formatCount(item.fails)}`,
-          `n/a ${formatCount(item.not_applicable)}`,
-          `error ${formatCount(item.errors)}`,
-          `agreement ${item.agreement === null ? UNKNOWN : formatRate(item.agreement)}`,
-        ].join(" · ");
       }),
     ]),
   );
@@ -403,18 +427,24 @@ function resourceCells(item) {
   );
 }
 
-function groupCheckCell(topline, checkId) {
-  const tally = (topline.checks ?? []).find((item) => item.check_id === checkId);
-  if (!tally || tally.answered === 0) {
+function outcomeCell(outcome, reason) {
+  if (!outcome) {
     return toplineCell("–");
   }
-  const tone = tally.passes === tally.answered ? "pass" : tally.passes === 0 ? "fail" : "";
-  return toplineCell(`${tally.passes}/${tally.answered}`, `check ${tone}`.trim());
+  const text = `${OUTCOME_MARKS[outcome] ?? "?"}${reason && outcome !== "pass" ? ` ${reason}` : ""}`;
+  return toplineCell(text, `check ${OUTCOME_CLASSES[outcome] ?? ""}`.trim());
 }
 
-function attemptCheckCell(checks, checkId) {
-  const outcome = (checks ?? []).find((item) => item.check_id === checkId)?.outcome;
-  return outcome ? toplineCell(CHECK_MARKS[outcome] ?? "?", `check ${outcome}`) : toplineCell("");
+function groupOutcomeCell(passes, graded) {
+  if (!graded) {
+    return toplineCell("–");
+  }
+  const tone = passes === graded ? "pass" : passes === 0 ? "fail" : "";
+  return toplineCell(`${passes}/${graded}`, `check ${tone}`.trim());
+}
+
+function independenceCell(value) {
+  return value === null || value === undefined ? toplineCell("–") : toplineCell(formatNumber(value), "number");
 }
 
 function firstInspectionCell(value) {
@@ -424,7 +454,7 @@ function firstInspectionCell(value) {
   return toplineCell(INSPECTION_MARKS[value] ?? "?", `check ${INSPECTION_CLASSES[value] ?? value}`);
 }
 
-function fixRequestsCell(value) {
+function correctionsCell(value) {
   return value === null || value === undefined ? toplineCell("–") : toplineCell(formatCount(value), "number");
 }
 
@@ -440,7 +470,7 @@ function groupFirstInspectionCell(passes, attempts) {
   return toplineCell(`${passes}/${attempts}`, `check ${tone}`.trim());
 }
 
-function groupFixRequestsCell(value) {
+function groupCorrectionsCell(value) {
   return value === null || value === undefined ? toplineCell("–") : toplineCell(formatNumber(value), "number");
 }
 
@@ -452,27 +482,48 @@ function groupWorkflowCell(completed, attempts) {
   return toplineCell(`${completed}/${attempts}`, `check ${tone}`.trim());
 }
 
+function budgetText(budget) {
+  return `${budget.max_turns} turns, ${budget.stand_in_replies} stand-in replies, ${budget.max_inspections} inspections`;
+}
+
+function floorRow(floor) {
+  const topline = floor?.group?.topline;
+  if (!topline) {
+    return [];
+  }
+  return [
+    el("tr", { className: "variant" }, [
+      toplineCell(`${floor.label} · floor · budget ${budgetText(floor.budget)}`),
+      groupOutcomeCell(topline.passes ?? 0, topline.graded ?? 0),
+      independenceCell(topline.independence),
+      turnsCell(topline.turns),
+      groupFirstInspectionCell(topline.first_inspection_passes, topline.first_inspection_attempts ?? 0),
+      groupCorrectionsCell(topline.corrections),
+      groupWorkflowCell(topline.workflows_completed, topline.workflow_attempts ?? 0),
+      ...resourceCells(topline),
+    ]),
+  ];
+}
+
 function toplineTable(report) {
   const groups = (report.groups ?? []).filter((group) => group.topline);
   if (groups.length === 0) {
     return null;
   }
-  const checkIds = [
-    ...new Set(groups.flatMap((group) => (group.topline.checks ?? []).map((item) => item.check_id))),
-  ];
   const head = el(
     "tr",
     {},
     [
       "Variant / attempt",
+      "Outcome",
+      "Independence",
       "Turns",
       "First check",
-      "Fix requests",
+      "Corrections",
       "Workflow",
       "Time",
       "Tokens",
       "Cost",
-      ...checkIds.map(checkLabel),
     ].map((text) => el("th", { text, attrs: { scope: "col" } })),
   );
   const rows = groups.flatMap((group) => {
@@ -483,26 +534,29 @@ function toplineTable(report) {
     return [
       el("tr", { className: "variant" }, [
         toplineCell(`${variant} · mean of ${group.topline.attempts}`),
+        groupOutcomeCell(group.topline.passes ?? 0, group.topline.graded ?? 0),
+        independenceCell(group.topline.independence),
         turnsCell(group.topline.turns),
         groupFirstInspectionCell(group.topline.first_inspection_passes, group.topline.first_inspection_attempts ?? 0),
-        groupFixRequestsCell(group.topline.fix_requests),
+        groupCorrectionsCell(group.topline.corrections),
         groupWorkflowCell(group.topline.workflows_completed, group.topline.workflow_attempts ?? 0),
         ...resourceCells(group.topline),
-        ...checkIds.map((checkId) => groupCheckCell(group.topline, checkId)),
       ]),
       ...members.map((attempt) =>
         el("tr", {}, [
           el("td", { className: "attempt", text: shortId(attempt.attempt_id, 10), attrs: { title: attempt.attempt_id } }),
+          outcomeCell(attempt.topline.outcome, attempt.topline.outcome_reason),
+          independenceCell(attempt.topline.independence),
           turnsCell(attempt.topline.turns),
           firstInspectionCell(attempt.topline.first_inspection),
-          fixRequestsCell(attempt.topline.fix_requests),
+          correctionsCell(attempt.topline.corrections),
           workflowCell(attempt.topline.workflow),
           ...resourceCells(attempt.topline),
-          ...checkIds.map((checkId) => attemptCheckCell(attempt.topline.checks, checkId)),
         ]),
       ),
     ];
   });
+  rows.push(...floorRow(report.floor));
   return el("div", { className: "scroller" }, [
     el("table", { className: "topline" }, [
       el("caption", { text: "Per variant and attempt, agent only." }),
@@ -523,9 +577,8 @@ export function resultsView(report, labels) {
     section("Results", [
       resultsSummaryTable(groups),
     ]),
-    section("Help needed", [helpNeededTable(groups)]),
+    section("Facts", factsResultsTables(groups, labels)),
     section("Criteria", [criteriaResultsTable(groups, labels)]),
-    section("Checks", [checksResultsTable(groups, labels)]),
     section("Metrics", [metricsResultsTable(groups, labels)]),
   ];
 }
@@ -555,7 +608,7 @@ export function attemptsTable(attempts, selectedId) {
       attempt.variant ?? NO_VARIANT,
       attempt.stage,
       attempt.mode ?? UNKNOWN,
-      attempt.result?.completion ?? "no assessment",
+      attemptOutcome(attempt.result),
       attempt.eligibility ?? UNKNOWN,
       exclusions.length === 0 ? "none" : exclusions.join(", "),
       attempt.raw_evidence,
@@ -569,13 +622,29 @@ export function attemptsTable(attempts, selectedId) {
       "Variant",
       "Stage",
       "Mode",
-      "Completion",
+      "Outcome",
       "Eligibility",
       "Exclusions",
       "Raw evidence",
     ],
     rows,
   );
+}
+
+function attemptOutcome(result) {
+  if (!result) {
+    return "no assessment";
+  }
+  return result.outcome_reason && result.outcome !== "pass"
+    ? `${result.outcome} (${result.outcome_reason})`
+    : result.outcome ?? UNKNOWN;
+}
+
+function criterionRole(criterion) {
+  if (criterion.kind === "judge") {
+    return "rubric";
+  }
+  return criterion.required ? "requirement" : "optional";
 }
 
 function criteriaCard(result, reasoning) {
@@ -586,11 +655,11 @@ function criteriaCard(result, reasoning) {
   return section("Criteria", [
     table(
       "Criterion outcomes with their calibration evidence and the judge's reasoning.",
-      ["Criterion", "Kind", "Required", "Outcome", "Score", "Calibration", "Error", "Rationale"],
+      ["Criterion", "Kind", "Role", "Outcome", "Score", "Calibration", "Error", "Rationale"],
       result.criteria.map((criterion) => [
         criterion.criterion_id,
         criterion.kind,
-        criterion.required ? "required" : "optional",
+        criterionRole(criterion),
         criterion.outcome,
         criterion.score === null ? UNKNOWN : formatNumber(criterion.score, 3),
         describeCalibration(criterion.calibration),
@@ -618,23 +687,42 @@ function criteriaCard(result, reasoning) {
   ]);
 }
 
-function checksCard(result, reasoning) {
-  const checks = result?.checks ?? [];
-  if (checks.length === 0) {
-    return section("Checks", [note("No case checks are retained for this attempt.")]);
+function factsCard(result) {
+  const graded = result?.facts ?? [];
+  const account = result?.fact_account ?? null;
+  if (!result || (graded.length === 0 && !account)) {
+    return section("Facts", [note("No fact results are retained for this attempt.")]);
   }
-  const rationale = reasoningMap(reasoning?.checks, "check_id");
-  return section("Checks", [
+  const progress = new Map((account?.facts ?? []).map((item) => [item.fact_id, item]));
+  const verdicts = new Map(graded.map((item) => [item.fact_id, item]));
+  const ids = [...new Set([...verdicts.keys(), ...progress.keys()])];
+  const list = (values) => (values && values.length > 0 ? values.join(", ") : "none");
+  return section("Facts", [
+    definitions([
+      ["Outcome", attemptOutcome(result)],
+      ["Independence", account?.independence === null || !account ? UNKNOWN : formatNumber(account.independence)],
+      ["Corrections", account ? formatCount(account.fix_rounds) : UNKNOWN],
+      ["Corrections by phase", account ? phaseCorrections(account.corrections ?? []) : UNKNOWN],
+      ["Ordinary stand-in replies", account ? formatCount(account.stand_in_replies) : UNKNOWN],
+      ["Phases reached", list(account?.reached_phases)],
+      ["Phases unreached", list(account?.unreached_phases)],
+    ]),
     table(
-      "Case-declared check outcomes with the judge's reasoning.",
-      ["Check", "Outcome", "Answer", "Rationale"],
-      checks.map((check) => [
-        check.check_id,
-        check.outcome,
-        check.answer ?? UNKNOWN,
-        rationale.get(check.check_id) ?? "reasoning not included",
+      "Final verdict, credit, times raised and first inspection per fact.",
+      ["Fact", "Verdict", "Credit", "Raised", "First check", "Observation", "Evidence"],
+      ids.map((id) => [
+        id,
+        verdicts.get(id)?.verdict ?? "not graded",
+        progress.get(id)?.credit ?? UNKNOWN,
+        progress.has(id) ? formatCount(progress.get(id).raised) : UNKNOWN,
+        progress.has(id) ? progress.get(id).first_inspection ?? "–" : UNKNOWN,
+        verdicts.get(id)?.observation ?? "",
+        verdicts.get(id)?.evidence ?? "",
       ]),
     ),
+    (result.uncovered ?? []).length > 0
+      ? el("div", {}, [heading(4, "Problems no fact covers"), bullets(result.uncovered)])
+      : null,
   ]);
 }
 
@@ -665,22 +753,6 @@ function metricsCard(result) {
   );
 }
 
-function helpNeededCard(result) {
-  const help = result?.help_needed;
-  if (!help) {
-    return section("Help needed", [note("No help-needed accounting is retained for this attempt.")]);
-  }
-  const list = (values) => (values.length === 0 ? "none" : values.join(", "));
-  return section("Help needed", [
-    definitions([
-      ["Simulator replies", formatCount(help.simulator_replies)],
-      ["Facts disclosed", list(help.facts_disclosed)],
-      ["Disclosed proactively", list(help.proactive_facts)],
-      ["Disclosed on request", list(help.on_request_facts)],
-    ]),
-  ]);
-}
-
 function workflowCard(result) {
   const workflow = result?.workflow;
   if (!workflow) {
@@ -691,7 +763,7 @@ function workflowCard(result) {
       ? note("No workflow events are retained for this attempt.")
       : table(
           "Workflow events in order.",
-          ["Step", "Kind", "Outcome", "Turn", "Failed criteria"],
+          ["Step", "Kind", "Outcome", "Turn", "Unmet facts"],
           workflow.events.map((event) => [
             event.step_id,
             event.kind,
@@ -706,9 +778,11 @@ function workflowCard(result) {
       ["Completed steps", formatCount(workflow.completed_steps)],
       ["Inspections", formatCount(workflow.inspections)],
       ["Fix requests", formatCount(workflow.fix_requests)],
+      ["Fallback replies", formatCount(workflow.fallbacks ?? 0)],
       ["Dialogs answered", formatCount(workflow.dialogs_answered)],
       ["First inspection", workflow.first_inspection],
       ["Final inspection", workflow.final_inspection],
+      ["Completed", workflow.completed ? "yes" : "no"],
       ["Inspection time", formatSeconds(workflow.inspection_seconds)],
     ]),
     events,
@@ -947,6 +1021,170 @@ function evidenceCard(listing, file) {
   return section("Verifier evidence", children);
 }
 
+const SCENE_LABELS = {
+  stand_in: "stand-in",
+  fallback: "fallback fix reply",
+  inspection: "inspection",
+  correction: "correction",
+  prompt_step: "workflow prompt",
+  stop: "stopped",
+};
+
+function present(value) {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.join(", ") : null;
+  }
+  return value === null || value === undefined || value === "" ? null : String(value);
+}
+
+function filled(entries) {
+  return definitions(
+    entries
+      .map(([label, value]) => [label, present(value)])
+      .filter(([, value]) => value !== null),
+  );
+}
+
+function conversationLane(lines) {
+  if (lines.length === 0) {
+    return note("No conversation retained.");
+  }
+  const log = el("ol", { className: "lane-log" });
+  for (const line of lines) {
+    const agent = line.role === "assistant";
+    const origin = present(line.author) && line.author !== "unknown"
+      ? ` (${line.author.replaceAll("_", "-")}${line.origin ? ` ${line.origin}` : ""})`
+      : "";
+    log.append(
+      el("li", { className: agent ? "turn assistant" : "turn user" }, [
+        el("span", {
+          className: "turn-role",
+          text: `turn ${formatCount(line.turn)} · ${agent ? "agent" : "user"}${origin}`,
+        }),
+        block(line.text),
+      ]),
+    );
+  }
+  return log;
+}
+
+function sceneItem(scene) {
+  const label = [
+    scene.turn === null || scene.turn === undefined ? null : `turn ${formatCount(scene.turn)}`,
+    Object.hasOwn(SCENE_LABELS, scene.kind) ? SCENE_LABELS[scene.kind] : scene.kind,
+    present(scene.purpose)?.replaceAll("_", " ") ?? null,
+  ].filter((part) => part !== null);
+  const children = [
+    el("span", { className: "turn-role", text: label.join(" · ") }),
+    filled([
+      ["Call", scene.call_id],
+      ["Inspection", scene.inspection_id],
+      ["Judge calls", scene.call_ids],
+      ["Status", scene.status],
+      ["Action", scene.action],
+      ["Phase", scene.phase],
+      [scene.kind === "inspection" ? "Unmet" : "Handed", scene.handed],
+      ["Cited", scene.cited],
+      ["Rejected", scene.rejection],
+      ["Reason", scene.reason],
+      ["Detail", scene.detail],
+    ]),
+  ];
+  if (present(scene.text) !== null) {
+    children.push(block(scene.text));
+  }
+  if ((scene.facts ?? []).length > 0) {
+    children.push(
+      table(
+        "Each fact's verdict at this inspection.",
+        ["Fact", "Verdict", "Observation", "Evidence"],
+        scene.facts.map((fact) => [fact.fact_id, fact.verdict, fact.observation, fact.evidence]),
+      ),
+    );
+  }
+  return el("li", { className: "turn scene" }, children);
+}
+
+function scenesLane(scenes) {
+  if (scenes.length === 0) {
+    return note("Nothing happened behind the scenes.");
+  }
+  const log = el("ol", { className: "lane-log" });
+  for (const scene of scenes) {
+    log.append(sceneItem(scene));
+  }
+  return log;
+}
+
+function gapsLane(gaps) {
+  if (!gaps || !gaps.assessed) {
+    return note("Not assessed yet.");
+  }
+  const children = [];
+  if (gaps.facts.length > 0) {
+    const log = el("ol", { className: "lane-log" });
+    for (const fact of gaps.facts) {
+      log.append(
+        el("li", { className: "turn gap" }, [
+          el("span", { className: "turn-role", text: `${fact.fact_id} · ${fact.verdict}` }),
+          filled([
+            ["Kind", fact.kind],
+            ["Phase", fact.phase],
+            ["Graded by", fact.source],
+            ["Wanted", fact.text],
+            ["Saw", fact.observation],
+            ["Evidence", fact.evidence],
+          ]),
+        ]),
+      );
+    }
+    children.push(log);
+  }
+  if (gaps.uncovered.length > 0) {
+    children.push(heading(5, "Problems no fact covers"), bullets(gaps.uncovered));
+  }
+  if (gaps.unreached_phases.length > 0) {
+    children.push(note(`Unreached phases: ${gaps.unreached_phases.join(", ")}`));
+  }
+  return children.length > 0
+    ? el("div", {}, children)
+    : note("No gaps: every fact was met and nothing is uncovered.");
+}
+
+function reviewCard(view) {
+  if (!view) {
+    return section("Review", [note("Not requested.")]);
+  }
+  const lanes = view.lanes;
+  if (!lanes) {
+    return section("Review", [note(describeDetail(view))]);
+  }
+  return section("Review", [
+    filled([
+      ["Outcome", lanes.outcome === null ? "not assessed" : attemptOutcome(lanes)],
+      ["Stop reason", lanes.stop_reason],
+    ]),
+    lanes.notes.length > 0 ? bullets(lanes.notes) : null,
+    el("div", { className: "lanes" }, [
+      el("div", { className: "lane" }, [
+        heading(4, "Conversation"),
+        note("What the agent saw."),
+        conversationLane(lanes.conversation),
+      ]),
+      el("div", { className: "lane" }, [
+        heading(4, "Behind the scenes"),
+        note("Stand-in decisions, inspections and corrections the agent never saw."),
+        scenesLane(lanes.behind_the_scenes),
+      ]),
+      el("div", { className: "lane" }, [
+        heading(4, "Gaps"),
+        note("What was still unmet, unclear or disputed at the end."),
+        gapsLane(lanes.gaps),
+      ]),
+    ]),
+  ]);
+}
+
 export function attemptDetail(attempt, details, labels) {
   const result = attempt.result;
   const chip = (label, value) => idChip(label, value, labelNames(labels, value));
@@ -964,7 +1202,7 @@ export function attemptDetail(attempt, details, labels) {
           ? caseLink(gradedCaseId, labelNames(labels, gradedCaseId))
           : chip("case", null),
         chip("profile", result?.profile_id),
-        chip("simulator", result?.simulator_id),
+        chip("stand-in", result?.stand_in_id),
         chip("scoring", result?.scoring_id),
         chip("criteria", result?.criteria_id),
       ]),
@@ -990,11 +1228,11 @@ export function attemptDetail(attempt, details, labels) {
         ? el("div", {}, [heading(4, "Assessment limitations"), bullets(result.limitations)])
         : null,
     ]),
+    reviewCard(details.review),
     auditCard(result),
+    factsCard(result),
     criteriaCard(result, details.reasoning),
-    checksCard(result, details.reasoning),
     metricsCard(result),
-    helpNeededCard(result),
     workflowCard(result),
     rolesCard(attempt),
     dialogueCard(details.dialogue),
@@ -1094,8 +1332,9 @@ export function compareView(comparison, labels) {
             "Repetition",
             "Before attempt",
             "After attempt",
-            "Before completion",
-            "After completion",
+            "Before outcome",
+            "After outcome",
+            "Fact changes",
             "Criterion changes",
           ],
           comparison.pairs.map((pair) => [
@@ -1103,8 +1342,12 @@ export function compareView(comparison, labels) {
             String(pair.repetition),
             pair.before_attempt,
             pair.after_attempt,
-            pair.before_completion,
-            pair.after_completion,
+            pair.before_outcome,
+            pair.after_outcome,
+            Object.entries(pair.fact_changes ?? {})
+              .sort((left, right) => (left[0] < right[0] ? -1 : 1))
+              .map(([name, [before, after]]) => `${name}: ${before} → ${after}`)
+              .join("; ") || "none",
             Object.entries(pair.criterion_changes)
               .sort((left, right) => (left[0] < right[0] ? -1 : 1))
               .map(([name, [before, after]]) => `${name}: ${before} → ${after}`)
@@ -1134,6 +1377,21 @@ export function compareView(comparison, labels) {
   ];
 }
 
+const CASE_FACTS_CAPTION =
+  "Requirements gate pass and fail, optional facts are graded but never gate, and context is "
+  + "background the stand-in may mention. The stand-in sees the text; only the inspector and "
+  + "judge see the check, and a verifier's hidden entrypoint is never shown.";
+
+function factCheck(fact) {
+  if (fact.verifier) {
+    return `verifier: ${fact.verifier.argv.join(" ")}`;
+  }
+  if (fact.kind === "context") {
+    return "not graded";
+  }
+  return fact.check ?? "judged against the text";
+}
+
 export function caseDetail(view, labels) {
   if (!view) {
     return [stateCard("empty", "Enter a case ID, or open a case chip, to look it up.")];
@@ -1149,7 +1407,7 @@ export function caseDetail(view, labels) {
       definitions([
         ["Baseline commit", view.baseline_commit ?? UNKNOWN],
         ["Reference patch", view.reference_patch ? "present" : "none"],
-        ["Max turns", formatCount(view.budgets.max_turns)],
+        ["Phases", view.phases.length === 0 ? "none" : view.phases.join(" \u2192 ")],
         ["Subject seconds", formatSeconds(view.budgets.subject_seconds)],
         ["Setup seconds", formatSeconds(view.budgets.setup_seconds)],
         [
@@ -1166,9 +1424,34 @@ export function caseDetail(view, labels) {
         ? [note("No allowed facts are recorded for this case.")]
         : [
             table(
-              "Facts the subject may be given, and how they may be disclosed.",
-              ["Fact", "Disclosure", "Text"],
-              view.facts.map((fact) => [fact.fact_id, fact.disclosure, fact.text]),
+              CASE_FACTS_CAPTION,
+              ["Fact", "Kind", "Phase", "Disclosure", "Text", "Check"],
+              view.facts.map((fact) => [
+                fact.fact_id,
+                fact.kind,
+                fact.phase ?? "–",
+                fact.disclosure,
+                fact.text,
+                factCheck(fact),
+              ]),
+            ),
+          ],
+    ),
+    section(
+      "Prompt steps",
+      view.workflow.length === 0
+        ? [note("No prompt steps are declared for this case.")]
+        : [
+            table(
+              "Prompts the user stand-in sends once no phase up to the step's after-phase has an "
+                + "unmet requirement.",
+              ["Step", "After phase", "Sent as", "Prompt"],
+              view.workflow.map((item) => [
+                item.step_id,
+                item.after_phase,
+                item.slash ? "slash command" : "chat",
+                item.prompt,
+              ]),
             ),
           ],
     ),
@@ -1179,51 +1462,11 @@ export function caseDetail(view, labels) {
       view.rubrics.length === 0
         ? note("No rubric criteria are retained for this case.")
         : table(
-            "Effective judge rubrics, marking case-authored, default and overridden criteria.",
-            ["Criterion", "Origin", "Required", "Rubric"],
-            view.rubrics.map((item) => [
-              item.criterion_id,
-              item.origin,
-              item.required ? "required" : "optional",
-              item.rubric,
-            ]),
+            "Quality rubrics scored by the judge; they never gate the outcome.",
+            ["Criterion", "Origin", "Rubric"],
+            view.rubrics.map((item) => [item.criterion_id, item.origin, item.rubric]),
           ),
     ]),
-    section(
-      "Deterministic criteria",
-      view.deterministic.length === 0
-        ? [note("No deterministic (hidden-verifier) criteria are retained for this case.")]
-        : [
-            table(
-              "Hidden-verifier criteria, by description, required flag and command argv; "
-                + "the hidden entrypoint's content is never shown.",
-              ["Criterion", "Required", "Command", "Description"],
-              view.deterministic.map((item) => [
-                item.criterion_id,
-                item.required ? "required" : "optional",
-                item.command.argv.join(" "),
-                item.description,
-              ]),
-            ),
-          ],
-    ),
-    section(
-      "Checks",
-      view.checks.length === 0
-        ? [note("No case-declared checks are retained.")]
-        : [
-            table(
-              "Case-declared yes/no checks the judge answers from the transcript and files.",
-              ["Check", "Expect", "Only if", "Question"],
-              view.checks.map((item) => [
-                item.check_id,
-                item.expect,
-                item.only_if ? `${item.only_if.check_id} = ${item.only_if.answer}` : "none",
-                item.question,
-              ]),
-            ),
-          ],
-    ),
     section(
       "Metrics commands",
       view.metrics.length === 0

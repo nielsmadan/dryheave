@@ -1,5 +1,6 @@
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,11 +16,14 @@ from dryheave.host import HostContext
 from dryheave.models import AgentKind
 from dryheave.profiles import load_profile
 from dryheave.runner import WorkflowPlan
+from dryheave.runner_models import RunBudget, RunOptions
+from dryheave.workspaces import initialize_workspace
 
 REVIEW = WorkflowPlan(
-    True, {"case": (PromptStep(step_id="review", prompt="/code-review --quick"),)}, ()
+    {"case": (PromptStep(step_id="review", prompt="/code-review --quick", after_phase="fix"),)},
+    (),
 )
-NO_WORKFLOW = WorkflowPlan(False, {}, ())
+NO_WORKFLOW = WorkflowPlan({}, ())
 HOST = HostContext({}, Path("/nonexistent-home"))
 
 
@@ -37,6 +41,159 @@ def test_bench_workflow_defaults_on_and_no_workflow_turns_it_off():
 def test_bench_inspector_defaults_to_none_and_parses_model_effort():
     assert _parse_bench().inspector is None
     assert _parse_bench("--inspector", "claude-haiku-4-5@low").inspector == "claude-haiku-4-5@low"
+
+
+def test_bench_budget_flags_default_to_the_run_budget_and_parse_overrides(store):
+    assert bench_cli._budget(_parse_bench(), store) == RunBudget()
+    chosen = _parse_bench("--max-turns", "12", "--stand-in-replies", "8", "--max-inspections", "5")
+    assert bench_cli._budget(chosen, store) == RunBudget(
+        max_turns=12, stand_in_replies=8, max_inspections=5
+    )
+    assert _parse_bench("--budget-from", "a" * 32).budget_from == "a" * 32
+
+
+def test_bench_budget_from_refuses_explicit_budget_flags(store):
+    args = _parse_bench("--budget-from", "a" * 32, "--max-turns", "12")
+    with pytest.raises(InputError, match="drop --max-turns"):
+        bench_cli._budget(args, store)
+
+
+def test_bench_budget_from_prints_and_returns_the_derived_budget(store, monkeypatch, capsys):
+    from dryheave.bench import PilotBudget
+
+    derived = PilotBudget(
+        run_id="a" * 32,
+        turns=4,
+        stand_in_replies=2,
+        inspections=3,
+        budget=RunBudget(max_turns=11, stand_in_replies=8, max_inspections=10),
+    )
+    monkeypatch.setattr(bench_cli, "pilot_budget", lambda _store, run_id: derived)
+    assert bench_cli._budget(_parse_bench("--budget-from", "a" * 32), store) == derived.budget
+    assert (
+        "budget from pilot " + "a" * 32 + ": it used 4 turns, 2 stand-in replies and 3 "
+        "inspections; this run allows 11 turns, 8 stand-in replies and 10 inspections"
+    ) in capsys.readouterr().err
+
+
+def test_bench_freezes_its_budget_in_the_run_options(store, benchmark, tmp_path, monkeypatch):
+    executed = []
+
+    class Executed(Exception):
+        pass
+
+    def execute(store, experiment_id, resume, options, *, host):
+        executed.append(options)
+        raise Executed
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "reference-only")
+    monkeypatch.setattr(
+        bench_cli, "_native_paths", lambda args: (store.root / "rt", store.root / "tui-test")
+    )
+    monkeypatch.setattr(bench_cli, "_execute", execute)
+    args = _bench_args(benchmark.cases[0], "sonnet=claude-sonnet-4-6@low")
+    args.check_only, args.max_turns, args.stand_in_replies = False, 12, 8
+    with pytest.raises(Executed):
+        bench_cli._bench(args, store)
+    (options,) = executed
+    assert (options.workflow, options.budget) == (
+        True,
+        RunBudget(max_turns=12, stand_in_replies=8, max_inspections=20),
+    )
+
+
+def test_bench_freezes_its_options_when_resuming_a_run_that_saved_none(
+    store, benchmark, monkeypatch
+):
+    from dryheave.journals import RunStore
+    from dryheave.runner_state import ExecutionJournal
+
+    executed = []
+
+    class Executed(Exception):
+        pass
+
+    def execute(store, experiment_id, resume, options, *, host):
+        executed.append((experiment_id, resume, options))
+        raise Executed
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "reference-only")
+    monkeypatch.setattr(
+        bench_cli, "_native_paths", lambda args: (store.root / "rt", store.root / "tui-test")
+    )
+    monkeypatch.setattr(bench_cli, "_execute", execute)
+    args = _bench_args(benchmark.cases[0], "sonnet=claude-sonnet-4-6@low")
+    args.check_only, args.max_turns = False, 12
+    with pytest.raises(Executed):
+        bench_cli._bench(args, store)
+    experiment_id, _, fresh = executed[0]
+    runs = RunStore(store.root)
+    unconfigured = runs.create(experiment_id)
+    with pytest.raises(Executed):
+        bench_cli._bench(args, store)
+    assert executed[1] == (experiment_id, unconfigured, fresh)
+    with runs.open(unconfigured) as journal:
+        ExecutionJournal(journal).configure(fresh)
+    with pytest.raises(Executed):
+        bench_cli._bench(args, store)
+    assert executed[2] == (experiment_id, unconfigured, None)
+
+
+def test_bench_records_a_pilot_derived_budget_and_the_pilot_run(store, benchmark, monkeypatch):
+    from dryheave.bench import PilotBudget
+
+    executed = []
+
+    class Executed(Exception):
+        pass
+
+    def execute(store, experiment_id, resume, options, *, host):
+        executed.append(options)
+        raise Executed
+
+    derived = RunBudget(max_turns=11, stand_in_replies=8, max_inspections=6)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "reference-only")
+    monkeypatch.setattr(
+        bench_cli, "_native_paths", lambda args: (store.root / "rt", store.root / "tui-test")
+    )
+    monkeypatch.setattr(bench_cli, "_execute", execute)
+    monkeypatch.setattr(
+        bench_cli,
+        "pilot_budget",
+        lambda _store, run_id: PilotBudget(run_id, 4, 2, 1, derived),
+    )
+    monkeypatch.setattr(bench_cli, "check_pilot_matches", lambda *_args, **_kwargs: None)
+    args = _bench_args(benchmark.cases[0], "sonnet=claude-sonnet-4-6@low")
+    args.check_only, args.budget_from = False, "f" * 32
+    with pytest.raises(Executed):
+        bench_cli._bench(args, store)
+    (options,) = executed
+    assert (options.budget, options.pilot_run) == (derived, "f" * 32)
+
+
+def test_bench_refuses_a_pilot_that_does_not_match_the_benchmark(store, benchmark, monkeypatch):
+    from dryheave.bench import PilotBudget
+
+    def mismatched(_store, run_id, experiment_id, *, workflow):
+        raise InputError(f"Pilot run {run_id} used a different case.")
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "reference-only")
+    monkeypatch.setattr(
+        bench_cli,
+        "pilot_budget",
+        lambda _store, run_id: PilotBudget(run_id, 4, 2, 1, RunBudget()),
+    )
+    monkeypatch.setattr(
+        bench_cli, "_native_paths", lambda args: (store.root / "rt", store.root / "tui-test")
+    )
+    monkeypatch.setattr(bench_cli, "check_pilot_matches", mismatched)
+    monkeypatch.setattr(
+        bench_cli, "_execute", lambda *_a, **_k: pytest.fail("A mismatched pilot must not run.")
+    )
+    args = _bench_args(benchmark.cases[0], "sonnet=claude-sonnet-4-6@low")
+    args.check_only, args.budget_from = False, "f" * 32
+    with pytest.raises(InputError, match="different case"):
+        bench_cli._bench(args, store)
 
 
 def _run_launch_checks(store, variants, profiles, *, workflow=True, plan=NO_WORKFLOW):
@@ -170,8 +327,11 @@ def _bench_args(case, *variants, codex="codex"):
         judge=None,
         inspector=None,
         workflow=True,
-        simulator="claude-sonnet-4-6@low",
-        simulator_replies=14,
+        stand_in="claude-sonnet-4-6@low",
+        max_turns=None,
+        stand_in_replies=None,
+        max_inspections=None,
+        budget_from=None,
         repetitions=1,
         seed=0,
         claude="/opt/claude",
@@ -227,16 +387,16 @@ def test_a_resumed_bench_run_missing_a_codex_skill_suggests_a_new_run(store, mon
         raise MissingSkillError("Variant terra cannot run workflow skill 'code-review'.")
 
     monkeypatch.setattr(bench_cli, "run_experiment", refuse)
-    paths = (store.root / "rt", store.root / "tui-test")
+    options = RunOptions(workflow=True)
     with pytest.raises(MissingSkillError) as resumed:
-        bench_cli._execute(store, "exp", "run-1", paths, workflow=True, host=HOST)
+        bench_cli._execute(store, "exp", "run-1", options, host=HOST)
     assert str(resumed.value) == (
         "Variant terra cannot run workflow skill 'code-review'. If the skill was added to the "
         "live Codex config after run run-1 started, pass --new-run instead of resuming it."
     )
     assert (resumed.value.code, resumed.value.exit_code) == ("missing_skill", 2)
     with pytest.raises(MissingSkillError) as fresh:
-        bench_cli._execute(store, "exp", None, paths, workflow=True, host=HOST)
+        bench_cli._execute(store, "exp", None, options, host=HOST)
     assert str(fresh.value) == "Variant terra cannot run workflow skill 'code-review'."
 
 
@@ -248,9 +408,9 @@ def test_a_resumed_bench_run_with_a_changed_snapshot_suggests_a_new_run(store, m
         raise SnapshotChangedError("Live config snapshot changed after it was taken: /run")
 
     monkeypatch.setattr(bench_cli, "run_experiment", refuse)
-    paths = (store.root / "rt", store.root / "tui-test")
+    options = RunOptions()
     with pytest.raises(SnapshotChangedError) as resumed:
-        bench_cli._execute(store, "exp", "run-1", paths, workflow=False, host=HOST)
+        bench_cli._execute(store, "exp", "run-1", options, host=HOST)
     assert hosts == [HOST]
     assert str(resumed.value) == (
         "Live config snapshot changed after it was taken: /run Run run-1 cannot reuse its live "
@@ -258,5 +418,54 @@ def test_a_resumed_bench_run_with_a_changed_snapshot_suggests_a_new_run(store, m
     )
     assert (resumed.value.code, resumed.value.exit_code) == ("snapshot_changed", 1)
     with pytest.raises(SnapshotChangedError) as fresh:
-        bench_cli._execute(store, "exp", None, paths, workflow=False, host=HOST)
+        bench_cli._execute(store, "exp", None, options, host=HOST)
     assert str(fresh.value) == "Live config snapshot changed after it was taken: /run"
+
+
+def test_bench_completion_reports_the_run_files_as_commit_paths(
+    tmp_path, short_runtime, monkeypatch
+):
+    workspace = initialize_workspace(tmp_path / "ws", runtime_root=short_runtime)
+
+    def write(_store, target, reports, setups, *, include_reasoning):
+        assert (setups, include_reasoning) == ((None,), False)
+        paths = tuple(
+            target.reports_dir / f"{reports[0].run_id}.{kind}" for kind in ("json", "html")
+        )
+        for path in paths:
+            path.parent.mkdir(exist_ok=True)
+            path.write_text("{}")
+        return paths
+
+    monkeypatch.setattr(bench_cli, "write_workspace_report", write)
+    result = bench_cli._checkpoint_report(None, workspace, SimpleNamespace(run_id="r1"))
+    assert result == {
+        "commit_paths": ["reports/r1.json", "reports/r1.html"],
+        "git_commit": "ask",
+        "reports": [str(workspace.reports_dir / "r1.json"), str(workspace.reports_dir / "r1.html")],
+    }
+
+
+def test_bench_completion_survives_a_failed_report_write(tmp_path, short_runtime, monkeypatch):
+    workspace = initialize_workspace(tmp_path / "ws", runtime_root=short_runtime)
+
+    def fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(bench_cli, "write_workspace_report", fail)
+    result = bench_cli._checkpoint_report(None, workspace, SimpleNamespace(run_id="r1"))
+    assert result == {"commit_paths": [], "git_commit": "ask", "report_error": "disk full"}
+
+
+def test_bench_outside_a_workspace_adds_nothing_to_its_result():
+    assert bench_cli._checkpoint_report(None, None, SimpleNamespace(run_id="r1")) == {"reports": []}
+
+
+def test_bench_next_hint_points_at_reports_only_inside_a_workspace(tmp_path, short_runtime):
+    workspace = initialize_workspace(tmp_path / "ws", runtime_root=short_runtime)
+    assert bench_cli._next_hint("r1", workspace) == (
+        "dryheave view --open   # reports are in the workspace's reports/ folder"
+    )
+    assert bench_cli._next_hint("r1", None) == (
+        "dryheave view --open   # or: dryheave report r1 --html report.html"
+    )

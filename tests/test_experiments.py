@@ -2,7 +2,7 @@ import sys
 
 import pytest
 
-from dryheave.cases import RubricCriterion, load_frozen_case
+from dryheave.cases import RubricCriterion, TaskFact, load_frozen_case
 from dryheave.controller_models import ControllerRecipe, RoleBudget
 from dryheave.errors import InputError
 from dryheave.experiment_models import ScoringConfig, VariantSpec
@@ -41,7 +41,7 @@ def test_frozen_experiment_id_is_pinned(store):
 
     case_id = "a" * 64
     profile_id = "b" * 64
-    simulator_id = "c" * 64
+    stand_in_id = "c" * 64
     scoring_id = "d" * 64
     frozen = FrozenExperiment(
         name="Pinned",
@@ -49,7 +49,7 @@ def test_frozen_experiment_id_is_pinned(store):
         variants=(FrozenVariant(name="base", profile_id=profile_id),),
         repetitions=1,
         seed=0,
-        simulator_id=simulator_id,
+        stand_in_id=stand_in_id,
         scoring_id=scoring_id,
         trials=(
             TrialSpec(
@@ -63,19 +63,19 @@ def test_frozen_experiment_id_is_pinned(store):
         ),
     )
     identifier = store.put(ObjectKind.EXPERIMENT, frozen)
-    assert identifier == "5aaeb75e2c8265525843fd79f180972126813b0298439834453f17156398e172"
+    assert identifier == "ff54c255d267153b123be60a4af47f17abbe29c0a0b700caee5f0ee9d1a1d54f"
 
 
 def test_matrix_validation_rejects_alias_duplicates_and_unknown_facts(store, benchmark):
     store.set_alias("same-task", store.resolve("task"))
     with pytest.raises(InputError, match="same case"):
         validate_experiment(store, benchmark.model_copy(update={"cases": ("task", "same-task")}))
-    bad = benchmark.simulator.script[0].decision.model_copy(update={"fact_ids": ("secret",)})
-    script = benchmark.simulator.model_copy(
-        update={"script": (benchmark.simulator.script[0].model_copy(update={"decision": bad}),)}
+    bad = benchmark.stand_in.script[0].decision.model_copy(update={"fact_ids": ("secret",)})
+    script = benchmark.stand_in.model_copy(
+        update={"script": (benchmark.stand_in.script[0].model_copy(update={"decision": bad}),)}
     )
     with pytest.raises(InputError, match="outside"):
-        validate_experiment(store, benchmark.model_copy(update={"simulator": script}))
+        validate_experiment(store, benchmark.model_copy(update={"stand_in": script}))
 
 
 def test_domain_load_rejects_manually_inconsistent_expansion(store, benchmark):
@@ -100,7 +100,7 @@ def test_controller_literal_credentials_are_rejected_without_echo(store, benchma
         command=CommandSpec(argv=("controller", "--api-key", "synthetic-credential")),
     )
     with pytest.raises(InputError, match="runtime reference") as error:
-        validate_experiment(store, benchmark.model_copy(update={"simulator": recipe}))
+        validate_experiment(store, benchmark.model_copy(update={"stand_in": recipe}))
     assert "synthetic-credential" not in str(error.value)
 
 
@@ -144,29 +144,43 @@ def test_frozen_inspector_revalidated_on_load(store, benchmark):
 
 
 @pytest.mark.parametrize(
-    "rubric, judge_kind, valid",
+    "graded, judge_kind, valid",
     [
-        ("required", "absent", False),
-        ("required", "scripted", False),
-        ("required", "disabled", False),
-        ("required", "enabled", True),
-        ("optional", "absent", True),
-        ("optional", "scripted", False),
+        ("judged-fact", "absent", False),
+        ("judged-fact", "scripted", False),
+        ("judged-fact", "disabled", False),
+        ("judged-fact", "enabled", True),
+        ("rubric", "absent", True),
+        ("rubric", "scripted", False),
         ("none", "scripted", False),
     ],
 )
 def test_judge_usability_is_checked_in_drafts_and_frozen_loads(
-    store, benchmark, rubric, judge_kind, valid
+    store, benchmark, graded, judge_kind, valid
 ):
     case = load_frozen_case(store, benchmark.cases[0])
-    if rubric != "none":
+    if graded == "judged-fact":
+        case = case.model_copy(
+            update={
+                "allowed_facts": (
+                    *case.allowed_facts,
+                    TaskFact(
+                        fact_id="interface",
+                        phase="fix",
+                        text="Keep the public interface.",
+                        check="The implementation preserves the existing public interface.",
+                        curator_authored=True,
+                    ),
+                )
+            }
+        )
+    elif graded == "rubric":
         case = case.model_copy(
             update={
                 "criteria": (
                     *case.criteria,
                     RubricCriterion(
                         criterion_id="quality",
-                        required=rubric == "required",
                         rubric="The implementation preserves the existing public interface.",
                     ),
                 )

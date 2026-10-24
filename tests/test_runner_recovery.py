@@ -84,11 +84,11 @@ def test_recovered_interrupted_attempt_carries_its_workflow_progress(
     experiment = load_experiment(store, identifier)
     run_id = RunStore(store.root).create(identifier)
     event = WorkflowEvent(
-        step_id="inspect-required",
+        step_id="i-1",
         kind="inspect",
         outcome="failed",
         turn=2,
-        failed_criteria=("greeting",),
+        failed_criteria=("punctuation",),
         seconds=1.5,
     )
     with RunStore(store.root).open(run_id) as journal:
@@ -108,5 +108,52 @@ def test_recovered_interrupted_attempt_carries_its_workflow_progress(
     capture = load_capture(store, result.pending_assessment[0])
     assert capture.stop_reason == "interrupted"
     assert capture.interaction_coverage == "partial"
-    assert capture.workflow.steps == ("inspect-required",)
+    assert capture.workflow.steps == ()
     assert (capture.workflow.position, capture.workflow.events) == (0, (event,))
+
+
+@pytest.mark.integration
+def test_an_inspection_intent_without_a_result_is_recovered_as_unknown(
+    store, graded_benchmark, tmp_path
+):
+    from dryheave.judges import FactInspection, FactJudgment
+    from dryheave.workflow import inspection_records
+
+    benchmark, _ = judged_case_benchmark(store, graded_benchmark, tmp_path)
+    identifier = create_experiment(store, benchmark)
+    experiment = load_experiment(store, identifier)
+    run_id = RunStore(store.root).create(identifier)
+    private = store.root / "scratch" / "inspection-left-behind"
+    finished = FactInspection(
+        inspection_id="i-1",
+        turn=2,
+        snapshot_digest="a" * 64,
+        input_digest="b" * 64,
+        status="completed",
+        judgments=(
+            FactJudgment(
+                fact_id="punctuation", verdict="unmet", observation="No comma.", evidence="x"
+            ),
+        ),
+    )
+    with RunStore(store.root).open(run_id) as journal:
+        execution = ExecutionJournal(journal)
+        execution.configure(RunOptions(mode="offline-fixture", workflow=True))
+        state = execution.reserve(experiment.trials[0].trial_id)
+        execution.save(state.model_copy(update={"stage": TrialStage.PREPARING}))
+        for inspection_id, turn in (("i-1", 2), ("i-2", 3)):
+            execution.record(
+                state,
+                "inspection-intent",
+                {"inspection_id": inspection_id, "turn": turn, "private": [str(private)]},
+            )
+            if inspection_id == "i-1":
+                execution.record(state, "fact-inspection", finished.model_dump(mode="json"))
+    result = run_experiment(store, resume=run_id, host=HOST)
+    capture = load_capture(store, result.pending_assessment[0])
+    assert capture.stop_reason == "interrupted"
+    records = inspection_records(RunStore(store.root).inspect(run_id).events, capture.attempt_id)
+    assert [(item.inspection_id, item.turn, item.result) for item in records] == [
+        ("i-1", 2, finished),
+        ("i-2", 3, None),
+    ]

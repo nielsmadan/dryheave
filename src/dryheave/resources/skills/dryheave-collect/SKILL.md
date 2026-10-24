@@ -24,7 +24,7 @@ description: Discover and import Codex, Claude or Droid JSONL sessions as benchm
    issue.
 5. Hand off to `dryheave-case` with session ID, event IDs and baseline evidence.
    Full transcripts stay curator evidence. Review every excerpt separately before
-   declaring it safe for a simulated user or subject.
+   declaring it safe for a user stand-in or subject.
 
 All structured commands return `{ "ok": true, "data": ... }` on stdout;
 errors have `ok: false` and `error.code/message` on stderr with nonzero exit.

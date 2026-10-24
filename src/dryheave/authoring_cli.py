@@ -1,28 +1,34 @@
 import argparse
 import json
 import shlex
+from itertools import count
 from pathlib import Path
 
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
+from dryheave.bench import JUDGE_BUDGET, claude_role, parse_role
+from dryheave.calibration_models import CaseCalibration
 from dryheave.calibrations import calibrate_case, load_calibration
 from dryheave.cases import draft_case, freeze_case, load_frozen_case, read_draft, validate_case
 from dryheave.commands import CommandRegistry
 from dryheave.commits import session_baseline
 from dryheave.commits_cli import register_commit_survey
-from dryheave.errors import CancelledError, InputError
+from dryheave.errors import CancelledError, ConflictError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.logs.base import ImportLimits, Session, candidates, discover
 from dryheave.logs.service import AGENT_CHOICES, import_session, parser_for
 from dryheave.mining import user_message_profile
-from dryheave.mining_cli import register_mining, register_mining_collection
-from dryheave.models import AgentKind, ObjectKind, StrictModel
+from dryheave.mining_cli import calibrate_next, register_mining, register_mining_collection
+from dryheave.models import AgentKind, Name, ObjectKind, StrictModel
 from dryheave.personas import Persona, freeze_persona, load_frozen_persona
 from dryheave.repositories import capture_repository
 from dryheave.serialization import parse_model
 from dryheave.storage import ObjectStore
+from dryheave.workspace_git import case_alias, case_paths, checkpoint
+from dryheave.workspaces import Workspace
 
 MAX_CALIBRATION_EVIDENCE_BYTES = 65536
+NAME = TypeAdapter(Name)
 
 
 def _write(path: Path, model: StrictModel) -> None:
@@ -86,6 +92,36 @@ def _show(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     }
 
 
+def _is_name(value: str) -> bool:
+    try:
+        NAME.validate_python(value)
+    except ValidationError:
+        return False
+    return True
+
+
+def _case_label(path: Path) -> str:
+    return path.parent.name if path.name == "case.json" else path.stem
+
+
+def _draft_target(args: argparse.Namespace, workspace: Workspace | None, session: str) -> Path:
+    if args.out is not None:
+        return Path(args.out)
+    if workspace is None:
+        raise InputError("Supply --out PATH, or run inside a dryheave workspace.")
+    if args.name:
+        target = workspace.cases_dir / NAME.validate_python(args.name) / "case.json"
+        if target.exists():
+            raise ConflictError(f"{target} already exists; choose another --name.")
+        return target
+    stem = f"case-{session[:12]}"
+    candidates = (
+        workspace.cases_dir / (stem if number == 1 else f"{stem}-{number}") / "case.json"
+        for number in count(1)
+    )
+    return next(path for path in candidates if not path.exists())
+
+
 def _draft(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     if bool(args.repo) != bool(args.commit):
         raise InputError(
@@ -99,12 +135,14 @@ def _draft(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]
         if args.repo
         else None
     )
+    workspace: Workspace | None = args.benchmark_workspace
+    target = _draft_target(args, workspace, store.resolve(args.reference))
     draft = draft_case(
         store, args.reference, repository_id=repository_id, start=args.start, end=args.end
     )
-    _write(args.out, draft)
-    return {
-        "path": str(args.out),
+    _write(target, draft)
+    return checkpoint(workspace, f"case: draft {_case_label(target)}", (target,)) | {
+        "path": str(target),
         "repository_id": repository_id,
         "next": "Curate intent, facts, persona and grading; clear resolved issues, then case validate PATH.",
     }
@@ -119,10 +157,14 @@ def _validate(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonVal
 
 def _freeze(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
     identifier = freeze_case(store, read_draft(args.path), args.path.absolute().parent)
-    return {
-        "id": identifier,
-        "next": f"Calibrate before subject spend with case calibrate {identifier}.",
-    }
+    workspace: Workspace | None = args.benchmark_workspace
+    paths = case_paths(args.path) if workspace else ()
+    aliased = case_alias(store, workspace, args.path, identifier)
+    return (
+        checkpoint(workspace, f"case: freeze {_case_label(args.path.absolute())}", paths)
+        | {"id": identifier, "next": calibrate_next(store, identifier, aliased)}
+        | aliased
+    )
 
 
 def _case_inspect(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
@@ -130,21 +172,61 @@ def _case_inspect(args: argparse.Namespace, store: ObjectStore) -> dict[str, Jso
     return {"id": store.resolve(args.reference), "case": case.model_dump(mode="json")}
 
 
+def _calibration_next(record: CaseCalibration, identifier: str) -> str:
+    inspect = f"Inspect retained evidence with case calibration {identifier} --evidence PATH; "
+    if record.flagged:
+        return inspect + (
+            "fix flagged facts (met on the baseline or unmet on the reference) before subject spend."
+        )
+    unsettled = [item.fact_id for item in record.facts if item.status == "unavailable"]
+    if unsettled:
+        return inspect + (
+            f"no verdict on a side for {', '.join(unsettled)}. A verifier error is in "
+            "facts[].calibration.{baseline,reference}.error (a failing verifier must print its "
+            "failure marker and exit nonzero), an unclear judgment is in "
+            "facts[].{baseline,reference}_judgment, and a missing reference side needs a "
+            "reference_patch. Fix them before subject spend."
+        )
+    return inspect + "every fact behaves; pilot the case next."
+
+
 def _calibrate(args: argparse.Namespace, store: ObjectStore) -> dict[str, JsonValue]:
+    judge = claude_role(parse_role(args.judge), args.claude, JUDGE_BUDGET) if args.judge else None
     try:
-        identifier = calibrate_case(store, args.reference)
+        identifier = calibrate_case(store, args.reference, judge=judge)
     except KeyboardInterrupt as error:
         retry = shlex.join(
-            ("dryheave", "--store", str(store.root), "case", "calibrate", args.reference)
+            (
+                "dryheave",
+                "--store",
+                str(store.root),
+                "case",
+                "calibrate",
+                args.reference,
+                *(("--judge", args.judge) if args.judge else ()),
+            )
         )
         raise CancelledError(
             f"Calibration interrupted; retained work is in {store.root / 'calibrations'}. Reconcile owned processes and start a fresh calibration with: {retry}"
         ) from error
     record = load_calibration(store, identifier)
-    return {
+    workspace: Workspace | None = args.benchmark_workspace
+    directory = (
+        workspace.cases_dir / args.reference if workspace and _is_name(args.reference) else None
+    )
+    return checkpoint(
+        workspace,
+        f"case: calibrate {args.reference}",
+        case_paths(directory / "case.json")
+        if directory is not None and (directory / "case.json").is_file()
+        else (),
+    ) | {
         "id": identifier,
         "calibration": record.model_dump(mode="json"),
-        "next": f"Inspect retained evidence with case calibration {identifier} --evidence PATH; review status before subject spend.",
+        "flagged": [
+            {"fact_id": item.fact_id, "flags": list(item.flags)} for item in record.flagged
+        ],
+        "next": _calibration_next(record, identifier),
     }
 
 
@@ -228,7 +310,12 @@ def _register_cases(registry: CommandRegistry) -> None:
     draft.add_argument("--initial-patch", type=Path)
     draft.add_argument("--start", help="Starting user event ID.")
     draft.add_argument("--end", help="Last included event ID.")
-    draft.add_argument("--out", type=Path, required=True)
+    draft.add_argument(
+        "--out",
+        type=Path,
+        help="Draft file (default inside a workspace: cases/NAME/case.json).",
+    )
+    draft.add_argument("--name", help="Case folder name under cases/ (default: case-<session>).")
     registry.handler(draft, _draft)
     for name, handler in (("validate", _validate), ("freeze", _freeze)):
         parser = commands.add_parser(name)
@@ -238,9 +325,16 @@ def _register_cases(registry: CommandRegistry) -> None:
     inspect.add_argument("reference")
     registry.handler(inspect, _case_inspect)
     calibrate = commands.add_parser(
-        "calibrate", help="Run bounded baseline/reference verifiers before subject spend."
+        "calibrate",
+        help="Grade every requirement and optional fact on the baseline and the reference.",
     )
     calibrate.add_argument("reference", metavar="CASE_REF")
+    calibrate.add_argument(
+        "--judge",
+        metavar="MODEL[@EFFORT]",
+        help="Claude judge for facts without a verifier; one call per side.",
+    )
+    calibrate.add_argument("--claude", default="claude", help="Claude Code executable.")
     registry.handler(calibrate, _calibrate)
     calibration = commands.add_parser(
         "calibration", help="Validate a standalone calibration and inspect its retained evidence."
@@ -258,7 +352,7 @@ def _register_cases(registry: CommandRegistry) -> None:
 
 def _register_personas(registry: CommandRegistry) -> None:
     personas = registry.add(
-        "persona", help_text="Author and inspect a separate evidence-backed simulated user."
+        "persona", help_text="Author and inspect a separate evidence-backed user stand-in."
     )
     commands = personas.add_subparsers(dest="persona_command", required=True)
     draft = commands.add_parser("draft")

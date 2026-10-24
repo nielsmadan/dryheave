@@ -24,7 +24,8 @@ const attempts = [
     raw_evidence: "available",
     current_exclusions: [],
     result: {
-      completion: "pass",
+      outcome: "pass",
+      outcome_reason: "all_met",
       eligible: true,
       exclusion_reasons: [],
       case_id: "c".repeat(64),
@@ -42,7 +43,8 @@ const attempts = [
     raw_evidence: "unavailable",
     current_exclusions: ["unscorable"],
     result: {
-      completion: "indeterminate",
+      outcome: "indeterminate",
+      outcome_reason: "unclear",
       eligible: false,
       exclusion_reasons: ["unscorable"],
       case_id: "d".repeat(64),

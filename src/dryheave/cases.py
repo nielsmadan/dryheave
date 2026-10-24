@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Annotated, Literal, Self
+from typing import Literal, Self
 
 from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
@@ -28,10 +28,39 @@ NO_TURN_COMMANDS = (
 )
 
 
+FactKind = Literal["requirement", "optional", "context"]
+PLACEHOLDER_PREFIXES = ("todo", "placeholder", "fill in")
+CHECK_PLACEHOLDER_PREFIXES = ("todo:", "todo -", "placeholder", "fill in")
+
+
+class FactVerifier(StrictModel):
+    command: CommandSpec
+    entrypoint: RelativePath
+    expected_stdout: str = Field(min_length=1, max_length=1000)
+    expected_failure_stdout: str | None = Field(default=None, min_length=1, max_length=1000)
+    suite_id: Name | None = None
+
+    @model_validator(mode="after")
+    def trusted_entrypoint(self) -> Self:
+        if f"{{verifier}}/{self.entrypoint}" not in self.command.argv:
+            raise ValueError(
+                "command must invoke the supplied hidden entrypoint with {verifier}/PATH"
+            )
+        if not self.expected_stdout.strip() or (
+            self.expected_failure_stdout is not None and not self.expected_failure_stdout.strip()
+        ):
+            raise ValueError("expected execution evidence must not be blank")
+        return self
+
+
 class TaskFact(StrictModel):
     fact_id: Name
+    kind: FactKind = "requirement"
+    phase: Name | None = None
     text: str = Field(min_length=1, max_length=8000)
+    check: str | None = Field(default=None, min_length=1, max_length=4000)
     disclosure: Literal["on_request", "proactive"] = "on_request"
+    verifier: FactVerifier | None = None
     evidence: tuple[EvidenceExcerpt, ...] = ()
     curator_authored: bool = False
 
@@ -45,61 +74,47 @@ class TaskFact(StrictModel):
             raise ValueError("allowed facts may only cite subject-safe evidence")
         return self
 
-
-class DeterministicCriterion(StrictModel):
-    criterion_id: Name
-    kind: Literal["deterministic"] = "deterministic"
-    description: str = Field(min_length=10, max_length=4000)
-    required: bool = True
-    command: CommandSpec
-    entrypoint: RelativePath
-    expected_stdout: str = Field(min_length=1, max_length=1000)
-    expected_failure_stdout: str | None = Field(default=None, min_length=1, max_length=1000)
-    suite_id: Name | None = None
-    calibration: Literal["uncalibrated"] = "uncalibrated"
-
     @model_validator(mode="after")
-    def trusted_entrypoint(self) -> Self:
-        if self.description.strip().lower().startswith(("todo", "placeholder", "fill in")):
-            raise ValueError("criterion description cannot be a placeholder")
-        if len(self.description.strip()) < MIN_DESCRIPTION_LENGTH:
-            raise ValueError("criterion description must be substantive")
-        if f"{{verifier}}/{self.entrypoint}" not in self.command.argv:
-            raise ValueError(
-                "command must invoke the supplied hidden entrypoint with {verifier}/PATH"
-            )
-        if not self.expected_stdout.strip() or (
-            self.expected_failure_stdout is not None and not self.expected_failure_stdout.strip()
+    def graded_shape(self) -> Self:
+        if self.kind == "context":
+            present = [
+                name for name in ("phase", "check", "verifier") if getattr(self, name) is not None
+            ]
+            if present:
+                raise ValueError(
+                    f"context fact {self.fact_id} cannot have a {' or '.join(present)}; "
+                    "only requirement and optional facts are graded"
+                )
+            return self
+        if self.phase is None:
+            raise ValueError(f"{self.kind} fact {self.fact_id} must name its phase")
+        if self.check is None and self.verifier is None:
+            raise ValueError(f"{self.kind} fact {self.fact_id} needs a check or a verifier")
+        if self.check is not None and (
+            not self.check.strip()
+            or self.check.strip().lower().startswith(CHECK_PLACEHOLDER_PREFIXES)
+            or self.check.strip().lower() == "todo"
         ):
-            raise ValueError("expected execution evidence must not be blank")
+            raise ValueError(f"fact {self.fact_id} check must be a substantive pass condition")
         return self
+
+    @property
+    def graded(self) -> bool:
+        return self.kind != "context"
 
 
 class RubricCriterion(StrictModel):
     criterion_id: Name
     kind: Literal["judge"] = "judge"
-    required: bool = True
     rubric: str = Field(min_length=20, max_length=16000)
 
     @model_validator(mode="after")
     def substantive_rubric(self) -> Self:
         if len(self.rubric.strip()) < MIN_RUBRIC_LENGTH or self.rubric.strip().lower().startswith(
-            ("todo", "placeholder", "fill in")
+            PLACEHOLDER_PREFIXES
         ):
             raise ValueError("rubric requires a substantive curator-authored criterion")
         return self
-
-
-class CheckCondition(StrictModel):
-    check_id: Name
-    answer: Literal["yes", "no"]
-
-
-class CaseCheck(StrictModel):
-    check_id: Name
-    question: str = Field(min_length=10, max_length=4000)
-    expect: Literal["yes", "no"]
-    only_if: CheckCondition | None = None
 
 
 class MetricsCommand(StrictModel):
@@ -110,7 +125,7 @@ class MetricsCommand(StrictModel):
 
     @model_validator(mode="after")
     def trusted_entrypoint(self) -> Self:
-        if self.description.strip().lower().startswith(("todo", "placeholder", "fill in")):
+        if self.description.strip().lower().startswith(PLACEHOLDER_PREFIXES):
             raise ValueError("metrics description cannot be a placeholder")
         if len(self.description.strip()) < MIN_DESCRIPTION_LENGTH:
             raise ValueError("metrics description must be substantive")
@@ -122,7 +137,6 @@ class MetricsCommand(StrictModel):
 
 
 class CaseBudgets(StrictModel):
-    max_turns: int = Field(default=4, gt=0, le=100)
     subject_seconds: int = Field(default=180, gt=0, le=86400)
     setup_seconds: int = Field(default=120, gt=0, le=3600)
 
@@ -135,12 +149,6 @@ class CapturePolicy(StrictModel):
     include_ignored: tuple[RelativePath, ...] = ()
 
 
-class InspectStep(StrictModel):
-    kind: Literal["inspect"] = "inspect"
-    step_id: Name
-    criteria: tuple[Name, ...] = Field(min_length=1)
-
-
 def is_slash(prompt: str) -> bool:
     return prompt.lstrip().startswith("/")
 
@@ -150,6 +158,7 @@ class PromptStep(StrictModel):
     step_id: Name
     prompt: str = Field(min_length=1, max_length=32000)
     answer_hint: str | None = Field(default=None, max_length=2000)
+    after_phase: Name
 
     @property
     def slash(self) -> bool:
@@ -167,69 +176,70 @@ class PromptStep(StrictModel):
         return value
 
 
-WorkflowStep = Annotated[InspectStep | PromptStep, Field(discriminator="kind")]
-
-
 class CaseContent(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2]
     title: str = Field(min_length=1, max_length=300)
     initial_prompt: str = Field(min_length=1, max_length=32000)
     allowed_facts: tuple[TaskFact, ...] = ()
+    phases: tuple[Name, ...] = ()
     evidence: tuple[EvidenceExcerpt, ...] = ()
     setup: tuple[CommandSpec, ...] = ()
     tool_requirements: tuple[str, ...] = ()
     budgets: CaseBudgets = Field(default_factory=CaseBudgets)
     capture_policy: CapturePolicy = Field(default_factory=CapturePolicy)
-    criteria: tuple[DeterministicCriterion | RubricCriterion, ...] = ()
+    criteria: tuple[RubricCriterion, ...] = ()
     intent_confirmed: bool = False
     facts_reviewed: bool = False
     unresolved_issues: tuple[str, ...] = ()
-    checks: tuple[CaseCheck, ...] = ()
     metrics: tuple[MetricsCommand, ...] = ()
     disabled_rubrics: tuple[Name, ...] = ()
-    workflow: tuple[WorkflowStep, ...] = ()
+    workflow: tuple[PromptStep, ...] = ()
+
+    @model_validator(mode="after")
+    def valid_phases(self) -> Self:
+        if len(set(self.phases)) != len(self.phases):
+            raise ValueError("phase names must be unique")
+        for fact in self.allowed_facts:
+            if fact.phase is not None and fact.phase not in self.phases:
+                raise ValueError(
+                    f"fact {fact.fact_id} names undeclared phase {fact.phase}; "
+                    f"declared phases: {', '.join(self.phases) or 'none'}"
+                )
+        return self
 
     @model_validator(mode="after")
     def valid_workflow(self) -> Self:
         seen_ids: set[str] = set()
-        known_criteria = {item.criterion_id for item in self.criteria}
-        allowed_defaults = set(DEFAULT_RUBRIC_IDS) - set(self.disabled_rubrics)
+        reached = 0
         for step in self.workflow:
             if step.step_id in seen_ids:
                 raise ValueError(f"workflow step IDs must be unique: {step.step_id}")
             seen_ids.add(step.step_id)
-            if isinstance(step, InspectStep):
-                if len(set(step.criteria)) != len(step.criteria):
-                    raise ValueError(f"workflow step {step.step_id} inspects duplicate criteria")
-                unknown = sorted(set(step.criteria) - known_criteria - allowed_defaults)
-                if unknown:
-                    raise ValueError(
-                        f"workflow step {step.step_id} inspects unknown criteria: "
-                        f"{', '.join(unknown)}"
-                    )
-            else:
-                words = step.prompt.strip().split(maxsplit=1)
-                if words and words[0].startswith(("$", "!")):
-                    raise ValueError(
-                        f"workflow step {step.step_id} starts with {words[0][0]!r}: "
-                        "write skill steps as /name; Codex receives them as $name"
-                    )
-                if words and words[0] in NO_TURN_COMMANDS:
-                    raise ValueError(
-                        f"workflow step {step.step_id} uses a command with no model turn: "
-                        f"{words[0]}"
-                    )
+            if step.after_phase not in self.phases:
+                raise ValueError(
+                    f"workflow step {step.step_id} runs after undeclared phase {step.after_phase}"
+                )
+            position = self.phases.index(step.after_phase)
+            if position < reached:
+                raise ValueError(
+                    f"workflow step {step.step_id} runs after phase {step.after_phase}, "
+                    f"earlier than the step before it; order prompt steps by phase"
+                )
+            reached = position
+            words = step.prompt.strip().split(maxsplit=1)
+            if words and words[0].startswith(("$", "!")):
+                raise ValueError(
+                    f"workflow step {step.step_id} starts with {words[0][0]!r}: "
+                    "write skill steps as /name; Codex receives them as $name"
+                )
+            if words and words[0] in NO_TURN_COMMANDS:
+                raise ValueError(
+                    f"workflow step {step.step_id} uses a command with no model turn: {words[0]}"
+                )
         return self
 
     @model_validator(mode="after")
-    def valid_checks(self) -> Self:
-        seen: set[str] = set()
-        for check in self.checks:
-            if check.check_id in seen:
-                raise ValueError(f"check IDs must be unique: {check.check_id}")
-            if check.only_if is not None and check.only_if.check_id not in seen:
-                raise ValueError(f"check {check.check_id} only_if must reference an earlier check")
-            seen.add(check.check_id)
+    def valid_identifiers(self) -> Self:
         if len({item.metrics_id for item in self.metrics}) != len(self.metrics):
             raise ValueError("metrics IDs must be unique")
         if len(set(self.disabled_rubrics)) != len(self.disabled_rubrics):
@@ -242,25 +252,36 @@ class CaseContent(StrictModel):
     @model_serializer(mode="wrap")
     def serialized(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         value: dict[str, object] = handler(self)
-        for name in ("checks", "metrics", "disabled_rubrics", "workflow"):
+        for name in ("metrics", "disabled_rubrics", "workflow"):
             if not getattr(self, name):
                 value.pop(name, None)
         return value
 
 
-def effective_workflow(
-    case: CaseContent, *, enabled: bool, inspected: bool
-) -> tuple[WorkflowStep, ...]:
-    if not enabled:
-        return ()
-    if case.workflow:
-        return case.workflow
-    if not inspected:
-        return ()
-    required = tuple(item.criterion_id for item in case.criteria if item.required)
-    if not required:
-        return ()
-    return (InspectStep(step_id="inspect-required", criteria=required),)
+def graded_facts(case: CaseContent) -> tuple[TaskFact, ...]:
+    return tuple(fact for fact in case.allowed_facts if fact.graded)
+
+
+def requirement_facts(case: CaseContent) -> tuple[TaskFact, ...]:
+    return tuple(fact for fact in case.allowed_facts if fact.kind == "requirement")
+
+
+def verifier_facts(case: CaseContent) -> tuple[TaskFact, ...]:
+    return tuple(fact for fact in graded_facts(case) if fact.verifier is not None)
+
+
+def judged_facts(case: CaseContent) -> tuple[TaskFact, ...]:
+    return tuple(fact for fact in graded_facts(case) if fact.verifier is None)
+
+
+def needs_judge(case: CaseContent) -> bool:
+    return bool(case.criteria or judged_facts(case))
+
+
+def fact_verifier(fact: TaskFact) -> FactVerifier:
+    if fact.verifier is None:
+        raise InputError(f"Fact {fact.fact_id} has no verifier.")
+    return fact.verifier
 
 
 class CaseDraft(CaseContent):
@@ -289,12 +310,10 @@ class FrozenCase(CaseContent):
         issues = _content_issues(self)
         if issues:
             raise ValueError("; ".join(issues))
-        for criterion in self.criteria:
-            if (
-                isinstance(criterion, DeterministicCriterion)
-                and criterion.entrypoint not in self.hidden_files
-            ):
-                raise ValueError("hidden verifier entrypoint is missing")
+        if any(
+            fact_verifier(fact).entrypoint not in self.hidden_files for fact in verifier_facts(self)
+        ):
+            raise ValueError("hidden verifier entrypoint is missing")
         if any(item.entrypoint not in self.hidden_files for item in self.metrics):
             raise ValueError("hidden metrics entrypoint is missing")
         if len(set(self.hidden_files.values())) != len(self.hidden_files):
@@ -312,12 +331,26 @@ def _content_issues(case: CaseContent) -> list[str]:
         issues.append("Title and initial prompt cannot be blank.")
     if not case.evidence:
         issues.append("Case requires curated source evidence.")
-    if not case.criteria or not any(item.required for item in case.criteria):
-        issues.append("At least one usable required hidden verifier or judge rubric is required.")
+    if not case.phases:
+        issues.append("Declare at least one phase in phases.")
+    if not requirement_facts(case):
+        issues.append("At least one requirement fact is required.")
+    covered = {fact.phase for fact in requirement_facts(case)}
+    issues.extend(
+        f"Phase {phase} has no requirement fact." for phase in case.phases if phase not in covered
+    )
     if len({criterion.criterion_id for criterion in case.criteria}) != len(case.criteria):
         issues.append("Grading criterion IDs must be unique.")
     if len({fact.fact_id for fact in case.allowed_facts}) != len(case.allowed_facts):
         issues.append("Allowed fact IDs must be unique.")
+    reserved = {criterion.criterion_id for criterion in case.criteria} | (
+        set(DEFAULT_RUBRIC_IDS) - set(case.disabled_rubrics)
+    )
+    issues.extend(
+        f"Fact ID {fact.fact_id} collides with a grading criterion ID."
+        for fact in case.allowed_facts
+        if fact.fact_id in reserved
+    )
     return issues
 
 
@@ -375,6 +408,7 @@ def draft_case(
         excerpt=user.text[:16000],
     )
     return CaseDraft(
+        schema_version=2,
         title=user.text.strip().splitlines()[0][:120] or "Untitled task",
         initial_prompt=user.text[:32000],
         source_session_id=session_id,
@@ -499,19 +533,12 @@ def subject_context(case: FrozenCase) -> dict[str, object]:
 
 def _validate_grading(draft: CaseDraft, root: Path) -> tuple[str, ...]:
     issues: list[str] = []
-    for criterion in draft.criteria:
-        if (
-            isinstance(criterion, DeterministicCriterion)
-            and criterion.entrypoint not in draft.hidden_files
-        ):
-            issues.append(f"Hidden verifier entrypoint is missing: {criterion.entrypoint}.")
-        text = (
-            criterion.description
-            if isinstance(criterion, DeterministicCriterion)
-            else criterion.rubric
-        )
-        if text.strip().lower() in {"todo", "placeholder", "fill in grading here"}:
-            issues.append(f"Criterion {criterion.criterion_id} is a placeholder.")
+    issues.extend(
+        f"Hidden verifier entrypoint is missing for fact {fact.fact_id}: "
+        f"{fact_verifier(fact).entrypoint}."
+        for fact in verifier_facts(draft)
+        if fact_verifier(fact).entrypoint not in draft.hidden_files
+    )
     issues.extend(
         f"Hidden metrics entrypoint is missing: {item.entrypoint}."
         for item in draft.metrics

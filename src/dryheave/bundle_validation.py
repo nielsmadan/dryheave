@@ -40,8 +40,8 @@ def validate_bundle_object(store: ObjectStore, identifier: str, included: tuple[
     }
     if loader := loaders.get(manifest.kind):
         loader(store, identifier)
-    elif manifest.kind == ObjectKind.SIMULATOR:
-        load_role(store, identifier, ControllerRecipe, ObjectKind.SIMULATOR)
+    elif manifest.kind == ObjectKind.STAND_IN:
+        load_role(store, identifier, ControllerRecipe, ObjectKind.STAND_IN)
     elif manifest.kind == ObjectKind.SCORING:
         load_role(store, identifier, ScoringConfig, ObjectKind.SCORING)
     elif manifest.kind == ObjectKind.SESSION:

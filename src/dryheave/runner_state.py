@@ -41,7 +41,9 @@ ASSESSMENT_EVENTS = frozenset(
     {
         "criterion-intent",
         "criterion-result",
-        "check-result",
+        "fact-judge-intent",
+        "fact-grade",
+        "rubric-intent",
         "metrics-intent",
         "metrics-result",
         "judge-intent",

@@ -29,11 +29,11 @@ def test_claude_setup_freezes_explicit_configuration_without_launch(store, bench
                 "task",
                 "--profile",
                 "base=subject",
-                "--simulator",
+                "--stand-in",
                 "claude",
-                "--simulator-model",
+                "--stand-in-model",
                 "claude-sonnet-4-6",
-                "--simulator-effort",
+                "--stand-in-effort",
                 "low",
                 "--design-approval",
             ]
@@ -42,7 +42,7 @@ def test_claude_setup_freezes_explicit_configuration_without_launch(store, bench
     )
     response = json.loads(capsys.readouterr().out)["data"]
     frozen = load_experiment(store, "comparison")
-    recipe = store.load(frozen.simulator_id, ControllerRecipe, kind=ObjectKind.SIMULATOR)
+    recipe = store.load(frozen.stand_in_id, ControllerRecipe, kind=ObjectKind.STAND_IN)
     assert (recipe.kind, recipe.version, recipe.model, recipe.effort) == (
         "claude",
         None,
@@ -59,32 +59,32 @@ def test_claude_setup_freezes_explicit_configuration_without_launch(store, bench
         90,
     )
     assert response["id"] == store.resolve("comparison")
-    assert "run comparison --assess" in response["next"]
+    assert "run comparison --workflow --assess" in response["next"]
 
 
 @pytest.mark.parametrize(
-    "simulator,flags",
+    "stand_in,flags",
     [
-        ("none", ["--simulator-model", "claude-sonnet-4-6"]),
-        ("none", ["--simulator-max-calls", "0"]),
+        ("none", ["--stand-in-model", "claude-sonnet-4-6"]),
+        ("none", ["--stand-in-max-calls", "0"]),
         ("claude", []),
-        ("claude", ["--simulator-model", "claude-haiku-4-5-20251001", "--simulator-effort", "low"]),
-        ("claude", ["--simulator-model", "claude-sonnet-4-6", "--simulator-sandbox", "read-only"]),
+        ("claude", ["--stand-in-model", "claude-haiku-4-5-20251001", "--stand-in-effort", "low"]),
+        ("claude", ["--stand-in-model", "claude-sonnet-4-6", "--stand-in-sandbox", "read-only"]),
         (
             "claude",
             [
-                "--simulator-model",
+                "--stand-in-model",
                 "claude-sonnet-4-6",
-                "--simulator-environment",
+                "--stand-in-environment",
                 "ANTHROPIC_API_KEY",
             ],
         ),
-        ("codex", ["--simulator-call-seconds", "0"]),
-        ("codex", ["--simulator-auth-file-env", "OPAQUE"]),
+        ("codex", ["--stand-in-call-seconds", "0"]),
+        ("codex", ["--stand-in-auth-file-env", "OPAQUE"]),
     ],
 )
 def test_setup_rejects_inappropriate_or_unbounded_options(
-    store, benchmark, capsys, simulator, flags
+    store, benchmark, capsys, stand_in, flags
 ):
     assert (
         main(
@@ -99,8 +99,8 @@ def test_setup_rejects_inappropriate_or_unbounded_options(
                 "task",
                 "--profile",
                 "base=subject",
-                "--simulator",
-                simulator,
+                "--stand-in",
+                stand_in,
                 *flags,
             ]
         )
@@ -109,8 +109,8 @@ def test_setup_rejects_inappropriate_or_unbounded_options(
     assert json.loads(capsys.readouterr().err)["error"]["code"] == "invalid_input"
 
 
-@pytest.mark.parametrize("simulator", ["none", "codex"])
-def test_legacy_agent_setup_and_explicit_no_reply_policy(store, benchmark, capsys, simulator):
+@pytest.mark.parametrize("stand_in", ["none", "codex"])
+def test_legacy_agent_setup_and_explicit_no_reply_policy(store, benchmark, capsys, stand_in):
     assert (
         main(
             [
@@ -124,15 +124,15 @@ def test_legacy_agent_setup_and_explicit_no_reply_policy(store, benchmark, capsy
                 "task",
                 "--profile",
                 "base=subject",
-                "--simulator",
-                simulator,
+                "--stand-in",
+                stand_in,
             ]
         )
         == 0
     )
-    recipe = json.loads(capsys.readouterr().out)["data"]["simulator"]
-    assert recipe["kind"] == ("scripted" if simulator == "none" else "codex")
-    if simulator == "none":
+    recipe = json.loads(capsys.readouterr().out)["data"]["stand_in"]
+    assert recipe["kind"] == ("scripted" if stand_in == "none" else "codex")
+    if stand_in == "none":
         assert recipe["budget"]["max_calls"] == 0
     else:
         assert recipe["runtime"]["discovery"] == "codex-clean-0.154.0"
@@ -151,7 +151,7 @@ def test_legacy_agent_setup_and_explicit_no_reply_policy(store, benchmark, capsy
         ("codex", "codex"),
     ],
 )
-def test_setup_resolves_explicit_simulator_paths_before_owned_runtime_launch(
+def test_setup_resolves_explicit_stand_in_paths_before_owned_runtime_launch(
     store, benchmark, tmp_path, capsys, monkeypatch, agent_selection
 ):
     agent, selection = agent_selection
@@ -185,11 +185,11 @@ def test_setup_resolves_explicit_simulator_paths_before_owned_runtime_launch(
                 "task",
                 "--profile",
                 "base=subject",
-                "--simulator",
+                "--stand-in",
                 agent,
-                "--simulator-model",
+                "--stand-in-model",
                 "claude-haiku-4-5-20251001" if agent == "claude" else "synthetic-model",
-                "--simulator-executable",
+                "--stand-in-executable",
                 selected,
             ]
         )
@@ -197,7 +197,7 @@ def test_setup_resolves_explicit_simulator_paths_before_owned_runtime_launch(
     )
     capsys.readouterr()
     frozen = load_experiment(store, "relative")
-    recipe = store.load(frozen.simulator_id, ControllerRecipe, kind=ObjectKind.SIMULATOR)
+    recipe = store.load(frozen.stand_in_id, ControllerRecipe, kind=ObjectKind.STAND_IN)
     assert recipe.command.argv == (str(executable) if "/" in selected else agent,)
     context = CallContext(
         call_id="relative-call",

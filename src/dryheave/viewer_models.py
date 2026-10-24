@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import AwareDatetime
 
 from dryheave.calibration_models import CalibrationStatus
-from dryheave.cases import CaseBudgets, CheckCondition
+from dryheave.cases import CaseBudgets, FactKind
 from dryheave.models import (
     CommandSpec,
     Name,
@@ -14,6 +14,7 @@ from dryheave.models import (
     RunId,
     StrictModel,
 )
+from dryheave.transcript_models import ReviewLanes
 
 DetailStatus = Literal["ok", "unavailable", "invalid", "omitted", "refused"]
 ContentEncoding = Literal["utf-8", "base64"]
@@ -182,11 +183,6 @@ class CriterionReasoning(StrictModel):
     rationale: str | None = None
 
 
-class CheckReasoning(StrictModel):
-    check_id: Name
-    rationale: str | None = None
-
-
 class JudgeReasoningView(StrictModel):
     attempt_id: Name
     assessment_id: ObjectId | None
@@ -194,34 +190,29 @@ class JudgeReasoningView(StrictModel):
     reason: str | None = None
     reason_code: str | None = None
     criteria: tuple[CriterionReasoning, ...] = ()
-    checks: tuple[CheckReasoning, ...] = ()
 
 
 class CaseFactView(StrictModel):
     fact_id: Name
-    text: str
+    kind: FactKind
+    phase: Name | None
     disclosure: Literal["on_request", "proactive"]
+    text: str
+    check: str | None = None
+    verifier: CommandSpec | None = None
+
+
+class CasePromptStepView(StrictModel):
+    step_id: Name
+    after_phase: Name
+    prompt: str
+    slash: bool = False
 
 
 class CaseRubricView(StrictModel):
     criterion_id: Name
-    required: bool
     rubric: str
     origin: Literal["case", "default", "overridden"]
-
-
-class CaseCheckView(StrictModel):
-    check_id: Name
-    question: str
-    expect: Literal["yes", "no"]
-    only_if: CheckCondition | None = None
-
-
-class CaseDeterministicView(StrictModel):
-    criterion_id: Name
-    description: str
-    required: bool
-    command: CommandSpec
 
 
 class CaseMetricsView(StrictModel):
@@ -234,11 +225,11 @@ class CaseView(StrictModel):
     case_id: ObjectId
     title: str
     initial_prompt: str
+    phases: tuple[Name, ...]
     facts: tuple[CaseFactView, ...]
+    workflow: tuple[CasePromptStepView, ...]
     rubrics: tuple[CaseRubricView, ...]
     disabled_rubrics: tuple[Name, ...]
-    deterministic: tuple[CaseDeterministicView, ...]
-    checks: tuple[CaseCheckView, ...]
     metrics: tuple[CaseMetricsView, ...]
     budgets: CaseBudgets
     tool_requirements: tuple[str, ...]
@@ -246,3 +237,11 @@ class CaseView(StrictModel):
     persona_id: ObjectId
     baseline_commit: str | None
     reference_patch: bool
+
+
+class ReviewView(StrictModel):
+    attempt_id: Name
+    status: DetailStatus
+    reason: str | None = None
+    reason_code: str | None = None
+    lanes: ReviewLanes | None = None

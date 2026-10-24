@@ -1,6 +1,6 @@
 # Case workflows
 
-Status: accepted. Date: 2026-10-11.
+Status: accepted. Date: 2026-10-11. The `inspect` steps and the held-out-correctness rule are superseded by [0004](0004-feedback-only-inspection.md).
 
 Cases are personal. A case captures one person's real way of working: their
 reviews, manual testing, QA and docs habits, along with the task itself. That

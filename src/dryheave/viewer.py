@@ -7,7 +7,7 @@ from typing import Literal
 
 from dryheave.calibration_models import CaseCalibration
 from dryheave.calibrations import load_calibration
-from dryheave.cases import DEFAULT_RUBRIC_IDS, DeterministicCriterion, FrozenCase
+from dryheave.cases import DEFAULT_RUBRIC_IDS, FrozenCase
 from dryheave.errors import DryheaveError, InputError, IntegrityError, LimitError, NotFoundError
 from dryheave.experiment_models import FrozenExperiment
 from dryheave.filesystem import directory_names
@@ -20,7 +20,7 @@ from dryheave.models import (
     TrialStage,
     validate_relative_path,
 )
-from dryheave.report_models import Comparison, RunReport
+from dryheave.report_models import AttemptReport, Comparison, RunReport
 from dryheave.reports import compare_runs, report_run
 from dryheave.repositories import load_repository
 from dryheave.result_models import Assessment, AssessmentEvidence
@@ -35,6 +35,7 @@ from dryheave.runner_models import (
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json, digest, parse_model
 from dryheave.storage import ObjectStore
+from dryheave.transcript import AttemptRefs, load_material, review_lanes, run_refs
 from dryheave.viewer_models import (
     AttemptProgress,
     CalibrationEntry,
@@ -42,13 +43,11 @@ from dryheave.viewer_models import (
     CalibrationView,
     CaptureOmissionView,
     CaseCalibrationView,
-    CaseCheckView,
-    CaseDeterministicView,
     CaseFactView,
     CaseMetricsView,
+    CasePromptStepView,
     CaseRubricView,
     CaseView,
-    CheckReasoning,
     ContentEncoding,
     CriterionReasoning,
     DetailStatus,
@@ -59,6 +58,7 @@ from dryheave.viewer_models import (
     JudgeReasoningView,
     LabelIndex,
     PatchView,
+    ReviewView,
     RunListing,
     RunProgress,
     RunRow,
@@ -188,7 +188,6 @@ def _rubric_views(case: FrozenCase) -> tuple[CaseRubricView, ...]:
         views.append(
             CaseRubricView(
                 criterion_id=item.criterion_id,
-                required=item.required,
                 rubric=item.rubric,
                 origin=origin,
             )
@@ -364,15 +363,19 @@ class ViewerService:
             return execution.journal.metadata.run_id, AttemptIdentity(
                 state.capture_id, state.quarantine_id, state.assessment_id
             )
-        if not re.fullmatch(OBJECT_ID_PATTERN, source_id):
+        run_id, attempt = self._report_attempt(source_id, attempt_id)
+        return run_id, AttemptIdentity(
+            attempt.capture_id, attempt.quarantine_id, attempt.assessment_id
+        )
+
+    def _report_attempt(self, report_id: str, attempt_id: str) -> tuple[str, AttemptReport]:
+        if not re.fullmatch(OBJECT_ID_PATTERN, report_id):
             raise InputError("Expected a lowercase SHA-256 object ID.")
-        report = report_run(self.store, source_id, journal_limit=self.max_request_journal_bytes)
+        report = report_run(self.store, report_id, journal_limit=self.max_request_journal_bytes)
         attempt = next((item for item in report.attempts if item.attempt_id == attempt_id), None)
         if attempt is None:
             raise NotFoundError(f"Report has no retained attempt: {attempt_id}")
-        return report.run_id, AttemptIdentity(
-            attempt.capture_id, attempt.quarantine_id, attempt.assessment_id
-        )
+        return report.run_id, attempt
 
     def _retained_capture(
         self, run_id: str, attempt_id: str, identity: AttemptIdentity
@@ -671,7 +674,6 @@ class ViewerService:
                 reason_code="not_retained",
             )
         criterion_rationale = {item.criterion_id: item.rationale for item in response.judgments}
-        check_rationale = {item.check_id: item.rationale for item in response.checks}
         return JudgeReasoningView(
             attempt_id=attempt_id,
             assessment_id=view.assessment_id,
@@ -683,11 +685,27 @@ class ViewerService:
                 )
                 for item in assessment.criteria
             ),
-            checks=tuple(
-                CheckReasoning(check_id=item.check_id, rationale=check_rationale.get(item.check_id))
-                for item in assessment.checks
-            ),
         )
+
+    def review(self, kind: str, source_id: str, attempt_id: str) -> ReviewView:
+        if kind == "run":
+            self._attempt(kind, source_id, attempt_id)
+            execution = self._execution(source_id)
+            material = load_material(
+                self.store, run_refs(self.store, execution, attempt_id), execution.journal.events
+            )
+        else:
+            run_id, attempt = self._report_attempt(source_id, attempt_id)
+            refs = AttemptRefs(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                capture_id=attempt.capture_id,
+                quarantine_id=attempt.quarantine_id,
+                assessment_id=None,
+                case_id=attempt.result.case_id if attempt.result else None,
+            )
+            material = load_material(self.store, refs, None, assessment=attempt.result)
+        return ReviewView(attempt_id=attempt_id, status="ok", lanes=review_lanes(material))
 
     def _frozen_case_for_view(self, store: ObjectStore, case_id: str) -> FrozenCase:
         case = store.load(case_id, FrozenCase, kind=ObjectKind.CASE)
@@ -714,31 +732,30 @@ class ViewerService:
             case_id=case_id,
             title=case.title,
             initial_prompt=case.initial_prompt,
+            phases=case.phases,
             facts=tuple(
-                CaseFactView(fact_id=item.fact_id, text=item.text, disclosure=item.disclosure)
+                CaseFactView(
+                    fact_id=item.fact_id,
+                    kind=item.kind,
+                    phase=item.phase,
+                    disclosure=item.disclosure,
+                    text=item.text,
+                    check=item.check,
+                    verifier=item.verifier.command if item.verifier else None,
+                )
                 for item in case.allowed_facts
+            ),
+            workflow=tuple(
+                CasePromptStepView(
+                    step_id=item.step_id,
+                    after_phase=item.after_phase,
+                    prompt=item.prompt,
+                    slash=item.slash,
+                )
+                for item in case.workflow
             ),
             rubrics=_rubric_views(case),
             disabled_rubrics=case.disabled_rubrics,
-            deterministic=tuple(
-                CaseDeterministicView(
-                    criterion_id=item.criterion_id,
-                    description=item.description,
-                    required=item.required,
-                    command=item.command,
-                )
-                for item in case.criteria
-                if isinstance(item, DeterministicCriterion)
-            ),
-            checks=tuple(
-                CaseCheckView(
-                    check_id=item.check_id,
-                    question=item.question,
-                    expect=item.expect,
-                    only_if=item.only_if,
-                )
-                for item in case.checks
-            ),
             metrics=tuple(
                 CaseMetricsView(
                     metrics_id=item.metrics_id, description=item.description, command=item.command

@@ -140,6 +140,9 @@ class DriverSession:
             self.close()
             raise
 
+    def extend_deadline(self, seconds: float) -> None:
+        self.deadline += max(0.0, seconds)
+
     def _ingest(self) -> None:
         for event in self.source.poll():
             if len(self.events) >= self.limits.max_events:

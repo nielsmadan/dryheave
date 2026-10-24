@@ -153,7 +153,7 @@ def test_lost_launch_acknowledgement_requires_terminal_reconciliation(
 
 
 @pytest.mark.integration
-def test_terminal_owner_publishes_pending_identities_before_each_simulator_call(
+def test_terminal_owner_publishes_pending_identities_before_each_stand_in_call(
     store, benchmark, monkeypatch
 ):
     source = FakeEventSource([])

@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from dryheave.authoring_catalog import ProblemDecision, VoiceDraft, read_catalog
-from dryheave.cases import DeterministicCriterion, draft_case, load_frozen_case
+from dryheave.cases import FactVerifier, TaskFact, draft_case, load_frozen_case
 from dryheave.errors import ConflictError, InputError
 from dryheave.logs.base import EvidenceExcerpt, LogEvent, Session
 from dryheave.logs.service import import_session
@@ -502,7 +502,7 @@ def test_decisions_reject_inconsistent_membership_and_ranges(store, mining_conte
             update={"evidence": (decision.evidence[0].model_copy(update={"excerpt": "invented"}),)}
         )
     with pytest.raises(InputError):
-        record_decision(store, root, "tasks", decision, expected_revision=2)
+        record_decision(store, root, "tasks", decision, expected_revision=2, draft_root=root)
     assert read_catalog(root).requests["tasks"].decisions == {}
 
 
@@ -516,6 +516,7 @@ def test_rejections_and_coverage_gaps_remain_explicit(store, mining_context):
             update={"state": "rejected", "rationale": "Cannot independently recover the baseline."}
         ),
         expected_revision=2,
+        draft_root=root,
     )
     assert catalog.requests["tasks"].decisions[decision.name].state == "rejected"
     catalog = record_gap(
@@ -549,13 +550,18 @@ def drafted_problem(store, historical_repo, mining_context):
             "unresolved_issues": (),
             "hidden_files": {"hidden.py": "hidden.py"},
             "reference_patch": "reference.patch",
-            "criteria": (
-                DeterministicCriterion(
-                    criterion_id="check",
-                    description="Verify greeting punctuation and name behavior.",
-                    command=CommandSpec(argv=("python3", "{verifier}/hidden.py")),
-                    entrypoint="hidden.py",
-                    expected_stdout="fixture verifier",
+            "phases": ("fix",),
+            "allowed_facts": (
+                TaskFact(
+                    fact_id="check",
+                    phase="fix",
+                    text="Greet with a comma and keep the name.",
+                    curator_authored=True,
+                    verifier=FactVerifier(
+                        command=CommandSpec(argv=("python3", "{verifier}/hidden.py")),
+                        entrypoint="hidden.py",
+                        expected_stdout="fixture verifier",
+                    ),
                 ),
             ),
         }
@@ -571,7 +577,7 @@ def drafted_problem(store, historical_repo, mining_context):
             "baseline_rationale": f"Fixture baseline commit {baseline}.",
         }
     )
-    record_decision(store, root, "tasks", decision, expected_revision=2)
+    record_decision(store, root, "tasks", decision, expected_revision=2, draft_root=root)
     return root, decision, path, hidden, reference
 
 
@@ -581,7 +587,9 @@ def test_freeze_rejects_stale_validation_for_every_content_boundary(
     store, drafted_problem, changed
 ):
     root, decision, path, hidden, reference = drafted_problem
-    catalog = validate_problem(store, root, "tasks", decision.name, expected_revision=3)
+    catalog = validate_problem(
+        store, root, "tasks", decision.name, expected_revision=3, draft_root=root
+    )
     assert catalog.requests["tasks"].decisions[decision.name].validation is not None
     revision = 4
     if changed == "draft":
@@ -596,7 +604,13 @@ def test_freeze_rejects_stale_validation_for_every_content_boundary(
         selected.write_text(selected.read_text() + "changed bytes\n")
     with pytest.raises(ConflictError, match="stale"):
         validate_problem(
-            store, root, "tasks", decision.name, expected_revision=revision, freeze=True
+            store,
+            root,
+            "tasks",
+            decision.name,
+            expected_revision=revision,
+            freeze=True,
+            draft_root=root,
         )
     assert read_catalog(root).revision == revision
     assert read_catalog(root).requests["tasks"].decisions[decision.name].state == "drafted"
@@ -607,10 +621,12 @@ def test_freeze_rejects_stale_validation_for_every_content_boundary(
 def test_validate_freeze_uses_reviewed_snapshot_and_pins_case(store, drafted_problem):
     root, decision, _, hidden, reference = drafted_problem
     with pytest.raises(ConflictError, match="missing or stale"):
-        validate_problem(store, root, "tasks", decision.name, expected_revision=3, freeze=True)
-    validate_problem(store, root, "tasks", decision.name, expected_revision=3)
+        validate_problem(
+            store, root, "tasks", decision.name, expected_revision=3, freeze=True, draft_root=root
+        )
+    validate_problem(store, root, "tasks", decision.name, expected_revision=3, draft_root=root)
     catalog = validate_problem(
-        store, root, "tasks", decision.name, expected_revision=4, freeze=True
+        store, root, "tasks", decision.name, expected_revision=4, freeze=True, draft_root=root
     )
     frozen = catalog.requests["tasks"].decisions[decision.name]
     assert frozen.state == "frozen"
@@ -623,7 +639,7 @@ def test_validate_freeze_uses_reviewed_snapshot_and_pins_case(store, drafted_pro
     assert store.read_blob(frozen.case_id, "verifiers/hidden.py") == hidden.read_bytes()
     assert store.read_blob(frozen.case_id, "reference.patch") == reference.read_bytes()
     with pytest.raises(ConflictError, match="retained"):
-        record_decision(store, root, "tasks", decision, expected_revision=5)
+        record_decision(store, root, "tasks", decision, expected_revision=5, draft_root=root)
 
 
 @pytest.mark.integration
@@ -651,6 +667,7 @@ def test_drafted_candidates_require_matching_case_baseline_and_scope(store, draf
             "micro" if fault == "micro" else "tasks",
             decision,
             expected_revision=4 if fault == "micro" else 3,
+            draft_root=root,
         )
 
 
@@ -661,7 +678,7 @@ def test_micro_request_accepts_only_one_supported_candidate(store, drafted_probl
     decision = decision.model_copy(
         update={"micro_bug_rationale": "A single bounded command behavior."}
     )
-    record_decision(store, root, "micro", decision, expected_revision=4)
+    record_decision(store, root, "micro", decision, expected_revision=4, draft_root=root)
     with pytest.raises(InputError, match="Invalid schema"):
         record_decision(
             store,
@@ -669,6 +686,7 @@ def test_micro_request_accepts_only_one_supported_candidate(store, drafted_probl
             "micro",
             decision.model_copy(update={"name": "second"}),
             expected_revision=5,
+            draft_root=root,
         )
     assert list(read_catalog(root).requests["micro"].decisions) == [decision.name]
 

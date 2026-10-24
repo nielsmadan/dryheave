@@ -14,21 +14,14 @@ import psutil
 from pydantic import JsonValue
 
 from dryheave.capture_models import CaptureOmission, WorkspaceCapture
-from dryheave.cases import (
-    CapturePolicy,
-    InspectStep,
-    PromptStep,
-    WorkflowStep,
-    effective_workflow,
-    load_frozen_case,
-)
+from dryheave.cases import CapturePolicy, PromptStep, graded_facts, load_frozen_case
 from dryheave.controller_models import (
     ControllerRecipe,
     DialogPrompt,
     DialogueMessage,
-    InspectionFinding,
+    RaisedFact,
     RoleCall,
-    SimulatorDecision,
+    StandInDecision,
 )
 from dryheave.controllers import (
     CallContext,
@@ -38,7 +31,7 @@ from dryheave.controllers import (
     is_controller_limit_error,
     screen_answer,
     screen_projection,
-    simulator_projection,
+    stand_in_projection,
 )
 from dryheave.drivers.artifacts import ArtifactWriter
 from dryheave.drivers.auth import RuntimeBindings
@@ -74,7 +67,12 @@ from dryheave.filesystem import ensure_directory
 from dryheave.final_capture import CaptureBuilder, capture_workspace
 from dryheave.fixture_subject import FixtureTerminal
 from dryheave.inspection import InspectionRequest, InspectionResult, inspect_workspace
-from dryheave.judges import TranscriptEntry, judge_transcript_from_events
+from dryheave.judges import (
+    FactInspection,
+    RaiseEvent,
+    TranscriptEntry,
+    judge_transcript_from_events,
+)
 from dryheave.models import AgentKind, JournalEvent, ObjectKind, StrictModel, TrialStage
 from dryheave.personas import load_frozen_persona
 from dryheave.process_ownership import ProcessOwner
@@ -98,18 +96,33 @@ from dryheave.runner_models import (
 from dryheave.runner_state import ExecutionJournal
 from dryheave.serialization import canonical_json, digest, parse_model
 from dryheave.storage import ObjectStore
-from dryheave.workflow import dialog_source, next_workflow_action
+from dryheave.workflow import (
+    FACT_INSPECTION_EVENT,
+    INSPECTION_INTENT_EVENT,
+    RAISE_EVENT,
+    blocking_phase,
+    dialog_source,
+    inspection_verdict,
+    next_workflow_action,
+    raised_facts,
+    workflow_steps,
+)
 
 type SubmissionPolicy = Literal["conversation", "curated-native-command"]
 
 INSPECTION_ATTEMPTS = 2
+INSPECTION_SECONDS = 600
 STOP_WITH_FINDINGS = "stop_with_findings"
 STOP_CORRECTION = (
-    "You answered stop, but the inspection still lists problems you found when trying the "
-    "result. Reply as this user describing what is still wrong and ask for it to be fixed."
+    "You answered stop, but when you tried the result you still saw what inspection lists. "
+    "Do not stop: describe what you saw, in this user's words."
 )
-FALLBACK_FIX_REPLY = (
-    "I tried it again and it's still not quite right. Can you test it yourself and fix what's off?"
+FALLBACK_FIX_REPLY = "I tried it again and it still doesn't work the way I described."
+FALLBACK_DECISION = StandInDecision(
+    action="reply",
+    text=FALLBACK_FIX_REPLY,
+    reason="Fallback fix request: the user stand-in stopped twice although "
+    "the inspection found problems.",
 )
 WORKFLOW_STEP_EVENT = "workflow-step"
 INVALID_DIALOG_ANSWER = "invalid_dialog_answer"
@@ -167,14 +180,18 @@ def _combine_cleanup(*reports: CleanupReport) -> CleanupReport:
 
 
 def workflow_progress(
-    steps: tuple[WorkflowStep, ...], events: tuple[JournalEvent, ...], attempt_id: str
+    steps: tuple[PromptStep, ...],
+    events: tuple[JournalEvent, ...],
+    attempt_id: str,
+    *,
+    enabled: bool,
 ) -> WorkflowProgress | None:
     records = tuple(
         parse_model(canonical_json(event.data), WorkflowStepRecord)
         for event in events
         if event.attempt_id == attempt_id and event.event == WORKFLOW_STEP_EVENT
     )
-    if not steps and not records:
+    if not enabled and not records:
         return None
     return WorkflowProgress(
         steps=tuple(step.step_id for step in steps),
@@ -208,7 +225,7 @@ class TrialExecution:
         self.case = load_frozen_case(store, trial.case_id)
         self.persona = load_frozen_persona(store, self.case.persona_id)
         self.recipe = load_role(
-            store, experiment.simulator_id, ControllerRecipe, ObjectKind.SIMULATOR
+            store, experiment.stand_in_id, ControllerRecipe, ObjectKind.STAND_IN
         )
         self.inspector = (
             inspection_recipe(
@@ -217,13 +234,13 @@ class TrialExecution:
             if self.options.workflow
             else None
         )
-        self.steps = effective_workflow(
-            self.case, enabled=self.options.workflow, inspected=self.inspector is not None
-        )
+        self.steps = workflow_steps(self.case, enabled=self.options.workflow)
         self.position = state.workflow_position or 0
         self.inspections = 0
-        self.last_inspection: InspectionResult | None = None
+        self.inspection_seconds = 0.0
+        self.inspected: list[FactInspection] = []
         self.pending: WorkflowEvent | None = None
+        self.pending_raise: tuple[RaiseEvent, WorkflowEvent] | None = None
         self.inspection_root = journal.journal.path / "inspections" / state.attempt_id
         self.driver: DriverSession | None = None
         self.terminal: TuiTestTerminal | None = None
@@ -442,15 +459,15 @@ class TrialExecution:
                 trial_id=self.state.trial_id,
                 attempt_id=self.state.attempt_id,
             )
-            if self.pending is not None and self.accepted > previous:
-                self._advance(self.pending, self.position + 1)
-            self.pending = None
+            if self.accepted > previous:
+                self._accept_pending()
+            self.pending = self.pending_raise = None
             if self.observation.state not in {"completed", "question"}:
                 self.update(
                     stop_reason=self.state.stop_reason or self._stop_reason(self.observation)
                 )
                 return
-            if self.accepted >= self.case.budgets.max_turns:
+            if self.accepted >= self.options.budget.max_turns:
                 self.update(stop_reason="turn_budget")
                 return
             following = self._follow(inherited)
@@ -466,9 +483,7 @@ class TrialExecution:
         self.accepted = self.driver.accepted_count
         if self.accepted > delivered:
             self.dialogue.append(DialogueMessage(role="user", text=prompt))
-            if self.pending is not None:
-                self._advance(self.pending, self.position + 1)
-                self.pending = None
+            self._accept_pending()
         refreshed = False
         while awaits_screen(observation):
             interruption = self._interruption()
@@ -526,7 +541,7 @@ class TrialExecution:
             screen=None,
         )
         before = {call.call_id for call in self.state.calls}
-        decision = self._simulate(inherited, dialog=dialog)
+        decision = self._stand_in_turn(inherited, dialog=dialog)
         selection = (
             None
             if decision is None or dialog.prompt is None
@@ -564,14 +579,14 @@ class TrialExecution:
                     current, "needs_input", "The screen stayed open after its bounded answer steps."
                 )
             dialog, step_id = self._ask(prompt, delivered, dialog=None, screen=current.text)
-            decision = self._simulate(inherited, dialog=dialog)
+            decision = self._stand_in_turn(inherited, dialog=dialog)
             if decision is None:
-                return self._screen_stop(current, None, "The simulator did not answer the screen.")
+                return self._screen_stop(current, None, "The stand-in did not answer the screen.")
             if decision.screen_kind == "approval":
                 return self._screen_stop(
                     current,
                     "needs_input",
-                    "The simulator judged the screen a permission prompt; it was not answered.",
+                    "The stand-in judged the screen a permission prompt; it was not answered.",
                     state="approval",
                 )
             steps += 1
@@ -655,103 +670,103 @@ class TrialExecution:
                 call_ids=tuple(
                     call.call_id
                     for call in self.state.calls
-                    if call.call_id not in before and call.role == "simulator"
+                    if call.call_id not in before and call.role == "stand_in"
                 ),
             )
         )
 
     def _follow(self, inherited: Mapping[str, str]) -> tuple[str, SubmissionPolicy] | None:
-        decision = self._simulate(inherited)
+        decision = self._stand_in_turn(inherited)
         if decision is None:
             return None
         if decision.action == "reply":
             return decision.text, "conversation"
-        if not self.steps or decision.stop_kind != "done":
-            self.update(stop_reason="simulator_stop")
+        if not self.options.workflow or decision.stop_kind != "done":
+            self.update(stop_reason="stand_in_stop")
             return None
         return self._done_point(inherited)
 
     def _done_point(self, inherited: Mapping[str, str]) -> tuple[str, SubmissionPolicy] | None:
-        while True:
-            if next_workflow_action(self.steps, self.position) == "complete":
-                self.update(stop_reason="workflow_complete")
-                return None
+        if self.inspections >= self.options.budget.max_inspections:
+            self.update(stop_reason="inspection_budget")
+            return None
+        inspection = self._inspect(inherited)
+        if inspection is None:
+            return None
+        verdicts = {item.fact_id: item.verdict for item in inspection.judgments}
+        action = next_workflow_action(self.case, self.position, verdicts)
+        if action == "complete":
+            self.update(stop_reason="workflow_complete")
+            return None
+        if action == "deliver_prompt":
             step = self.steps[self.position]
-            if isinstance(step, PromptStep):
-                delivered = delivered_prompt(self._agent(), step.prompt)
-                self.pending = WorkflowEvent(
-                    step_id=step.step_id,
-                    kind="prompt",
-                    outcome="sent",
-                    turn=self.accepted,
-                    delivered_text=None if delivered == step.prompt else delivered,
-                )
-                return delivered, ("curated-native-command" if step.slash else "conversation")
-            if self.inspections >= self.case.budgets.max_turns:
-                self.update(stop_reason="turn_budget")
-                return None
-            if not self._inspect_step(step, inherited):
-                return None
-            if self.last_inspection is None or self.last_inspection.status == "passed":
-                continue
-            return self._request_fix(step, self.last_inspection.findings, inherited)
+            delivered = delivered_prompt(self._agent(), step.prompt)
+            self.pending = WorkflowEvent(
+                step_id=step.step_id,
+                kind="prompt",
+                outcome="sent",
+                turn=self.accepted,
+                delivered_text=None if delivered == step.prompt else delivered,
+            )
+            return delivered, ("curated-native-command" if step.slash else "conversation")
+        phase = blocking_phase(self.case, verdicts)
+        if phase is None:
+            raise InputError("A raise needs a phase with an unmet requirement.")
+        observed = {item.fact_id: item.observation for item in inspection.judgments}
+        raised = tuple(
+            RaisedFact(fact_id=fact.fact_id, text=fact.text, observation=observed[fact.fact_id])
+            for fact in raised_facts(self.case, phase, verdicts)
+        )
+        return self._request_fix(phase, raised, inherited)
 
     def _agent(self) -> AgentKind:
         if self.state.launch_plan is None:
             raise InputError("Workflow prompt delivery needs a saved launch plan.")
         return self.state.launch_plan.agent
 
-    def _inspect_step(self, step: InspectStep, inherited: Mapping[str, str]) -> bool:
-        previous = self.last_inspection
-        result = self._inspect(step, inherited)
-        reused = (
-            previous is not None
-            and previous.step_id == result.step_id
-            and previous.snapshot_digest == result.snapshot_digest
-            and result.status == "failed"
-            and not result.calls
-        )
-        event = WorkflowEvent(
-            step_id=step.step_id,
-            kind="inspect",
-            outcome="reused" if reused else result.status,
-            turn=self.accepted,
-            failed_criteria=tuple(item.criterion_id for item in result.findings),
-            call_ids=tuple(call.call_id for call in result.calls),
-            seconds=result.seconds,
-        )
-        if result.status == "unavailable":
-            self._advance(event, self.position)
-            self.update(stop_reason=self._interruption() or "inspection_unavailable")
-            return False
-        self.last_inspection = result
-        self._advance(event, self.position + (result.status == "passed"))
-        return True
-
     def _request_fix(
-        self,
-        step: InspectStep,
-        findings: tuple[InspectionFinding, ...],
-        inherited: Mapping[str, str],
+        self, phase: str, raised: tuple[RaisedFact, ...], inherited: Mapping[str, str]
     ) -> tuple[str, SubmissionPolicy] | None:
         before = {call.call_id for call in self.state.calls}
-        decision = self._simulate(inherited, inspection=findings)
+        decision = self._stand_in_turn(inherited, inspection=raised)
         if decision is None or decision.action != "reply":
             return None
-        self._advance(
+        made = tuple(
+            call.call_id
+            for call in self.state.calls
+            if call.call_id not in before and call.role == "stand_in"
+        )
+        fallback = decision is FALLBACK_DECISION
+        handed = tuple(item.fact_id for item in raised)
+        self.pending_raise = (
+            RaiseEvent(
+                call_id=made[-1],
+                phase=phase,
+                fact_ids=handed,
+                cited=() if fallback else decision.fact_ids,
+                cause="fallback" if fallback else "fix_request",
+                turn=self.accepted,
+            ),
             WorkflowEvent(
-                step_id=step.step_id,
+                step_id=phase,
                 kind="inspect",
                 outcome="fix_requested",
                 turn=self.accepted,
-                failed_criteria=tuple(item.criterion_id for item in findings),
-                call_ids=tuple(
-                    call.call_id for call in self.state.calls if call.call_id not in before
-                ),
+                failed_criteria=handed,
+                call_ids=made,
             ),
-            self.position,
         )
         return decision.text, "conversation"
+
+    def _accept_pending(self) -> None:
+        if self.pending is not None:
+            self._advance(self.pending, self.position + 1)
+            self.pending = None
+        if self.pending_raise is not None:
+            raised, requested = self.pending_raise
+            self.journal.record(self.state, RAISE_EVENT, raised.model_dump(mode="json"))
+            self._record(requested)
+            self.pending_raise = None
 
     def _advance(self, event: WorkflowEvent, position: int) -> None:
         self.journal.record(
@@ -774,19 +789,23 @@ class TrialExecution:
             return "cancelled"
         return "timeout" if time.monotonic() >= self.deadline else None
 
-    def _inspect(self, step: InspectStep, inherited: Mapping[str, str]) -> InspectionResult:
+    def _inspect(self, inherited: Mapping[str, str]) -> FactInspection | None:
         self.inspections += 1
+        inspection_id = "i-" + uuid4().hex
         scratch = self.store.root / "scratch"
         privates = tuple(scratch / f"inspection-{uuid4().hex}" for _ in range(INSPECTION_ATTEMPTS))
         self.journal.record(
             self.state,
-            "inspection-intent",
+            INSPECTION_INTENT_EVENT,
             {
-                "step_id": step.step_id,
-                "position": self.position,
+                "inspection_id": inspection_id,
                 "turn": self.accepted,
                 "private": [str(path) for path in privates],
             },
+        )
+        started = time.monotonic()
+        deadline = started + max(
+            INSPECTION_SECONDS, self.inspector.budget.total_seconds if self.inspector else 0
         )
         calls: list[RoleCall] = []
         judged = 0
@@ -794,7 +813,9 @@ class TrialExecution:
         result: InspectionResult | None = None
         for index in range(INSPECTION_ATTEMPTS):
             observed = self._observed_events()
-            attempt, made = self._inspect_once(step, inherited, privates[index], judged)
+            attempt, made = self._inspect_once(
+                inspection_id, inherited, privates[index], judged, deadline
+            )
             judged += made
             calls.extend(attempt.calls)
             seconds += attempt.seconds
@@ -803,28 +824,62 @@ class TrialExecution:
                 break
         if result is None:
             result = InspectionResult(
-                step_id=step.step_id,
-                status="unavailable",
-                findings=(),
-                calls=(),
-                snapshot_digest=None,
-                error="events_arrived",
-                seconds=0,
+                inspection=self._unavailable(inspection_id, "events_arrived"), calls=(), seconds=0
             )
         result = result.model_copy(update={"calls": tuple(calls), "seconds": seconds})
-        self.journal.record(
-            self.state,
-            "inspection-result",
-            {"position": self.position, "result": result.model_dump(mode="json")},
+        self._exclude(time.monotonic() - started)
+        inspection = result.inspection
+        self.journal.record(self.state, FACT_INSPECTION_EVENT, inspection.model_dump(mode="json"))
+        verdicts = {item.fact_id: item.verdict for item in inspection.judgments}
+        unmet = tuple(
+            fact.fact_id
+            for fact in graded_facts(self.case)
+            if fact.kind == "requirement" and verdicts.get(fact.fact_id) == "unmet"
         )
-        return result
+        self._record(
+            WorkflowEvent(
+                step_id=inspection_id,
+                kind="inspect",
+                outcome=inspection_verdict(self.case, self.position, inspection),
+                turn=self.accepted,
+                failed_criteria=unmet,
+                call_ids=tuple(call.call_id for call in result.calls),
+                seconds=result.seconds,
+            )
+        )
+        if inspection.status == "unavailable":
+            self.update(stop_reason=self._interruption() or "inspection_unavailable")
+            return None
+        self.inspected.append(inspection)
+        return inspection
+
+    def _unavailable(self, inspection_id: str, error: str) -> FactInspection:
+        return FactInspection(
+            inspection_id=inspection_id,
+            turn=self.accepted,
+            snapshot_digest=None,
+            input_digest=None,
+            status="unavailable",
+            error=error,
+        )
+
+    def _exclude(self, seconds: float) -> None:
+        self.inspection_seconds += seconds
+        self.deadline += seconds
+        if self.driver is not None:
+            self.driver.extend_deadline(seconds)
 
     def _inspect_once(
-        self, step: InspectStep, inherited: Mapping[str, str], private: Path, judged: int
+        self,
+        inspection_id: str,
+        inherited: Mapping[str, str],
+        private: Path,
+        judged: int,
+        deadline: float,
     ) -> tuple[InspectionResult, int]:
         intents: list[str] = []
 
-        def context(deadline: float, runtime_root: Path) -> CallContext:
+        def context(call_deadline: float, runtime_root: Path) -> CallContext:
             call_id = "j-" + uuid4().hex
             intents.append(call_id)
             self.update(
@@ -836,7 +891,7 @@ class TrialExecution:
             return CallContext(
                 call_id=call_id,
                 index=judged + len(intents) - 1,
-                deadline=deadline,
+                deadline=call_deadline,
                 cancelled=self.cancelled,
                 inherited=inherited,
                 on_identities=self.own,
@@ -847,17 +902,19 @@ class TrialExecution:
             store=self.store,
             case_id=self.trial.case_id,
             case=self.case,
-            step=step,
+            facts=graded_facts(self.case),
             workspace=self.workspace,
             transcript=self._transcript(),
             recipe=self.inspector,
             scratch=self.store.root / "scratch",
             retained=self.inspection_root,
             call_context=context,
-            deadline=self.deadline,
+            deadline=deadline,
             cancelled=self.cancelled,
             on_identities=self.own,
-            previous=self.last_inspection,
+            inspection_id=inspection_id,
+            turn=self.accepted,
+            previous=tuple(self.inspected),
             private=private,
         )
         self._publish()
@@ -865,12 +922,8 @@ class TrialExecution:
             result = inspect_workspace(request)
         except (DryheaveError, OSError) as error:
             result = InspectionResult(
-                step_id=step.step_id,
-                status="unavailable",
-                findings=(),
+                inspection=self._unavailable(inspection_id, type(error).__name__),
                 calls=(),
-                snapshot_digest=None,
-                error=type(error).__name__,
                 seconds=0,
             )
         finally:
@@ -913,21 +966,24 @@ class TrialExecution:
             else observation.state
         )
 
-    def _simulate(
+    def _stand_in_turn(
         self,
         inherited: Mapping[str, str],
         *,
         retry: bool = True,
-        inspection: tuple[InspectionFinding, ...] = (),
+        inspection: tuple[RaisedFact, ...] = (),
         dialog: DialogAsk | None = None,
         correction: str | None = None,
-    ) -> SimulatorDecision | None:
-        made = tuple(call for call in self.state.calls if call.role == "simulator")
+    ) -> StandInDecision | None:
+        made = tuple(call for call in self.state.calls if call.role == "stand_in")
         spent = sum(call.elapsed_seconds or 0 for call in made)
+        if len(made) >= self.options.budget.stand_in_replies:
+            self.update(stop_reason="stand_in_budget")
+            return None
         if len(made) >= self.recipe.budget.max_calls or spent >= self.recipe.budget.total_seconds:
             self.update(stop_reason="controller_budget")
             return None
-        request = simulator_projection(
+        request = stand_in_projection(
             self.case,
             self.persona,
             tuple(self.dialogue) if dialog is None else dialog.dialogue,
@@ -985,7 +1041,7 @@ class TrialExecution:
                 else call.error in RETRIED_REJECTIONS
             )
             if retry and stopped and self._interruption() is None:
-                return self._simulate(
+                return self._stand_in_turn(
                     inherited,
                     retry=False,
                     inspection=inspection,
@@ -993,14 +1049,8 @@ class TrialExecution:
                     correction=STOP_CORRECTION if call.error == STOP_WITH_FINDINGS else None,
                 )
             if call.error == STOP_WITH_FINDINGS and self._interruption() is None:
-                fallback = SimulatorDecision(
-                    action="reply",
-                    text=FALLBACK_FIX_REPLY,
-                    reason="Fallback fix request: the simulated user stopped twice although "
-                    "the inspection found problems.",
-                )
-                self.journal.evidence(self.state, "simulator-fallback", fallback)
-                return fallback
+                self.journal.evidence(self.state, "stand-in-fallback", FALLBACK_DECISION)
+                return FALLBACK_DECISION
             self.update(
                 stop_reason=self._interruption()
                 or ("needs_input" if call.error in UNANSWERED_REJECTIONS else "controller_error")
@@ -1010,8 +1060,8 @@ class TrialExecution:
 
     @staticmethod
     def _rejection(
-        decision: SimulatorDecision | None,
-        inspection: tuple[InspectionFinding, ...],
+        decision: StandInDecision | None,
+        inspection: tuple[RaisedFact, ...],
         dialog: DialogAsk | None,
     ) -> str | None:
         if decision is None:
@@ -1033,7 +1083,9 @@ class TrialExecution:
 
     def stop(self) -> None:
         if self.started is not None:
-            self.subject_seconds = time.monotonic() - self.started
+            self.subject_seconds = max(
+                0.0, time.monotonic() - self.started - self.inspection_seconds
+            )
         previous = self.cleanup
         try:
             self.update(
@@ -1106,7 +1158,7 @@ class TrialExecution:
             case_id=self.trial.case_id,
             profile_id=self.trial.profile_id,
             persona_id=self.case.persona_id,
-            simulator_id=self.experiment.simulator_id,
+            stand_in_id=self.experiment.stand_in_id,
             scoring_id=self.experiment.scoring_id,
             mode=self.options.mode,
             created_at=self.state.created_at,
@@ -1125,7 +1177,10 @@ class TrialExecution:
             usage=self.usage,
             controller_calls=self.state.calls,
             workflow=workflow_progress(
-                self.steps, self.journal.journal.events, self.state.attempt_id
+                self.steps,
+                self.journal.journal.events,
+                self.state.attempt_id,
+                enabled=self.options.workflow,
             ),
             workspace=workspace,
             evidence_files={name: digest(content) for name, content in evidence.items()},
