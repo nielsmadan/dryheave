@@ -1105,7 +1105,14 @@ def test_selected_recipes_serialize_without_live_fields():
     ] == ["jina"]
 
 
-def test_live_profile_launches_from_snapshot_with_inherited_environment(store, tmp_path):
+def test_live_profile_launches_from_snapshot_with_inherited_environment(
+    store, tmp_path, monkeypatch
+):
+    executable = tmp_path / "bin/claude"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(executable.parent))
     source = live_home(tmp_path)
     config = source.root
     recorded = snapshot_live_config(source, tmp_path / "snapshots" / LIVE_CONFIG_DIRECTORY)
