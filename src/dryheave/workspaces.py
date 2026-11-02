@@ -247,8 +247,51 @@ def _create_directory(path: Path, ownership: WorkspaceDirectoryOwnership) -> Non
             shutil.rmtree(staged)
 
 
-def _with_mode(config: WorkspaceConfig, mode: GitCommitMode) -> WorkspaceConfig:
-    return config.model_copy(update={"git_commit": mode})
+def _with_settings(config: WorkspaceConfig, settings: WorkspaceConfig) -> WorkspaceConfig:
+    return config.model_copy(
+        update={"git_commit": settings.git_commit, "tui_test": settings.tui_test}
+    )
+
+
+def _planned_config(
+    root: Path,
+    runtime_root: Path | None,
+    tui_test: Path | None,
+    git_commit: GitCommitMode | None,
+) -> tuple[WorkspaceOwnership | None, Workspace | None, Workspace]:
+    owned = _ownership(root)
+    try:
+        existing = read_workspace(root)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and (
+        owned is None or _with_settings(owned.config, existing.config) != existing.config
+    ):
+        raise ConflictError(
+            f"Workspace config is foreign or edited; preserve it: {root / CONFIG_FILE}"
+        )
+    config = owned.config if owned is not None else WorkspaceConfig()
+    if existing is not None:
+        config = _with_settings(config, existing.config)
+    mode = git_commit or config.git_commit
+    if runtime_root is not None:
+        config = WorkspaceConfig.model_validate(
+            config.model_dump() | {"runtime": str(runtime_root)}
+        )
+    if tui_test is not None:
+        config = WorkspaceConfig.model_validate(config.model_dump() | {"tui_test": str(tui_test)})
+    if owned is not None and _with_settings(config, owned.config) != owned.config:
+        raise ConflictError(
+            "Init options differ from the owned workspace; preserve its existing configuration."
+        )
+    workspace = Workspace(root, config.model_copy(update={"git_commit": mode}))
+    _validate_paths(workspace)
+    validate_runtime_root(workspace.path("runtime"))
+    return owned, existing, workspace
+
+
+def check_initialization(path: Path, *, runtime_root: Path | None, tui_test: Path | None) -> None:
+    _planned_config(_safe_directory(path), runtime_root, tui_test, None)
 
 
 def _initialize_locked(
@@ -257,35 +300,8 @@ def _initialize_locked(
     tui_test: Path | None,
     git_commit: GitCommitMode | None,
 ) -> Workspace:
-    owned = _ownership(root)
-    try:
-        existing = read_workspace(root)
-    except FileNotFoundError:
-        existing = None
-    if existing is not None and (
-        owned is None or _with_mode(owned.config, existing.config.git_commit) != existing.config
-    ):
-        raise ConflictError(
-            f"Workspace config is foreign or edited; preserve it: {root / CONFIG_FILE}"
-        )
-    config = owned.config if owned is not None else WorkspaceConfig()
-    if existing is not None:
-        config = _with_mode(config, existing.config.git_commit)
-    mode = git_commit or config.git_commit
-    if runtime_root is not None:
-        config = WorkspaceConfig.model_validate(
-            config.model_dump() | {"runtime": str(runtime_root)}
-        )
-    if tui_test is not None:
-        config = WorkspaceConfig.model_validate(config.model_dump() | {"tui_test": str(tui_test)})
-    if owned is not None and _with_mode(config, owned.config.git_commit) != owned.config:
-        raise ConflictError(
-            "Init options differ from the owned workspace; preserve its existing configuration."
-        )
-    config = _with_mode(config, mode)
-    workspace = Workspace(root, config)
-    _validate_paths(workspace)
-    validate_runtime_root(workspace.path("runtime"))
+    owned, existing, workspace = _planned_config(root, runtime_root, tui_test, git_commit)
+    config = workspace.config
     ownership = (
         owned.model_copy(update={"config": config})
         if owned is not None

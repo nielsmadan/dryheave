@@ -4,6 +4,7 @@ import pytest
 
 from dryheave.doctor import runtime_doctor
 from dryheave.processes import CommandResult
+from dryheave.tui_test_release import TUI_TEST_ACTION, TUI_TEST_TESTED_COMMAND
 
 
 def test_doctor_probes_only_transport_and_reports_missing_agent_and_runtime_root(
@@ -17,7 +18,7 @@ def test_doctor_probes_only_transport_and_reports_missing_agent_and_runtime_root
 
     def execute(command, root):
         calls.append((command, root))
-        return CommandResult(command.argv, 0, b"tui-test 0.1.0-beta.3\n", b"", "exited")
+        return CommandResult(command.argv, 0, b"tui-test 0.1.1\n", b"", "exited")
 
     monkeypatch.setattr("dryheave.doctor.run_command", execute)
     result = runtime_doctor("tui-test", agent="codex", runtime_root=tmp_path / ("a" * 80))
@@ -38,7 +39,9 @@ def test_doctor_probes_only_transport_and_reports_missing_agent_and_runtime_root
         ("exited", 0, b"tui-test 9"),
         ("timeout", -9, b""),
         ("output_limit", -9, b"overflow"),
-        ("exited", 1, b"tui-test 0.1.0-beta.3"),
+        ("exited", 1, b"tui-test 0.1.1"),
+        ("exited", 0, b"tui-test 0.1.0-beta.3"),
+        ("exited", 0, b"tui-test 0.2.0"),
     ],
 )
 def test_unusable_transport_versions_are_actionable(monkeypatch, outcome, exit_code, text):
@@ -52,7 +55,8 @@ def test_unusable_transport_versions_are_actionable(monkeypatch, outcome, exit_c
     assert result["ready"] is False
     assert check["status"] == "mismatch"
     assert check["exit_code"] == exit_code
-    assert "0.1.0-beta.3" in check["action"]
+    assert check["supported_versions"] == ">=0.1.0,<0.2.0"
+    assert check["action"] == TUI_TEST_ACTION
 
 
 def test_all_tools_missing_and_unsupported_platform_need_no_probes(monkeypatch):
@@ -67,6 +71,8 @@ def test_all_tools_missing_and_unsupported_platform_need_no_probes(monkeypatch):
         "missing",
         "missing",
     ]
+    assert result["checks"][3]["action"] == TUI_TEST_ACTION
+    assert result["tui_test_install_command"] == TUI_TEST_TESTED_COMMAND
 
 
 def test_available_tools_and_short_runtime_are_reported_without_agent_launch(monkeypatch):
@@ -74,9 +80,7 @@ def test_available_tools_and_short_runtime_are_reported_without_agent_launch(mon
     monkeypatch.setattr("dryheave.doctor.shutil.which", lambda name: "/tools/" + name)
     monkeypatch.setattr(
         "dryheave.doctor.run_command",
-        lambda command, _root: CommandResult(
-            command.argv, 0, b"tui-test 0.1.0-beta.3", b"", "exited"
-        ),
+        lambda command, _root: CommandResult(command.argv, 0, b"tui-test 0.1.0", b"", "exited"),
     )
     result = runtime_doctor("tui-test", agent="claude", runtime_root=Path("/rt"))
     assert result["ready"] is True

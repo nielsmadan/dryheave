@@ -1,4 +1,3 @@
-import io
 import os
 import shutil
 import subprocess
@@ -13,23 +12,16 @@ from dryheave.workspace_git import (
     case_alias,
     case_paths,
     checkpoint,
-    choose_mode,
     ensure_repository,
     ignore_entries,
     inside_repository,
     missing_lines,
-    prompt_mode,
     relative_paths,
     require_git,
     setup_repository,
     write_gitignore,
 )
 from dryheave.workspaces import initialize_workspace
-
-
-class Terminal(io.StringIO):
-    def isatty(self):
-        return True
 
 
 def git(root, *argv):
@@ -50,47 +42,6 @@ def make_workspace(tmp_path, short_runtime, git_identity):
         return workspace
 
     return make
-
-
-def test_prompt_numbers_the_modes_and_returns_the_choice():
-    output = io.StringIO()
-    assert prompt_mode(io.StringIO("2\n"), output) == "auto"
-    text = output.getvalue()
-    assert "1. ask" in text
-    assert "2. auto" in text
-    assert "3. off" in text
-    assert "[1]" in text
-
-
-@pytest.mark.parametrize(
-    ("answer", "mode"), [("\n", "ask"), ("", "ask"), ("3\n", "off"), ("auto\n", "auto")]
-)
-def test_prompt_accepts_default_number_or_name(answer, mode):
-    assert prompt_mode(io.StringIO(answer), io.StringIO()) == mode
-
-
-def test_prompt_asks_again_after_an_invalid_answer():
-    output = io.StringIO()
-    assert prompt_mode(io.StringIO("9\nnope\n3\n"), output) == "off"
-    assert output.getvalue().count("Enter a number from 1 to 3.") == 2
-
-
-def test_mode_choice_prefers_flag_then_existing_then_prompt_on_terminals_only():
-    prompted = io.StringIO()
-    assert choose_mode("off", "auto", Terminal("2\n"), Terminal(), prompted) == "off"
-    assert choose_mode(None, "auto", Terminal("3\n"), Terminal(), prompted) == "auto"
-    assert prompted.getvalue() == ""
-    assert choose_mode(None, None, Terminal("2\n"), Terminal(), prompted) == "auto"
-    assert "Choose 1-3" in prompted.getvalue()
-
-
-@pytest.mark.parametrize("terminals", [(False, True), (True, False), (False, False)])
-def test_mode_choice_without_two_terminals_is_ask_and_never_prompts(terminals):
-    stdin = Terminal("3\n") if terminals[0] else io.StringIO("3\n")
-    stdout = Terminal() if terminals[1] else io.StringIO()
-    prompted = io.StringIO()
-    assert choose_mode(None, None, stdin, stdout, prompted) == "ask"
-    assert prompted.getvalue() == ""
 
 
 def test_relative_paths_are_workspace_posix_unique_and_inside_only(tmp_path):

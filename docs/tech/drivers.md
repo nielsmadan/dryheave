@@ -249,7 +249,7 @@ consecutive screens. The turn is then observed as usual through
 `reconcile(wait=True)`. `session.answered` counts verified answers. Keys go
 through `Terminal.press`, which accepts only `Up`, `Down`, `Space`, `Enter` and
 the digits `1`-`9`, and sends them with tui-test `key press` (verified against
-0.1.0-beta.3: a digit name sends that one byte); Escape is never sent.
+0.1.0-beta.3, 0.1.0 and 0.1.1: a digit name sends that one byte); Escape is never sent.
 
 Usage keeps response/session/thread/root-turn identity, raw categories and source
 provenance. Responses deduplicate by identity; cumulative records are marked
@@ -340,19 +340,30 @@ screen state unknown. `exit_observation(screen)` gives the completed turn or an
 
 ## Transport protocol and cleanup
 
-The configurable executable must report exactly `tui-test 0.1.0-beta.3`. The
-checkout's verified binary is `.tools/tui-test/tui-test`; no package-manager
-launcher or global install is used. `runtime` must be a new owned directory with
+The configurable executable must report a 0.1.x release from 0.1.0
+(`tui_test_release.supported_tui_test`); the version it reports is recorded as
+`transport_version`. `tui_test_release` also holds the release selection, the
+`--version` probe, the install command and the install-script checksums that
+`init`, `doctor` and the driver share; the driver keeps only the launch check.
+0.1.x is the range because the driver's config needs 0.1.0-beta.5 or later (it
+replaced `[recording] mode` with `[trace] mode`), and a minor release before 1.0 may
+break the CLI. 0.1.0 and 0.1.1 sent byte-identical input to a raw receiver for
+every key and both paste styles, matching 0.1.0-beta.3. The checkout's verified
+binary is `.tools/tui-test/tui-test`. `runtime` must be a new owned directory with
 an absolute path of at most 70 bytes for portable Unix sockets. A unique short
-session name and always-on asciicast recording directory are generated there.
+session name and a `transport.toml` with `[recording] directory` plus
+`[trace] mode = "on"` are generated there, so every session keeps its asciicast
+recording (and a trace bundle under `traces/`).
 Use a different runtime for every attempt and profile.
 
-Ordinary replies use `{ok,data?,message?,kind?}`. Measured running `daemon status`
-returns `{ok:true,data:{pid,shell_pid,version,...}}` with exit 0; absent status
-returns bare `{pid:null,running:false,session}` with exit 3. The adapter normalizes
-these internally and preserves raw responses. Screens contain nullable integer
-`exited`; `null` is running. Raw status fixtures and pinned source provenance are
-in `tests/fixtures/driver-provenance.json`.
+Ordinary replies use `{ok,data?,message?,kind?}`. Running `daemon status`, as
+measured on 0.1.0-beta.3, returns `{ok:true,data:{pid,shell_pid,version,...}}` with
+exit 0; absent status returns bare `{pid:null,running:false,session}` with exit 3.
+The adapter normalizes these internally and preserves raw responses. Screens
+contain nullable integer `exited`; `null` is running. The raw status fixtures and
+their provenance in `tests/fixtures/driver-provenance.json` come from that
+0.1.0-beta.3 capture; the status replies of 0.1.0 and 0.1.1 have not been
+recaptured as fixtures.
 
 `process_ownership.ProcessOwner` uses pinned **psutil 7.2.2** for portable process
 identity and descendant tracking. This is the additional runtime dependency;

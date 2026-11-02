@@ -8,7 +8,8 @@ and optional model judgments run after the subject stops; reports keep audit
 eligibility, quality, missing observations and spending separate.
 
 Python 3.13+, Git, macOS or Linux are required. Native trials additionally require
-a supported agent CLI, explicit authentication and **tui-test 0.1.0-beta.3**.
+a supported agent CLI, explicit authentication and **tui-test 0.1.x** (0.1.0 or
+later; `init` offers to install it).
 The offline example needs no agent installation or model calls. This is an alpha:
 Codex 0.153.4 and Claude 2.1.263 log shapes have fixture coverage; Claude's live
 TUI integration is unverified. Codex 0.154.0 has completed a live clarification
@@ -54,14 +55,15 @@ Start a dedicated workspace with `dryheave init ./bench2`, enter it, then run
 Setup creates private authoring/store/runtime directories under `.dryheave/`, a git
 repository and `.gitignore`, without scanning agent homes or making model calls.
 Authored files live in visible `voices/`, `cases/NAME/` and `reports/` folders
-(`replays/` is scratch, git-ignored); `init --git-commit ask|auto|off` (a numbered
-prompt on terminals) sets `[git] commit` in `dryheave.toml`: `ask` reports
+(`replays/` is scratch, git-ignored); `init --git-commit ask|auto|off` (a menu on
+terminals) sets `[git] commit` in `dryheave.toml`: `ask` reports
 `commit_paths` for an operator to offer, `auto` commits just the files each
 checkpoint command wrote, `off` never commits. Native runtime paths must fit a 70-byte limit;
 `init --runtime-root /short/new-directory` supplies a shorter location when needed.
 See [workspace setup](docs/user/workspaces.md) for config, ownership and resume behavior.
-Record transport once with `init --tui-test /path/to/tui-test`, or install
-`tui-test` on PATH. Claude operators install with
+When no supported tui-test is found, `init` on a terminal offers to install it or stops
+so you can install it yourself ([native setup](docs/user/native-setup.md#install-the-terminal-driver));
+`init --tui-test PATH` records one that is not on PATH. Claude operators install with
 `skills install --target .claude/skills`; the default target remains `.agents/skills`.
 
 For selected-log mining, use `collect select NAME FILE --agent codex` (or
@@ -88,7 +90,7 @@ judge are Claude), tui-test for the native subject, and Codex authentication for
    `commit_paths` for an operator to offer, `auto` commits them, `off` never does.
 
    ```sh
-   dryheave init ./bench2 --git-commit ask --tui-test /path/to/tui-test
+   dryheave init ./bench2 --git-commit ask
    cd bench2
    dryheave skills install
    ```
@@ -393,7 +395,7 @@ Calibrations are reachable per run and per case, so an imported portable report
 with omitted captures stays a valid degraded view. Local processes that can
 already read the store are outside this boundary. See [viewer](docs/tech/viewer.md).
 
-`doctor` checks availability and the pinned transport version without downloading,
+`doctor` checks availability and the supported transport range without downloading,
 launching agents, inspecting config/auth state or making model calls. Inspect
 `data.ready` and each diagnostic; a successful diagnostic command can still report
 missing tools. Preflight adds exact profile argv, native roots and fidelity issues.

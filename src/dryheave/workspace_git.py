@@ -5,7 +5,6 @@ import shutil
 import tempfile
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import TextIO
 
 from pydantic import JsonValue
 
@@ -14,7 +13,7 @@ from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.models import CommandSpec, ObjectKind
 from dryheave.processes import CommandResult, run_command
 from dryheave.storage import ObjectStore
-from dryheave.workspaces import GIT_COMMIT_MODES, GitCommitMode, Workspace
+from dryheave.workspaces import GitCommitMode, Workspace
 
 GITIGNORE = ".gitignore"
 GIT_TIMEOUT_SECONDS = 60
@@ -48,12 +47,6 @@ REPOSITORY_ENVIRONMENT = frozenset(
 MISSING_GIT = "git is not installed or not on PATH"
 HOOK_RUN_VERSION = (2, 36)
 GIT_VERSION = re.compile(r"git version (\d+)\.(\d+)")
-PROMPT_DEFAULT: GitCommitMode = "ask"
-MODE_CHOICES: tuple[tuple[GitCommitMode, str], ...] = (
-    ("ask", "ask: offer a commit after each checkpoint and let you decide"),
-    ("auto", "auto: commit the files each checkpoint command wrote"),
-    ("off", "off: never offer commits"),
-)
 
 
 def git_available() -> bool:
@@ -154,46 +147,6 @@ def setup_repository(workspace: Workspace) -> dict[str, JsonValue]:
         "gitignore": str(write_gitignore(workspace)),
         "git_commit": workspace.config.git_commit,
     }
-
-
-def choose_mode(
-    flag: GitCommitMode | None,
-    existing: GitCommitMode | None,
-    stdin: TextIO,
-    stdout: TextIO,
-    prompt_stream: TextIO,
-) -> GitCommitMode:
-    if flag is not None:
-        return flag
-    if existing is not None:
-        return existing
-    if not (stdin.isatty() and stdout.isatty()):
-        return PROMPT_DEFAULT
-    return prompt_mode(stdin, prompt_stream)
-
-
-def prompt_mode(stdin: TextIO, output: TextIO) -> GitCommitMode:
-    print(
-        "Commit authored files (voices, cases, reports) to this workspace's git repository?",
-        file=output,
-    )
-    for number, (_, text) in enumerate(MODE_CHOICES, start=1):
-        print(f"  {number}. {text}", file=output)
-    default_number = [name for name, _ in MODE_CHOICES].index(PROMPT_DEFAULT) + 1
-    while True:
-        print(f"Choose 1-{len(MODE_CHOICES)} [{default_number}]: ", end="", file=output, flush=True)
-        answer = stdin.readline()
-        if answer == "":
-            return PROMPT_DEFAULT
-        answer = answer.strip()
-        if answer == "":
-            return PROMPT_DEFAULT
-        if answer.isdigit() and 1 <= int(answer) <= len(MODE_CHOICES):
-            return MODE_CHOICES[int(answer) - 1][0]
-        named = [mode for mode in GIT_COMMIT_MODES if mode == answer]
-        if named:
-            return named[0]
-        print(f"Enter a number from 1 to {len(MODE_CHOICES)}.", file=output)
 
 
 def relative_paths(root: Path, paths: Iterable[Path]) -> tuple[str, ...]:

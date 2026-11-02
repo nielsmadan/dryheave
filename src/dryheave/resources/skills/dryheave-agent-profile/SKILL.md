@@ -60,7 +60,9 @@ description: Prepare named Dryheave Codex or Claude subject profiles and control
    `dryheave run NAME --workflow --assess --json`; say that its budget is not derived
    from a pilot. Execution remains a separate explicit user action; setup makes no
    model calls.
-   Record transport once with `init --tui-test PATH` or install tui-test on PATH.
+   If `doctor` reports tui-test missing or unsupported, give the user its action
+   command to run; `init` on a terminal also offers the install. Record a tui-test
+   that is not on PATH with `init --tui-test PATH`.
    `run --assess` requires captured evidence and resolved owned cleanup before
    assessment. Retain the announced run ID for separate `assess RUN_ID` or
    `run --resume RUN_ID`; retries preserve earlier evidence, never force success.

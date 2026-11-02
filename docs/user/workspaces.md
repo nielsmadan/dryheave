@@ -81,10 +81,15 @@ commands (`voice create`, `case draft`, `case calibrate`, `case freeze`,
   with the error; the command's own work stays done.
 - `off`: nothing is offered or committed.
 
-Without `--git-commit`, `init` shows a numbered prompt when stdin and stdout are
-terminals (and `--json` is absent); otherwise it uses `ask`. Re-running `init`
-on an existing workspace adds the repository, `.gitignore` and the chosen mode
-without touching the store; a workspace with the old v1 config is not migrated.
+Without `--git-commit`, `init` asks when stdin and stdout are terminals (and
+`--json` is absent); otherwise it uses `ask`. The question is an arrow-key menu
+(↑/↓ or j/k move, a digit jumps, Enter chooses, Esc, q or Ctrl+C cancels init
+before anything is written); once answered it collapses to one line such as
+`✔ git commits: ask`. When stderr is not a terminal or `TERM=dumb`, it
+falls back to a numbered prompt where end of input cancels; the same summary line
+follows the answer. Re-running `init` on an existing workspace adds the repository,
+`.gitignore`, the chosen mode and a new tui-test path (from `--tui-test` or an
+install) without touching the store; a workspace with the old v1 config is not migrated.
 A missing `git` executable is an error unless the mode is `off`.
 
 Relative paths resolve from the config's directory, so moving a workspace moves
@@ -113,11 +118,15 @@ The command reports the actual byte count and override instructions on failure;
 it never relocates files automatically. UTF-8 path bytes count toward the limit.
 
 New native runs use the workspace runtime unless `--runtime-root` is explicit.
-Set `init ./bench --tui-test /path/to/tui-test` once, or set
+When no supported tui-test is found, `init` on a terminal offers to install it or
+stops ([native setup](native-setup.md#install-the-terminal-driver)). Otherwise set
+`init ./bench --tui-test /path/to/tui-test` once, or set
 `tui_test = "tools/tui-test"` in the workspace config. Relative transport paths
 resolve from the config directory. New runs prefer explicit `run --tui-test`,
-then workspace `tui_test`, then an installed `tui-test` on PATH. Setup does not
-execute the selected transport; `doctor --tui-test PATH` checks its version.
+then workspace `tui_test`, then an installed `tui-test` on PATH. Without
+`--tui-test`, `init` runs the found transport's `--version` to check it is
+supported; an explicit `--tui-test` is recorded unchecked, and
+`doctor --tui-test PATH` checks its version.
 Offline fixture runs have no native runtime.
 Omitted resume/status options keep the run's frozen settings even after config
 changes; moving a workspace does not rewrite historical native runtime paths.

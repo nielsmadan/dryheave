@@ -7,14 +7,18 @@ from pathlib import Path
 from pydantic import JsonValue
 
 from dryheave.constants import MAX_RUNTIME_PATH_BYTES
-from dryheave.models import CommandSpec
 from dryheave.processes import run_command
+from dryheave.tui_test_release import (
+    TUI_TEST_ACTION,
+    TUI_TEST_SPECIFIER,
+    TUI_TEST_TESTED_COMMAND,
+    reported_version,
+    supported_tui_test,
+    version_probe,
+)
 
-TUI_TEST_VERSION = "0.1.0-beta.3"
-TUI_TEST_RELEASE = "https://github.com/microsoft/tui-test/releases/tag/" + TUI_TEST_VERSION
 
-
-def _tool(executable: str, *, expected: str | None = None) -> dict[str, JsonValue]:
+def _tool(executable: str) -> dict[str, JsonValue]:
     resolved = shutil.which(executable)
     if resolved is None:
         return {
@@ -22,38 +26,35 @@ def _tool(executable: str, *, expected: str | None = None) -> dict[str, JsonValu
             "status": "missing",
             "action": f"Install {executable}; then supply its executable path or add it to PATH.",
         }
-    path = str(Path(resolved).absolute())
-    if expected is None:
-        return {
-            "tool": executable,
-            "path": path,
-            "status": "available",
-            "version": None,
-            "action": "Record this executable's version; profile preflight --probe-version verifies the selected subject.",
-        }
-    try:
-        result = run_command(
-            CommandSpec(argv=(path, "--version"), timeout_seconds=5, max_output_bytes=4096),
-            Path.cwd(),
-        )
-    except OSError as error:
-        return {"tool": executable, "path": path, "status": "error", "action": str(error)}
-    matched = (
-        result.outcome == "exited"
-        and result.returncode == 0
-        and result.stdout.decode(errors="replace").strip() == expected
-    )
     return {
         "tool": executable,
-        "path": path,
+        "path": str(Path(resolved).absolute()),
+        "status": "available",
+        "version": None,
+        "action": "Record this executable's version; profile preflight --probe-version verifies the selected subject.",
+    }
+
+
+def _transport(executable: str) -> dict[str, JsonValue]:
+    resolved = shutil.which(executable)
+    if resolved is None:
+        return {"tool": executable, "status": "missing", "action": TUI_TEST_ACTION}
+    path = Path(resolved).absolute()
+    try:
+        result = run_command(version_probe(path), Path.cwd())
+    except OSError as error:
+        return {"tool": executable, "path": str(path), "status": "error", "action": str(error)}
+    version = reported_version(result)
+    matched = version is not None and supported_tui_test(version)
+    return {
+        "tool": executable,
+        "path": str(path),
         "status": "matched" if matched else "mismatch",
-        "expected_version": expected,
+        "supported_versions": TUI_TEST_SPECIFIER,
         "observed_version": result.stdout.decode(errors="replace").strip(),
         "outcome": result.outcome,
         "exit_code": result.returncode,
-        "action": "No action needed."
-        if matched
-        else f"Install the pinned release: {TUI_TEST_RELEASE}",
+        "action": "No action needed." if matched else TUI_TEST_ACTION,
     }
 
 
@@ -74,7 +75,7 @@ def runtime_doctor(
             "system": system,
         },
         _tool("git"),
-        _tool(tui_test, expected=f"tui-test {TUI_TEST_VERSION}"),
+        _transport(tui_test),
     ]
     if agent is not None:
         checks.append(_tool(agent))
@@ -94,7 +95,7 @@ def runtime_doctor(
     return {
         "ready": all(check["status"] in {"available", "matched"} for check in checks),
         "checks": list(checks),
-        "tui_test_release": TUI_TEST_RELEASE,
+        "tui_test_install_command": TUI_TEST_TESTED_COMMAND,
         "limitations": [
             "Only tui-test --version is executed; agents and Git are located without launching them.",
             "No downloads, configuration discovery, credential reads or model calls are performed.",

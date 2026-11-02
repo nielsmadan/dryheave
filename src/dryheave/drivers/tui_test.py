@@ -32,6 +32,12 @@ from dryheave.process_ownership import ProcessOwner
 from dryheave.processes import run_command
 from dryheave.profile_models import LaunchPlan
 from dryheave.serialization import parse_json
+from dryheave.tui_test_release import (
+    TUI_TEST_SUPPORTED,
+    reported_version,
+    supported_tui_test,
+    version_probe,
+)
 
 DAEMON_ABSENT_EXIT = 3
 DIALOG_KEYS = frozenset({"Up", "Down", "Space", "Enter", *"123456789"})
@@ -42,8 +48,6 @@ type CloseOutcome = Literal["closed", "unconfirmed", "foreign"]
 
 
 class TuiTestTerminal:
-    version = "0.1.0-beta.3"
-
     def __init__(
         self, executable: Path, runtime: Path, *, limits: DriverLimits | None = None
     ) -> None:
@@ -171,33 +175,33 @@ class TuiTestTerminal:
         self.agent = plan.agent
         self.environment = dict(environment)
         self.environment["TUI_TEST_HOME"] = str(self.runtime)
-        version = run_command(
-            CommandSpec(
-                argv=(str(self.executable), "--version"), timeout_seconds=5, max_output_bytes=4096
-            ),
-            self.runtime,
-            environment=self.environment,
-            on_start=self._claim,
+        reported = reported_version(
+            run_command(
+                version_probe(self.executable),
+                self.runtime,
+                environment=self.environment,
+                on_start=self._claim,
+            )
         )
-        if (
-            version.outcome != "exited"
-            or version.returncode != 0
-            or version.stdout.strip() != f"tui-test {self.version}".encode()
-        ):
-            raise TransportError("Driver executable does not report the pinned tui-test version.")
+        if reported is None or not supported_tui_test(reported):
+            raise TransportError(
+                f"Driver executable is not a supported tui-test ({TUI_TEST_SUPPORTED})."
+            )
         config = self.runtime / "transport.toml"
         atomic_write(
             config,
             (
-                '[recording]\nmode = "always"\ndirectory = '
+                "[recording]\ndirectory = "
                 + json.dumps(str(self.runtime / "recordings"))
+                + '\n\n[trace]\nmode = "on"\ndirectory = '
+                + json.dumps(str(self.runtime / "traces"))
                 + "\n"
             ).encode(),
             replace=False,
         )
         observed = LaunchObservation(
             transport="tui-test",
-            transport_version=self.version,
+            transport_version=reported,
             session=self.session,
             runtime=str(self.runtime),
             requested_profile_id=plan.profile_id,

@@ -145,7 +145,7 @@ def test_subject_flags_follow_transport_option_boundary(tmp_path, monkeypatch, d
     calls = []
 
     def run(command, root, **kwargs):
-        return CommandResult(command.argv, 0, b"tui-test 0.1.0-beta.3\n", b"", "exited")
+        return CommandResult(command.argv, 0, b"tui-test 0.1.1\n", b"", "exited")
 
     def call(transport, *arguments, cleanup=False):
         calls.append(arguments)
@@ -361,3 +361,46 @@ def test_a_close_is_retried_once_before_it_fails(tmp_path, monkeypatch):
         _started(transport, live.pid, live.create_time())
         report = transport.close()
     assert (report.terminal_closed, report.errors) == (True, ())
+
+
+@pytest.mark.parametrize("reported", [b"tui-test 0.1.0-beta.3\n", b"tui-test 0.2.0\n"])
+def test_an_unsupported_tui_test_is_refused_before_launch(
+    tmp_path, monkeypatch, driver_plan, reported
+):
+    def run(command, root, **kwargs):
+        return CommandResult(command.argv, 0, reported, b"", "exited")
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    with (
+        terminal(tmp_path, monkeypatch) as transport,
+        pytest.raises(TransportError, match=r"supported tui-test \(0\.1\.x, from 0\.1\.0\)"),
+    ):
+        transport.start(driver_plan, {})
+
+
+def test_launch_records_the_reported_version_and_keeps_every_recording(
+    tmp_path, monkeypatch, driver_plan
+):
+    def run(command, root, **kwargs):
+        return CommandResult(command.argv, 0, b"tui-test 0.1.7\n", b"", "exited")
+
+    def call(transport, *arguments, cleanup=False):
+        if arguments[0] == "run":
+            raise TransportError("fixture stopped before subject launch")
+        return {"running": False}
+
+    monkeypatch.setattr("dryheave.drivers.tui_test.run_command", run)
+    monkeypatch.setattr(TuiTestTerminal, "_call", call)
+    with (
+        terminal(tmp_path, monkeypatch) as transport,
+        pytest.raises(TransportError, match="fixture stopped"),
+    ):
+        transport.start(driver_plan, {})
+    intent = json.loads(next((tmp_path / "terminal").glob("*-launch-intent.json")).read_text())
+    assert intent["transport_version"] == "0.1.7"
+    config = (tmp_path / "terminal" / "transport.toml").read_text()
+    assert '[trace]\nmode = "on"' in config
+    assert (
+        f"[recording]\ndirectory = {json.dumps(str(tmp_path / 'terminal' / 'recordings'))}"
+        in config
+    )

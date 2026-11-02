@@ -91,8 +91,8 @@ uv run dryheave --store .dryheave run greeting --mode native \
   --tui-test .tools/tui-test/tui-test --runtime-root .cache/rt --json
 ```
 
-The native run honors the materialized `LaunchPlan` and uses the real pinned
-`tui-test` transport. The CLI resolves new-run transport from an explicit option,
+The native run honors the materialized `LaunchPlan` and uses the real
+`tui-test` transport (a supported 0.1.x release). The CLI resolves new-run transport from an explicit option,
 workspace config, then PATH; omitted resume options never resolve new defaults.
 It requires a configured or explicit short runtime root: each generated
 10-character attempt child must keep the absolute `TUI_TEST_HOME` at 70 bytes or

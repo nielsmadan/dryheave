@@ -55,7 +55,8 @@ nor agent global configuration. Use the target directory actually recognized by
 your operator agent and reload its discovery according to that agent's behavior.
 
 Runtime `doctor` is separate from ownership inspection: it reads package/runtime
-information, finds executable paths and probes only tui-test's pinned version.
-It does not download tools, launch agents/models, inspect credentials, discover
+information, finds executable paths and probes only tui-test's version against the
+supported 0.1.x range. It does not download tools (`init` installs tui-test only
+after the user agrees), launch agents/models, inspect credentials, discover
 configuration or imply a successful authenticated native trial. Diagnostic success
 is represented by `data.ready`; the command can successfully report missing tools.

@@ -161,7 +161,7 @@ dryheave --store bench-store profile preflight base --destination preview-profil
 
 Doctor invokes only the supplied tui-test executable's bounded `--version` and
 locates other binaries. Explicit profile version probing invokes the selected
-agent's `--version`, never a model session. Pin tui-test 0.1.0-beta.3. Use a short
+agent's `--version`, never a model session. Use tui-test 0.1.x (0.1.0 or later). Use a short
 runtime root: the absolute root plus `/` and each 10-character attempt child must
 fit 70 bytes. Preflight reports exact argv, chosen native roots and fidelity issues.
 

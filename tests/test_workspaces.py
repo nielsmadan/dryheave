@@ -78,15 +78,18 @@ def test_init_refuses_a_workspace_store_written_by_the_old_format(tmp_path, shor
         initialize_workspace(root)
 
 
-def test_init_transport_path_is_config_relative_private_and_idempotent(tmp_path, short_runtime):
+def test_init_transport_path_is_config_relative_replaceable_and_idempotent(tmp_path, short_runtime):
     root = tmp_path / "workspace"
     first = initialize_workspace(root, runtime_root=short_runtime, tui_test=Path("tools/tui-test"))
     assert first.transport() == root / "tools/tui-test"
     assert 'tui_test = "tools/tui-test"' in (root / CONFIG_FILE).read_text()
     assert initialize_workspace(root) == first
-    with pytest.raises(ConflictError, match="options differ"):
-        initialize_workspace(root, tui_test=Path("other"))
     assert discover_workspace(root) == first
+    replaced = initialize_workspace(root, tui_test=Path("other"))
+    assert replaced.transport() == root / "other"
+    assert discover_workspace(root) == replaced
+    with pytest.raises(ConflictError, match="options differ"):
+        initialize_workspace(root, runtime_root=short_runtime.parent / "elsewhere")
 
 
 @pytest.mark.parametrize("value", ["", "../tui-test", "~/tui-test", "bad\npath"])

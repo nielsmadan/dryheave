@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import shutil
@@ -25,6 +26,22 @@ from dryheave.runner_models import RunSummary
 from dryheave.storage import ObjectStore
 
 HOST = HostContext(os.environ, Path.home())
+
+
+class Terminal(io.StringIO):
+    def isatty(self):
+        return True
+
+
+def fake_commands(monkeypatch, module, respond):
+    calls = []
+
+    def run(command, root, **options):
+        calls.append(command)
+        return respond(command, root, options)
+
+    monkeypatch.setattr(f"{module}.run_command", run)
+    return calls
 
 
 class ExamplePayload(StrictModel):

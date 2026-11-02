@@ -1,53 +1,109 @@
 # Native runtime setup
 
 Dryheave supports Python 3.13+ on macOS and Linux. Git must be on PATH. The
-terminal driver requires **tui-test 0.1.0-beta.3** and refuses a different reported
-version. Native Windows execution is outside v1 support. Install an explicit
+terminal driver needs **tui-test 0.1.x, from 0.1.0** and refuses any other reported
+version (a prerelease such as 0.1.0-beta.3, or 0.2.0). Native Windows execution is
+outside v1 support. Install an explicit
 Codex or Claude executable independently and retain its exact version in the
 profile recipe. A shell function needs an explicit argv launcher; resolving a
 same-named binary from PATH does not execute that function.
 
-## Install the pinned terminal driver manually
+## Install the terminal driver
 
-Dryheave never downloads tools automatically. These release assets and SHA-256
-digests were obtained from the tagged Microsoft release metadata on 2026-09-09.
-Only the macOS arm64 asset has been downloaded and transport-tested in this
-project; the remaining rows are published artifacts, not tested-platform claims.
+`dryheave init` looks for tui-test (`--tui-test`, then the workspace's `tui_test`,
+then PATH) and runs the one it finds with `--version`. When it finds none, or one
+that reports an unsupported version (such as the old 0.1.0-beta.3), it prints
+"Checking GitHub for the newest tui-test release…", shows the install command and
+asks on a terminal:
+
+```text
+  ❯ Install it for me
+    I will install it
+  ↑/↓ move · Enter choose · Esc cancel
+```
+
+The lookup is one request to GitHub's releases API (5-second connect and 15-second
+overall limit). Only plain `X.Y.Z` release tags that are neither drafts nor
+prereleases count. The menu names the version and why it was chosen: the newest
+supported release; or 0.1.1, the last version tested with dryheave, when the
+lookup fails (offline, rate-limited) or lists no supported release. A newer release
+than 0.1.1 is marked as untested, with no install-script checksum on record.
+
+"Install it for me" runs once `init`'s other questions are answered. It downloads
+that release's `install/install.sh` to a temporary directory, checks it against the
+recorded SHA-256 when there is one (0.1.1), prints a progress line and runs it with
+`TUI_TEST_VERSION` set and `TUI_TEST_NO_MODIFY_PATH=1`, so your shell profile is
+left unchanged. `GITHUB_TOKEN`, `GH_TOKEN` and `PREFIX` are removed from the
+script's environment; `TUI_TEST_INSTALL_DIR` is honoured. `init` then checks the
+installed version and records the binary's path in `dryheave.toml` unless PATH
+already finds it (a stale recorded path is always replaced). `--json` output
+reports it under `installed_tui_test` (path, version, and whether the lookup found
+it or fell back).
+
+"I will install it" stops before anything is written and prints the command;
+install it, then rerun `init`. Esc, q or Ctrl+C cancels `init` (exit 130), also
+before anything is written. Once answered, the question collapses to one line
+(`✔ tui-test: install 0.1.1`) so the next question takes its place. A terminal
+without cursor control (`TERM=dumb`) gets the same choices as a numbered prompt.
+Without a terminal (or with `--json`) there is no prompt and no lookup: `init`
+creates the workspace and `next` names the tested-version command. Rerunning
+`init` on that workspace later, on a terminal or with `--install-tui-test`, installs
+and records tui-test. `init --install-tui-test` looks up and installs without
+asking. `init` checks the workspace (config, runtime-root length) before any of
+this, so those errors come first.
+
+The command for a given version (shown for the tested 0.1.1):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/microsoft/tui-test/0.1.1/install/install.sh | TUI_TEST_VERSION=0.1.1 sh
+```
+
+The script installs to `~/.local/bin` (`/usr/local/bin` as root; set
+`TUI_TEST_INSTALL_DIR` to choose). Run by hand, it appends a PATH line to your
+shell profile (`~/.zprofile` for zsh) when that directory is not on PATH;
+`TUI_TEST_NO_MODIFY_PATH=1` skips that. The script verifies no checksum of the
+release archive it downloads. `brew tap microsoft/tui-test
+https://github.com/microsoft/tui-test && brew install tui-test` also works while
+the latest release is 0.1.x.
+
+To verify the download yourself, use the
+[0.1.1 release](https://github.com/microsoft/tui-test/releases/tag/0.1.1) assets and
+these SHA-256 digests from its release metadata (macOS arm64 is the only one
+transport-tested in this project):
 
 | Platform | Asset | SHA-256 |
 | --- | --- | --- |
-| macOS arm64 | `tui-test-aarch64-apple-darwin.tar.gz` | `c1902b9388d5e6c48eb6675efeca2305afd4cd6c518455f93860441f28bdcd7d` |
-| macOS x86_64 | `tui-test-x86_64-apple-darwin.tar.gz` | `f7208c9b14d5d6a3678afbf9685c83312fb46edebe4036eb5f080325e9e7986d` |
-| Linux arm64 GNU | `tui-test-aarch64-unknown-linux-gnu.tar.gz` | `31261346af3542cbf425b1f661743db629b8f9daa2edeb7544dd4db4bae19e7a` |
-| Linux arm64 musl | `tui-test-aarch64-unknown-linux-musl.tar.gz` | `2a3705c90e8ec33634f2d7bcbf0a282c3ee2353d3cc6ea1178eb202e1970e1bc` |
-| Linux x86_64 GNU | `tui-test-x86_64-unknown-linux-gnu.tar.gz` | `35d0cfff1b3d6cfeba3abb0eeae7537c5722c36414106ca28b142e5e48235a37` |
-| Linux x86_64 musl | `tui-test-x86_64-unknown-linux-musl.tar.gz` | `4400119a886efc627c9959b9444706a75ffc46241fae21b6cb021bb1c2a5b894` |
-
-For macOS arm64, use fresh download/extraction directories:
+| macOS arm64 | `tui-test-aarch64-apple-darwin.tar.gz` | `a6819562a18031b212565f771d03fe9e5ec7d4f71b389394fd909cc66cee6b81` |
+| macOS x86_64 | `tui-test-x86_64-apple-darwin.tar.gz` | `298ae3d37549d4712a7795d388f4e871f3bf8b7863372c3441787870c747408d` |
+| Linux arm64 GNU | `tui-test-aarch64-unknown-linux-gnu.tar.gz` | `99588dd2e296f9b2685d7fb71d68a3dde3b1fed8c0e8f1af4d215538e858bd09` |
+| Linux arm64 musl | `tui-test-aarch64-unknown-linux-musl.tar.gz` | `f041c826ebf23762613fec969611eb071f7b96bbe65bb2e2404d74445eae9bee` |
+| Linux x86_64 GNU | `tui-test-x86_64-unknown-linux-gnu.tar.gz` | `ae1f32afb34c713284b0637ea41d855124fe0ac298defb38a4018cd952c158ca` |
+| Linux x86_64 musl | `tui-test-x86_64-unknown-linux-musl.tar.gz` | `7bc4b706abac448b0f7043c93ed66e39c40444da395564d80ac7c0462d377795` |
 
 ```sh
 mkdir -p .tools/download .tools/tui-test
-gh release download 0.1.0-beta.3 --repo microsoft/tui-test \
+gh release download 0.1.1 --repo microsoft/tui-test \
   --pattern tui-test-aarch64-apple-darwin.tar.gz --dir .tools/download
 printf '%s  %s\n' \
-  c1902b9388d5e6c48eb6675efeca2305afd4cd6c518455f93860441f28bdcd7d \
+  a6819562a18031b212565f771d03fe9e5ec7d4f71b389394fd909cc66cee6b81 \
   .tools/download/tui-test-aarch64-apple-darwin.tar.gz | shasum -a 256 -c -
 tar -xzf .tools/download/tui-test-aarch64-apple-darwin.tar.gz -C .tools/tui-test
 .tools/tui-test/tui-test --version
 dryheave doctor --tui-test .tools/tui-test/tui-test --agent codex --runtime-root rt --json
 ```
 
-Continue to extraction only after the digest check passes. For another platform,
-select its exact asset and digest above. Linux can use `sha256sum -c -` for the
-verification step. The expected version line is `tui-test 0.1.0-beta.3`.
-The [pinned release](https://github.com/microsoft/tui-test/releases/tag/0.1.0-beta.3)
-also provides direct download links.
+Linux can use `sha256sum -c -` for the verification step.
 
 Doctor checks the running Python/platform, locates Git and an optional agent, and
 runs only the selected tui-test executable's `--version` with five-second/4096-byte
 limits. It checks neither auth state nor selected configuration. `data.ready`
 means those runtime availability checks passed; agent versions remain unverified.
-`data.checks` contains actions for missing/mismatched tools. The diagnostic command
+`data.checks` contains actions for missing/mismatched tools; for tui-test the
+action points to `init` for the newest release and gives the tested-version
+command above (doctor itself makes no network request). The tui-test check also
+reports `supported_versions` as a version specifier (`>=0.1.0,<0.2.0`),
+`observed_version` (the raw `--version` output), `outcome` and `exit_code`;
+`data.tui_test_install_command` is the tested-version install command. The diagnostic command
 itself exits successfully when it can report missing tools, so automation must
 check `data.ready`. Use `profile preflight --probe-version` to explicitly verify
 the selected agent version and retain its exact generated argv.
