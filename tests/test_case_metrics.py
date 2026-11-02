@@ -98,7 +98,7 @@ def test_parse_metrics_reads_typed_values():
         ),
         (
             b'{"values": []}',
-            "violates the contract: values: Extra inputs are not permitted; metrics: Field required",
+            "violates the contract: metrics: Field required; values: Extra inputs are not permitted",
         ),
     ],
 )
