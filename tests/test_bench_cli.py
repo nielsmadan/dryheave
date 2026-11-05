@@ -442,6 +442,7 @@ def test_bench_completion_reports_the_run_files_as_commit_paths(
     assert result == {
         "commit_paths": ["reports/r1.json", "reports/r1.html"],
         "git_commit": "ask",
+        "message": "bench: r1",
         "reports": [str(workspace.reports_dir / "r1.json"), str(workspace.reports_dir / "r1.html")],
     }
 
@@ -454,7 +455,12 @@ def test_bench_completion_survives_a_failed_report_write(tmp_path, short_runtime
 
     monkeypatch.setattr(bench_cli, "write_workspace_report", fail)
     result = bench_cli._checkpoint_report(None, workspace, SimpleNamespace(run_id="r1"))
-    assert result == {"commit_paths": [], "git_commit": "ask", "report_error": "disk full"}
+    assert result == {
+        "commit_paths": [],
+        "git_commit": "ask",
+        "message": "bench: r1",
+        "report_error": "disk full",
+    }
 
 
 def test_bench_outside_a_workspace_adds_nothing_to_its_result():

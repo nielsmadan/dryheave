@@ -16,11 +16,13 @@ from dryheave.storage import ObjectStore
 from dryheave.workspaces import GitCommitMode, Workspace
 
 GITIGNORE = ".gitignore"
+GITIGNORE_LIMIT = 1024 * 1024
 GIT_TIMEOUT_SECONDS = 60
 GIT_OUTPUT_LIMIT = 256 * 1024
 ERROR_TAIL = 2000
 BASE_IGNORES = (
     ".dryheave/",
+    ".dryheave-workspace.json",
     "__pycache__/",
     ".pytest_cache/",
     ".ruff_cache/",
@@ -45,6 +47,8 @@ REPOSITORY_ENVIRONMENT = frozenset(
     }
 )
 MISSING_GIT = "git is not installed or not on PATH"
+INITIAL_MESSAGE = "workspace: initialize"
+UPDATE_MESSAGE = "workspace: update"
 HOOK_RUN_VERSION = (2, 36)
 GIT_VERSION = re.compile(r"git version (\d+)\.(\d+)")
 
@@ -59,10 +63,11 @@ def _run(
     input_bytes: bytes = b"",
     index_file: str | None = None,
     hook: bool = False,
+    literal: bool = True,
 ) -> CommandResult:
     return run_command(
         CommandSpec(
-            argv=("git", "--literal-pathspecs", *argv),
+            argv=("git", *(("--literal-pathspecs",) if literal else ()), *argv),
             timeout_seconds=GIT_TIMEOUT_SECONDS,
             max_output_bytes=GIT_OUTPUT_LIMIT,
         ),
@@ -130,21 +135,31 @@ def missing_lines(existing: str, wanted: Iterable[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(line for line in wanted if line not in present))
 
 
-def write_gitignore(workspace: Workspace) -> Path:
+def _read_gitignore(path: Path) -> str:
+    try:
+        return read_bytes(path, limit=GITIGNORE_LIMIT).decode("utf-8")
+    except FileNotFoundError:
+        return ""
+    except UnicodeDecodeError as error:
+        raise InputError(f"The workspace .gitignore is not UTF-8 text: {path}") from error
+
+
+def update_gitignore(workspace: Workspace) -> tuple[str, ...]:
     path = workspace.root / GITIGNORE
-    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    existing = _read_gitignore(path)
     added = missing_lines(existing, ignore_entries(workspace))
     if added:
         separator = "" if not existing or existing.endswith("\n") else "\n"
         atomic_write(path, (existing + separator + "\n".join(added) + "\n").encode("utf-8"))
-    return path
+    return added
 
 
 def setup_repository(workspace: Workspace) -> dict[str, JsonValue]:
     state = ensure_repository(workspace.root)
     return {
         "repository": state,
-        "gitignore": str(write_gitignore(workspace)),
+        "gitignore": str(workspace.root / GITIGNORE),
+        "gitignore_added": list(update_gitignore(workspace)),
         "git_commit": workspace.config.git_commit,
     }
 
@@ -206,10 +221,13 @@ def _require_hook_run(root: Path) -> None:
         )
 
 
+def _head(root: Path) -> str | None:
+    result = _run(root, "rev-parse", "--quiet", "--verify", "HEAD^{commit}")
+    return _output(result) if result.returncode == 0 else None
+
+
 def _moved_error(root: Path, parent: str | None, moved: CommandResult) -> str:
-    current = _run(root, "rev-parse", "--quiet", "--verify", "HEAD^{commit}")
-    head = _output(current) if current.returncode == 0 else None
-    if head != parent:
+    if _head(root) != parent:
         return (
             "HEAD moved while the checkpoint commit was built (another commit landed "
             f"first), so nothing was committed and your index is unchanged: {_failure(moved)}"
@@ -223,8 +241,7 @@ def _moved_error(root: Path, parent: str | None, moved: CommandResult) -> str:
 def _build_commit(root: Path, scratch: Path, message: str, paths: Sequence[str]) -> str | None:
     index = str(scratch / "index")
     message_file = scratch / "COMMIT_EDITMSG"
-    recorded = _run(root, "rev-parse", "--quiet", "--verify", "HEAD^{commit}")
-    parent = _output(recorded) if recorded.returncode == 0 else None
+    parent = _head(root)
     _step(root, index, "read-tree", *((parent,) if parent else ("--empty",)))
     before = _output(_step(root, index, "write-tree"))
     _step(root, index, "add", "--", *paths)
@@ -286,6 +303,75 @@ def _commit(root: Path, message: str, paths: Sequence[str]) -> dict[str, JsonVal
     return result
 
 
+def _commit_failure(message: str, error: OSError) -> dict[str, JsonValue]:
+    reason = MISSING_GIT if isinstance(error, FileNotFoundError) else str(error)
+    return {"message": message, "state": "failed", "error": reason}
+
+
+def _safe_commit(root: Path, message: str, paths: Sequence[str]) -> dict[str, JsonValue]:
+    if not paths:
+        return {"message": message, "state": "nothing_to_commit"}
+    try:
+        return _commit(root, message, paths)
+    except OSError as error:
+        return _commit_failure(message, error)
+
+
+def _ignored(root: Path, paths: Sequence[str]) -> tuple[str, ...]:
+    if not paths:
+        return ()
+    try:
+        if not inside_repository(root):
+            return ()
+        result = _run(
+            root,
+            "check-ignore",
+            "-z",
+            "--stdin",
+            input_bytes=b"\0".join(p.encode() for p in paths),
+            literal=False,
+        )
+    except OSError:
+        return ()
+    if result.returncode != 0:
+        return ()
+    return tuple(
+        item.decode("utf-8", errors="replace") for item in result.stdout.split(b"\0") if item
+    )
+
+
+def _planned(
+    root: Path, mode: GitCommitMode, message: str, paths: Iterable[Path]
+) -> tuple[dict[str, JsonValue], tuple[str, ...]]:
+    relative = relative_paths(root, paths)
+    ignored = _ignored(root, relative) if mode != "off" else ()
+    kept = tuple(path for path in relative if path not in ignored)
+    result: dict[str, JsonValue] = {
+        "commit_paths": list(kept),
+        "git_commit": mode,
+        "message": message,
+    }
+    return (result | ({"ignored_paths": list(ignored)} if ignored else {})), kept
+
+
+def workspace_commit(
+    workspace: Workspace, initial: Iterable[Path], changed: Iterable[Path]
+) -> dict[str, JsonValue]:
+    root, mode = workspace.root, workspace.config.git_commit
+    try:
+        unborn = mode != "off" and git_available() and _head(root) is None
+    except OSError as error:
+        return {
+            "commit_paths": [],
+            "git_commit": mode,
+            "commit": _commit_failure(INITIAL_MESSAGE, error),
+        }
+    if not unborn:
+        return checkpoint(workspace, UPDATE_MESSAGE, changed)
+    result, kept = _planned(root, mode, INITIAL_MESSAGE, initial)
+    return result | {"commit": _safe_commit(root, INITIAL_MESSAGE, kept)}
+
+
 def case_alias(
     store: ObjectStore, workspace: Workspace | None, draft: Path, identifier: str
 ) -> dict[str, JsonValue]:
@@ -315,15 +401,8 @@ def checkpoint(
 ) -> dict[str, JsonValue]:
     if workspace is None:
         return {}
-    relative = relative_paths(workspace.root, paths)
     mode = workspace.config.git_commit
-    result: dict[str, JsonValue] = {"commit_paths": list(relative), "git_commit": mode}
+    result, kept = _planned(workspace.root, mode, message, paths)
     if mode != "auto":
         return result
-    if not relative:
-        return result | {"commit": {"message": message, "state": "nothing_to_commit"}}
-    try:
-        committed = _commit(workspace.root, message, relative)
-    except OSError:
-        committed = {"message": message, "state": "failed", "error": MISSING_GIT}
-    return result | {"commit": committed}
+    return result | {"commit": _safe_commit(workspace.root, message, kept)}

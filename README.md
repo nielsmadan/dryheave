@@ -50,21 +50,27 @@ a fresh output directory. Build a distributable wheel/sdist with `uv build`.
 
 ## Run your own benchmark
 
-Start a dedicated workspace with `dryheave init ./bench2`, enter it, then run
-`dryheave skills install`. Workspace discovery also works from nested directories.
+Start a dedicated workspace with `dryheave init ./bench2`. It prints a short summary
+and the next steps: enter the workspace, start Claude Code, Codex or your coding agent
+there and run the `dryheave-voice-profile` skill. Workspace discovery also works from nested directories.
 Setup creates private authoring/store/runtime directories under `.dryheave/`, a git
-repository and `.gitignore`, without scanning agent homes or making model calls.
+repository and `.gitignore`, installs the operator skills into `.agents/skills`
+(Codex) and `.claude/skills` (Claude Code) and, unless commits are `off`, makes the
+repository's first commit, without scanning agent homes or making model calls.
 Authored files live in visible `voices/`, `cases/NAME/` and `reports/` folders
 (`replays/` is scratch, git-ignored); `init --git-commit ask|auto|off` (a menu on
 terminals) sets `[git] commit` in `dryheave.toml`: `ask` reports
 `commit_paths` for an operator to offer, `auto` commits just the files each
-checkpoint command wrote, `off` never commits. Native runtime paths must fit a 70-byte limit;
+checkpoint command wrote, `off` never commits. Init's first commit is made in
+`ask` and `auto` alike. Native runtime paths must fit a 70-byte limit;
 `init --runtime-root /short/new-directory` supplies a shorter location when needed.
 See [workspace setup](docs/user/workspaces.md) for config, ownership and resume behavior.
 When no supported tui-test is found, `init` on a terminal offers to install it or stops
 so you can install it yourself ([native setup](docs/user/native-setup.md#install-the-terminal-driver));
-`init --tui-test PATH` records one that is not on PATH. Claude operators install with
-`skills install --target .claude/skills`; the default target remains `.agents/skills`.
+`init --tui-test PATH` records one that is not on PATH.
+After upgrading dryheave, run `dryheave update` anywhere in the workspace: it
+refreshes the skills in both folders and adds missing `.gitignore` lines, then
+commits them as your `[git] commit` mode says.
 
 For selected-log mining, use `collect select NAME FILE --agent codex` (or
 `--agent claude`, `--agent droid`), then
@@ -85,14 +91,13 @@ the benchmark call models: they need `CLAUDE_CODE_OAUTH_TOKEN` (the stand-in and
 judge are Claude), tui-test for the native subject, and Codex authentication for
 `codex:` variants; `bench` names what is missing before it spends anything.
 
-1. Create the workspace and install the operator skills. `--git-commit` decides
+1. Create the workspace; it installs the operator skills. `--git-commit` decides
    what the checkpoint commands do with the files they write: `ask` reports
    `commit_paths` for an operator to offer, `auto` commits them, `off` never does.
 
    ```sh
    dryheave init ./bench2 --git-commit ask
    cd bench2
-   dryheave skills install
    ```
 
 2. Select the sessions that show how you work and curate a voice from them. The
@@ -417,7 +422,8 @@ dryheave skills update --target .agents/skills --json
 dryheave skills uninstall --target .agents/skills --json
 ```
 
-Installation defaults to the initialized workspace's `.agents/skills`; use
+In a workspace, `dryheave update` does the install and update for both skill
+folders at once. Installation defaults to the initialized workspace's `.agents/skills`; use
 `--target` to select another directory your agent discovers. Optional positional
 skill names limit an operation; omission selects all six. Repeated installation
 skips matching owned skills and refuses foreign, edited or outdated collisions.

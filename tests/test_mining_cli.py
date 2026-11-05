@@ -787,7 +787,7 @@ def test_voice_create_reports_its_draft_and_commits_it_only_in_auto_mode(
     )
     if mode == "auto":
         assert created["commit"]["state"] == "committed"
-        assert log.stdout.splitlines() == ["voice: create terse"]
+        assert log.stdout.splitlines() == ["voice: create terse", "workspace: initialize"]
     else:
         assert "commit" not in created
-        assert log.returncode != 0
+        assert log.stdout.splitlines() == ["workspace: initialize"]

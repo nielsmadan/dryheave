@@ -12,7 +12,13 @@ workflow from those installed resources. It refuses existing destinations.
 `skills doctor --target PATH` inspect the explicit target read-only, reporting
 `missing`, `current`, `outdated` or `conflict`. `install` defaults to the initialized
 workspace's configured skills path (`.agents/skills`); explicit `--target` works
-outside workspaces too. `doctor`, `update` and `uninstall` require `--target`.
+outside workspaces too. `dryheave init` and `dryheave update` call `refresh_skills` for that path and for
+`.claude/skills` in the workspace: it reads each skill's status, installs the
+missing and outdated ones in one locked `manage_skills` call, and returns a
+`SkillRefresh` with what it changed, which skills it refused as conflicts, or the
+error that stopped the whole folder. A refused skill or folder is reported
+instead of failing the command. `skills doctor`, `skills update` and
+`skills uninstall` require `--target`.
 Optional positional skill names select a distinct subset, otherwise all six
 are selected. Targets are never inferred from the operator's agent or HOME.
 Listing/doctor do not create an absent target or store.

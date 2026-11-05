@@ -7,7 +7,6 @@ Ordinary users can let the packaged skills write internal drafts and specs:
 ```sh
 dryheave init ./bench
 cd bench
-dryheave skills install
 dryheave collect select work /explicit/session.jsonl --agent codex --json
 dryheave problem request "Find a small command bug" --selection work --name command-bug --micro-bug --json
 ```

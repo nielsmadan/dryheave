@@ -1,13 +1,12 @@
 # Mine problems and a user voice
 
-Initialize a dedicated benchmark workspace, install the packaged skills there,
-and explicitly select source logs. Source logs and repositories remain read-only.
+Initialize a dedicated benchmark workspace (init installs the packaged skills
+there) and explicitly select source logs. Source logs and repositories remain read-only.
 These commands do not scan agent homes or make model calls.
 
 ```sh
 dryheave init ./bench
 cd bench
-dryheave skills install
 dryheave collect scan --agent codex --root /explicit/log-directory --json
 dryheave collect select work /explicit/session-one.jsonl /explicit/session-two.jsonl /explicit/session-three.jsonl --agent codex --json
 dryheave collect selection work --json
@@ -176,6 +175,15 @@ the sampling frame was: how many sessions were examined, what kinds they were an
 which were rejected. Voices created before triage existed keep parsing; their
 `triage` is null.
 
+Before creating the voice, the `dryheave-voice-profile` skill shows you how it
+thinks you sound: how you steer, how technical you are, what you look out for,
+what frustrates you and what lands, with three to five of your messages that
+capture it. It asks whether that sounds like you, revises it until it does, then
+creates the voice and commits it as your `[git] commit` mode says. It ends by
+pointing you at `dryheave-collect` for a first case, suggesting sessions from its
+triage or looking for one you describe. The counts and triage stay in the record
+for `voice inspect`.
+
 In an operator agent that discovers `.agents/skills`, invoke the installed skills.
 For Codex, actual invocation syntax is:
 
@@ -185,13 +193,8 @@ $dryheave-generate-problem Work through request cli-tasks using that voice.
 $dryheave-agent-profile Prepare Terra low and high profiles for the frozen case.
 ```
 
-For Claude Code, install into its project-local discovery directory:
-
-```sh
-dryheave skills install --target .claude/skills
-```
-
-Then invoke `/dryheave-voice-profile`, `/dryheave-generate-problem` and
+For Claude Code, which finds the skills init installed in `.claude/skills`,
+invoke `/dryheave-voice-profile`, `/dryheave-generate-problem` and
 `/dryheave-agent-profile` with the same selection/request names. Use
 `collect select ... --agent claude` or `--agent droid` when the selected source logs
 are Claude or Droid logs; the operator's agent need not match the source-log agent.

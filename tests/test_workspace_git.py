@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from dryheave import workspace_git
-from dryheave.errors import ConflictError, InputError
+from dryheave.errors import ConflictError, InputError, PathError
 from dryheave.models import ObjectKind
 from dryheave.workspace_git import (
     case_alias,
@@ -19,7 +19,8 @@ from dryheave.workspace_git import (
     relative_paths,
     require_git,
     setup_repository,
-    write_gitignore,
+    update_gitignore,
+    workspace_commit,
 )
 from dryheave.workspaces import initialize_workspace
 
@@ -73,7 +74,7 @@ def test_init_creates_a_repository_and_gitignore(make_workspace):
     assert inside_repository(workspace.root)
     assert (workspace.root / ".git").is_dir()
     ignored = (workspace.root / ".gitignore").read_text().splitlines()
-    assert ignored[:2] == [".dryheave/", "__pycache__/"]
+    assert ignored[:3] == [".dryheave/", ".dryheave-workspace.json", "__pycache__/"]
     assert "replays/" in ignored
 
 
@@ -85,12 +86,106 @@ def test_existing_repository_and_gitignore_are_extended_not_replaced(tmp_path, s
     (root / ".gitignore").write_text("notes.txt")
     workspace = initialize_workspace(root, runtime_root=short_runtime)
     assert ensure_repository(root) == "existing"
-    write_gitignore(workspace)
+    added = update_gitignore(workspace)
     lines = (root / ".gitignore").read_text().splitlines()
-    assert lines[0] == "notes.txt"
-    assert lines.count(".dryheave/") == 1
-    write_gitignore(workspace)
+    assert lines == ["notes.txt", *added]
+    assert added == ignore_entries(workspace)
+    assert update_gitignore(workspace) == ()
     assert (root / ".gitignore").read_text().splitlines() == lines
+
+
+@pytest.mark.integration
+def test_a_gitignore_that_is_not_utf8_or_not_a_regular_file_is_refused(make_workspace):
+    workspace = make_workspace("ask")
+    path = workspace.root / ".gitignore"
+    path.write_bytes(b"\xff\n")
+    with pytest.raises(InputError, match="not UTF-8"):
+        update_gitignore(workspace)
+    path.unlink()
+    path.symlink_to(workspace.root / "elsewhere")
+    (workspace.root / "elsewhere").write_text("")
+    with pytest.raises(PathError):
+        update_gitignore(workspace)
+
+
+def touch(root, relative):
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x\n")
+    return path
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mode", ["ask", "auto"])
+def test_the_first_workspace_commit_is_made_in_ask_and_auto(make_workspace, mode):
+    workspace = make_workspace(mode)
+    first = touch(workspace.root, "a.txt")
+    result = workspace_commit(workspace, (first,), (touch(workspace.root, "b.txt"),))
+    assert result["commit_paths"] == ["a.txt"]
+    assert result["message"] == "workspace: initialize"
+    assert result["commit"]["state"] == "committed"
+    assert git(workspace.root, "log", "--format=%s") == "workspace: initialize\n"
+
+
+@pytest.mark.integration
+def test_a_later_workspace_commit_is_an_update_checkpoint(make_workspace):
+    workspace = make_workspace("auto")
+    workspace_commit(workspace, (touch(workspace.root, "a.txt"),), ())
+    result = workspace_commit(workspace, (), (touch(workspace.root, "b.txt"),))
+    assert result["commit_paths"] == ["b.txt"]
+    assert result["commit"]["state"] == "committed"
+    assert git(workspace.root, "log", "--format=%s").splitlines() == [
+        "workspace: update",
+        "workspace: initialize",
+    ]
+
+
+@pytest.mark.integration
+def test_with_commits_off_the_workspace_commit_only_reports(make_workspace):
+    workspace = make_workspace("off")
+    result = workspace_commit(workspace, (touch(workspace.root, "a.txt"),), ())
+    assert result == {"commit_paths": [], "git_commit": "off", "message": "workspace: update"}
+
+
+@pytest.mark.integration
+def test_a_failing_head_lookup_fails_the_first_commit_with_its_error(make_workspace, monkeypatch):
+    workspace = make_workspace("ask")
+
+    def denied(_root):
+        raise PermissionError("permission denied: .git")
+
+    monkeypatch.setattr(workspace_git, "_head", denied)
+    result = workspace_commit(workspace, (touch(workspace.root, "a.txt"),), ())
+    assert result["commit"] == {
+        "message": "workspace: initialize",
+        "state": "failed",
+        "error": "permission denied: .git",
+    }
+
+
+@pytest.mark.integration
+def test_an_enclosing_repository_s_ignore_rules_do_not_filter_a_workspace_without_its_own(
+    tmp_path, short_runtime, git_identity
+):
+    git(tmp_path, "init", "--quiet")
+    (tmp_path / ".gitignore").write_text("ws/\n")
+    workspace = initialize_workspace(tmp_path / "ws", runtime_root=short_runtime)
+    result = checkpoint(workspace, "voice: create v", (touch(workspace.root, "voices/v.json"),))
+    assert result["commit_paths"] == ["voices/v.json"]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mode", ["ask", "auto"])
+def test_paths_git_ignores_are_left_out_of_the_commit_and_listed(make_workspace, mode):
+    workspace = make_workspace(mode)
+    (workspace.root / ".gitignore").write_text(".claude/\n")
+    kept = touch(workspace.root, "a.txt")
+    ignored = touch(workspace.root, ".claude/skills/x/SKILL.md").parent
+    result = workspace_commit(workspace, (kept, ignored), ())
+    assert result["commit_paths"] == ["a.txt"]
+    assert result["ignored_paths"] == [".claude/skills/x"]
+    assert result["commit"]["state"] == "committed"
+    assert git(workspace.root, "ls-tree", "-r", "--name-only", "HEAD") == "a.txt\n"
 
 
 @pytest.mark.integration
@@ -156,7 +251,11 @@ def test_ask_and_off_report_commit_paths_without_committing(make_workspace, mode
     target.parent.mkdir()
     target.write_text("{}")
     result = checkpoint(workspace, "voice: create v", (target,))
-    assert result == {"commit_paths": ["voices/v.json"], "git_commit": mode}
+    assert result == {
+        "commit_paths": ["voices/v.json"],
+        "git_commit": mode,
+        "message": "voice: create v",
+    }
     assert "voices/v.json" in git(workspace.root, "status", "--porcelain", "-uall")
     assert (
         subprocess.run(

@@ -88,6 +88,14 @@ def _status(target: Path, name: str, present: set[str]) -> dict[str, JsonValue]:
     }
 
 
+def _statuses(target: Path) -> dict[str, dict[str, JsonValue]]:
+    try:
+        present = directory_names(target)
+    except FileNotFoundError:
+        present = set()
+    return {name: _status(target, name, present) for name in SKILL_NAMES}
+
+
 def list_skills(target: Path | None = None) -> dict[str, JsonValue]:
     if target is None:
         return {
@@ -95,11 +103,7 @@ def list_skills(target: Path | None = None) -> dict[str, JsonValue]:
             "skills": [{"name": name, "status": "bundled"} for name in SKILL_NAMES],
         }
     target = _target(target)
-    try:
-        present = directory_names(target)
-    except FileNotFoundError:
-        present = set()
-    statuses: list[JsonValue] = [_status(target, name, present) for name in SKILL_NAMES]
+    statuses: list[JsonValue] = list(_statuses(target).values())
     return {"target": str(target), "version": VERSION, "skills": statuses}
 
 
@@ -166,3 +170,51 @@ def manage_skills(
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
     return {"action": action, "target": str(target), "skills": list(selected), "version": VERSION}
+
+
+class SkillConflict(StrictModel):
+    name: str
+    reason: str
+
+
+class SkillRefresh(StrictModel):
+    target: Path
+    changed: tuple[str, ...] = ()
+    conflicts: tuple[SkillConflict, ...] = ()
+    error: str | None = None
+
+    @property
+    def problem(self) -> bool:
+        return self.error is not None or bool(self.conflicts)
+
+    @property
+    def owned_paths(self) -> tuple[Path, ...]:
+        refused = {conflict.name for conflict in self.conflicts}
+        return (
+            ()
+            if self.error is not None
+            else tuple(self.target / name for name in SKILL_NAMES if name not in refused)
+        )
+
+    @property
+    def changed_paths(self) -> tuple[Path, ...]:
+        return tuple(self.target / name for name in self.changed)
+
+
+def refresh_skills(target: Path) -> SkillRefresh:
+    try:
+        target = _target(target)
+        statuses = _statuses(target)
+        stale = tuple(
+            name for name, item in statuses.items() if item["status"] in {"missing", "outdated"}
+        )
+        conflicts = tuple(
+            SkillConflict(name=name, reason=str(item["action"]))
+            for name, item in statuses.items()
+            if item["status"] == "conflict"
+        )
+        if stale:
+            manage_skills("update" if target.is_dir() else "install", target, stale)
+    except (DryheaveError, OSError) as error:
+        return SkillRefresh(target=target, error=str(error))
+    return SkillRefresh(target=target, changed=stale, conflicts=conflicts)

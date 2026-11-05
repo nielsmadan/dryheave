@@ -28,6 +28,8 @@ CONFIG_FILE = "dryheave.toml"
 WORKSPACE_OWNER_FILE = ".dryheave-workspace.json"
 DIRECTORY_OWNER_FILE = ".dryheave-owned.json"
 CONFIG_LIMIT = 64 * 1024
+CLAUDE_SKILLS = Path(".claude/skills")
+MISSING_WORKSPACE = "Run dryheave init first, or provide an explicit --target PATH."
 
 
 GitCommitMode = Literal["ask", "auto", "off"]
@@ -81,6 +83,9 @@ class Workspace:
     def path(self, role: Literal["authoring", "store", "runtime", "skills"]) -> Path:
         configured: str = getattr(self.config, role)
         return (self.root / configured).absolute()
+
+    def skill_targets(self) -> tuple[Path, ...]:
+        return tuple(dict.fromkeys((self.path("skills"), self.root / CLAUDE_SKILLS)))
 
     @property
     def voices_dir(self) -> Path:
@@ -170,10 +175,12 @@ def discover_workspace(start: Path | None = None) -> Workspace | None:
     return None
 
 
-def initialized_workspace(start: Path | None = None) -> Workspace:
+def initialized_workspace(
+    start: Path | None = None, *, missing: str = MISSING_WORKSPACE
+) -> Workspace:
     workspace = discover_workspace(start)
     if workspace is None:
-        raise InputError("Run dryheave init first, or provide an explicit --target PATH.")
+        raise InputError(missing)
     try:
         parse_model(
             read_bytes(workspace.root / WORKSPACE_OWNER_FILE, limit=CONFIG_LIMIT),

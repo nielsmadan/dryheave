@@ -76,7 +76,7 @@ only the excerpts that survived.
    repository spread of the chosen sessions — and `data.warnings`, which names
    sessions that still carry no decision and warns when the chosen set comes from
    one kind of work or one repository. These are warnings, not refusals: you
-   may proceed over them, but they must travel in the report.
+   may proceed over them, but they go in the report (see Report).
 7. If the chosen set is narrow, widen it rather than describing it as balanced:
    scan for further candidates, pin a new, wider selection and triage that.
    Membership is immutable, so a selection cannot be extended.
@@ -93,12 +93,12 @@ only the excerpts that survived.
    `sessions` for coverage: a selection whose genuine messages all come from one
    session is a one-session voice regardless of how many sessions were pinned.
    When `omitted_candidates` is above zero, that many genuine messages are counted but
-   not listed; say so and pin a narrower selection rather than treating the list
-   as complete.
-   Use these numbers verbatim. Never recount them
-   yourself and never write counts into `safety_review` as if they were measured.
+   not listed; pin a narrower selection rather than treating the list as complete,
+   or say so under Based on.
+   Never recount these numbers yourself, quote them as returned whenever you
+   report one, and never write counts into `safety_review` as if they were measured.
    `data.warnings` is one list of plain strings: the below-threshold warning
-   first, then the sampling ones; repeat every entry that is present. The command
+   first, then the sampling ones; every entry goes in the report (see Report). The command
    names the voice `default` while that name is free. Once it is taken the command
    fails: ask the user what to call this voice and pass `--name NAME`. Do not
    invent a name yourself.
@@ -109,7 +109,8 @@ only the excerpts that survived.
 10. Confirm the CLI's split by reading. Harness-injected AGENTS.md, environment,
    skill, command wrapper and system-reminder blocks are excluded even when
    encoded as user events; anything the CLI reports as `unclassified` is yours to
-   judge and report, not to assume. Select short conversational excerpts that
+   judge, not to assume; mention it under Based on only when it changes what the
+   voice rests on. Select short conversational excerpts that
    show a trait you can point at. Exclude secrets, solutions, reference fixes,
    hidden tests and answers to the benchmark task. Do not copy full logs.
 11. Measure the user's typing mechanics before writing any trait. A stand-in
@@ -177,15 +178,38 @@ only the excerpts that survived.
      open straight with the point and no opener at all, and where `please` sits;
    - how many messages carry a typo, and what kind (a doubled or dropped letter,
      a shifted space, a held shift key), and whether longer messages carry more.
-12. Edit the returned internal draft yourself; do not ask the user to hand-author
+12. Read the same typed messages for what the user writes about, not only how.
+   This is what shows the user you understood them; the mechanics never do. Find,
+   each backed by at least two messages from different sessions:
+   - how technical they are: whether they name files, functions, commands and
+     errors or describe what they see, and whether they judge a result by reading
+     the diff or by trying it;
+   - what they look out for: what they check, or catch the agent on, again and
+     again, such as alignment, naming, leftover code, untested paths or an agent
+     doing more than asked;
+   - what frustrates them and how it shows: what the agent had done, and how the
+     next message changes, such as shorter, a repeated instruction or sarcasm;
+   - what earns a positive reaction and what that looks like, which is often only
+     moving on to the next thing;
+   - their register: dry, deadpan, blunt, playful or warm, with a message that
+     shows it.
+   A point that rests on one message is a guess: leave it out or call it one.
+   Then pick three to five quintessential messages, the ones you would show
+   someone to explain how this user sounds. Take each from a different situation
+   (steering, reporting a problem, frustration, approval, thinking aloud) and
+   prefer messages that show several traits at once. For each, note in one line
+   what had just happened and in one line why the message is characteristic. The
+   rules for examples apply: chosen sessions only, exact text, no secrets and no
+   solution content.
+13. Edit the returned internal draft yourself; do not ask the user to hand-author
    JSON. Keep `selection_id`. Fill `persona.instructions`, `disclosure_policy`,
-   `unknown_answer_policy`, and `examples`; set `reviewed_subject_safe: true` only
+   `unknown_answer_policy`, and `examples` as steps 14 to 18 describe; set `reviewed_subject_safe: true` only
    after review. Examples use exactly
    `{"session_id":"ID","event_id":"EVENT","visibility":"subject","excerpt":"EXACT USER TEXT"}`.
    At least one actual user-role excerpt is required. Write `safety_review`
    explaining why each retained excerpt demonstrates voice without injected
    instructions or solution content.
-13. Write `persona.instructions` in this order: VOICE, MECHANICS, SITUATIONS, a
+14. Write `persona.instructions` in this order: VOICE, MECHANICS, SITUATIONS, a
    NEVER line and AUTHORITY. The stand-in reads every rule as applying to the
    reply in hand, so write each block for that reader.
 
@@ -260,6 +284,11 @@ only the excerpts that survived.
      situation, such as asking for a fix after an inspection. Give the user's
      own ways of doing that, and name the bare form a model defaults to ("Can you
      fix that?") as not the user's unless step 11 found it common there.
+   - Use step 12's reactions: how this user sounds after the agent repeats a
+     mistake or does more than asked, and how they move on from a result that
+     works. Leave what they look out for out of the persona: the stand-in raises
+     only case facts, and a habit such as checking error handling would make it
+     raise checks the case does not hold.
    - Tell the stand-in not to reuse the frame of its own earlier messages in the
      dialogue. A stand-in that found one shape that satisfies the persona writes
      every reply in it, and a run of replies all built as symptom, symptom, "Can
@@ -273,7 +302,7 @@ only the excerpts that survived.
    what the user opens a correction with ("No,", "Uhm,", or the fact itself),
    and that a new problem after a partial fix starts with the problem, or with
    the user's own acknowledgement such as "Alright,", never with praise.
-14. Write every persona field in the user's own mechanics. The stand-in copies
+15. Write every persona field in the user's own mechanics. The stand-in copies
    the register of the whole persona, not only the examples: a dash or semicolon
    in `instructions`, `disclosure_policy` or `unknown_answer_policy` reappears in
    its replies. Use in your own sentences only the punctuation the user types,
@@ -291,7 +320,7 @@ only the excerpts that survived.
    as their suggestion. Keep the ban for causes, code, file contents and tests.
    Pacing is the harness's job, so do not tell the stand-in how many facts to
    share at once.
-15. Choose examples whose mechanics match the measured proportions. If most typed
+16. Choose examples whose mechanics match the measured proportions. If most typed
    messages start with a capital letter, most examples must too; a set dominated
    by short lowercase acknowledgements teaches a lowercase voice. Include several
    multi-sentence messages so the stand-in sees how the user capitalizes and
@@ -300,8 +329,9 @@ only the excerpts that survived.
    problem reports and fix requests when the chosen sessions have them, since
    those are the replies a stand-in writes most often after an inspection, and
    messages where the user proposes a change, thinks aloud or chains questions,
-   since those show the voice that mechanics rules cannot.
-16. Ground every policy in a retained excerpt. Before writing a trait, name the
+   since those show the voice that mechanics rules cannot. Include step 12's
+   quintessential messages where they fit those proportions.
+17. Ground every policy in a retained excerpt. Before writing a trait, name the
    excerpt that shows it. A trait you believe but cannot point at is inferred:
    say so in the same sentence ("inferred, not evidenced by the retained
    excerpts") or leave it out. Excerpts that carry no voice signal — bare
@@ -309,10 +339,26 @@ only the excerpts that survived.
    `$commit` — support no trait at all; their `characters` count shows this.
    The MECHANICS rules rest on the step 11 measurement rather than on single
    excerpts; name the measured proportion instead.
-17. Keep style and authority separate. Policies disclose only approved case facts,
+18. Keep style and authority separate. Policies disclose only approved case facts,
    acknowledge unknowns, and never authorize authentication, trust or permission
    dialogs. A concise or approving style is not permission to execute anything.
-18. Read `collect selections --json` for the latest catalog `revision`, then run
+19. Show the user the voice before creating it (see Report) and ask whether it
+   sounds like them, with your harness's question tool when it has one. Read
+   `[git] commit` in the `dryheave.toml` at the workspace root (`ask` when the key
+   is absent) for the answers to offer:
+   - `ask`: "Yes, save and commit", "Yes, save without committing", "Change
+     something" and "Not yet, widen the selection first";
+   - `auto` or `off`: "Yes, save it", "Change something" and "Not yet, widen the
+     selection first". In `auto` saving commits; a user who does not want that
+     changes `[git] commit` first.
+
+   On "Change something", ask what to change if they have not said, revise the
+   persona, the examples and the How you sound portrait, show only what changed and
+   ask again. On "Not yet", stop without creating anything and point to
+   `collect scan` and `collect select NEW_NAME FILE FILE FILE --agent AGENT`.
+   Create the voice only after a yes: a created voice is immutable, and changing it
+   later means deleting it or creating another under a new name.
+20. Read `collect selections --json` for the latest catalog `revision`, then run
    `dryheave voice create [NAME] DRAFT_PATH --expect-revision REVISION --json`.
    Omit NAME for the default voice; otherwise pass the name the user chose. The
    response repeats `evidence`, `warnings` and `triage`, and the record keeps the
@@ -320,57 +366,56 @@ only the excerpts that survived.
    reports the same computed evidence and the same triage from the record, and
    whose `warnings` carries the sampling warnings read back from that triage.
    By default the draft is `voices/NAME.json` (a numeric suffix is added if that exists); use the `path` that `voice draft` reports. `voice create` reports `git_commit` and
-   `commit_paths`: in `ask` mode offer to commit exactly those paths with
-   `voice: create NAME` (`git commit -m "voice: create NAME" -- PATH`, adding the
-   file first if untracked); in `auto` report `commit.state` (`committed`,
-   `nothing_to_commit` or `failed` with its `error`); in `off` say nothing.
+   `commit_paths`: in `ask` mode, when the user chose to commit, commit exactly
+   those paths with `voice: create NAME` (`git commit -m "voice: create NAME" --
+   PATH`, adding the file first if untracked); in `auto` report `commit.state`
+   (`committed`, `nothing_to_commit` or `failed` with its `error`); in `off` say
+   nothing.
    Wording problems found later in a pilot are tested without a new run:
    `dryheave replay RUN_ID --attempt ATTEMPT_ID --all-stand-in --voice NEW_NAME`.
    Pass the voice **name** to `dryheave-generate-problem`, which resolves `default`
    when none is given. A later voice change needs a new name; existing
    experiments retain their frozen persona.
+21. Close with the next step: find a first case with the `dryheave-collect` skill
+   (`/dryheave-collect` in Claude Code, `$dryheave-collect` in Codex). Suggest two
+   or three sessions from this triage that fit the criteria in that skill's
+   "Finding a first case", each in one line with its repository and what the task
+   was. Say they can instead describe a session they remember and the skill will
+   look for it.
 
-## Required report
+## Report
 
-Report all of the following. A voice without this report is not finished.
+Keep the report short and about the user, not the pipeline. The triage, the
+computed counts and every candidate are stored with the voice once it is
+created, and `dryheave voice inspect NAME --json` shows them; offer that instead
+of printing them.
 
-- The triage table, one line per pinned session: `session_id`, its `repository`,
-  its kind (with grade), chosen or rejected, and the recorded reason. List the
-  rejected sessions too; they are the sampling frame.
-- The kind distribution of the chosen sessions, from `triage.variety.kinds`, and
-  the count of sessions still untriaged.
-- The repository spread of the chosen sessions, from `triage.variety.repositories`,
-  including `unknown_repositories` when a chosen session recorded no `cwd`, and the
-  `varied` verdict. If every chosen session is one kind or one repository, say so
-  in those words.
-- The CLI-computed counts exactly as returned: `user_events`, `harness_injected`,
-  `unclassified`, `genuine`, the `threshold` and the `sufficient` verdict.
-- Every genuine candidate, one line each: `event_id`, `characters` and its
-  preview. Do not summarize the list or show only the ones you kept.
-- For each candidate, whether it became an example and why, or why it was
-  excluded (rejected session, no voice signal, solution content, secret, too
-  long, duplicate).
-- Which excluded user events were harness-injected and the reason the CLI gave.
-- The `evidence.sessions` breakdown, one line per selected session: its
-  `session_id`, `genuine`, `harness_injected`, `unclassified`,
-  `genuine_characters` and `median_genuine_characters`. List sessions that
-  contributed nothing too; that is the coverage the reader needs.
-- The mechanics measurement from step 11, one line per mechanic with its count or
-  proportion, and the genuine candidates left out of it as text the user did not
-  type, with the reason for each.
-- An explicit sentence stating whether the retained excerpts support the policies
-  you wrote, naming any trait that is inferred rather than evidenced.
-- The voice name and its immutable `persona_id`.
+1. **How you sound**: four to six plain sentences from step 12 and the VOICE
+   block: how they steer, how technical they are, what they look out for, what
+   frustrates them, what lands, and their register. No counts, character lengths
+   or mechanics.
+2. **Messages that are very you**: the three to five messages from step 12, each
+   as a line of situation, the quoted message and a line on why it is
+   characteristic.
+3. **Based on**: a few short lines.
+   - How many sessions were examined and chosen, from how many repositories, and
+     the kinds of work.
+   - Left out: every genuine candidate longer than a short acknowledgement that
+     you did not use, by `event_id` with its reason in a few words (rejected
+     session, pasted text, solution content, duplicate). This is how the user
+     spots a revealing message you skipped.
+   - Any trait in How you sound that no retained excerpt shows, named as inferred.
+   - Each entry of `warnings`, quoted exactly. When `sufficient` is false, both
+     numbers, `genuine` and `threshold`.
+   - When the evidence is thin or the chosen set is one kind of work or one
+     repository, one sentence on what that means for the voice and a
+     recommendation to widen it: `collect scan` for richer sessions, then
+     `collect select NEW_NAME FILE FILE FILE --agent AGENT`, since membership is
+     immutable. The user may still proceed.
+4. The question from step 19.
 
-Repeat every entry of `warnings` verbatim. When `sufficient` is false, say
-plainly that the selection is below the threshold of genuine conversational
-messages and report both numbers. Name every session the selection
-draws on with its genuine count from `evidence.sessions`, so the reader sees how
-narrow the base is. Recommend a wider selection — `collect scan` to find richer
-candidates, then `collect select NEW_NAME FILE FILE FILE --agent AGENT`, since
-membership is immutable and cannot be extended — instead of presenting a confident
-characterization of the user. The user may still proceed; the thin evidence, the
-triage and the session list must travel with the result either way.
+After creating, give the voice name and `persona_id` in one line, the commit
+outcome in one line unless `[git] commit` is `off`, and the next step from step 21.
 
 ## Examples
 
@@ -381,23 +426,22 @@ Read each one and triage it — a medium feature here, an easy bugfix there, a
 config change rejected as extraneous — then draft to get the measured evidence,
 take excerpts only from the chosen sessions, and choose brief ordinary requests
 and clarifications. Create policies such as direct wording, concise answers and
-explicit uncertainty, each tied to a named excerpt. Return the triage table, the
-kind distribution, the repository spread, the full counts, the per-candidate
-disposition, the voice name and its immutable persona ID. If only injected
-instructions are available, report the missing conversational evidence and request
-a better selection.
+explicit uncertainty, each tied to a named excerpt. Show how the user sounds, the
+messages that are very them and the one-line basis, and ask whether it sounds
+like them. After a yes, create the voice, commit it when the user chose to or
+`[git] commit` is `auto`, then point to `dryheave-collect` with two or three
+sessions from the triage that would make a good first case. If only injected instructions are available, report the missing
+conversational evidence and request a better selection.
 
 For a selection whose `evidence` reports five genuine messages against a
-threshold of eight, two of them bare acknowledgements, report those numbers, list
-all five, state that three usable excerpts do not characterize a voice, and write
-no trait the three do not show. Name the sessions those five came from — if
-`evidence.sessions` shows a single contributing session, say so and recommend
-scanning for further sessions before the voice is used.
+threshold of eight, two of them bare acknowledgements, say in one sentence that
+three usable messages do not describe a voice, and write no trait the three do not
+show. If `evidence.sessions` shows a single contributing session, say so and
+recommend scanning for further sessions before the voice is used.
 
 For a selection whose triage chose three sessions that are all `bugfix_easy` in one
-repository, `warnings` says the chosen set lacks variety. Report that
-sentence, say the voice describes bug-report writing in one repository rather than
-the user, and recommend triaging feature and config sessions from other
+repository, `warnings` says the chosen set lacks variety. Say the voice
+describes bug-report writing in one repository rather than the user, and recommend triaging feature and config sessions from other
 repositories into a new, wider selection before the voice is used.
 
 ## Troubleshooting

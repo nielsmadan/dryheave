@@ -15,7 +15,14 @@ import pytest
 from dryheave.cli import _global_arguments, build_parser
 from dryheave.errors import ConflictError, InputError, LockBusyError, PathError
 from dryheave.filesystem import directory_fd
-from dryheave.skills import OWNER_FILE, SKILL_NAMES, bundled_skill, list_skills, manage_skills
+from dryheave.skills import (
+    OWNER_FILE,
+    SKILL_NAMES,
+    bundled_skill,
+    list_skills,
+    manage_skills,
+    refresh_skills,
+)
 
 
 def test_packaged_skill_resources_have_matching_frontmatter_and_workflows():
@@ -54,6 +61,9 @@ def test_process_skills_describe_pilot_budget_judge_and_checkpoint_keys():
     voice = bundled_skill("dryheave-voice-profile").decode()
     assert "Pacing is the harness's job" in voice
     assert "voice: create NAME" in voice
+    assert '"Yes, save and commit"' in voice
+    assert "`/dryheave-collect` in Claude Code" in voice
+    assert "## Finding a first case" in bundled_skill("dryheave-collect").decode()
 
 
 def test_bundle_listing_and_missing_target_are_read_only(tmp_path):
@@ -443,3 +453,51 @@ def test_unprefixed_command_mentions_name_real_subcommands_and_flags(span):
         if word.startswith("--") and word.split("=")[0] not in known
     ]
     assert not unknown, f"{span!r} spells flags its command does not define: {unknown}"
+
+
+def test_refresh_installs_missing_updates_outdated_and_reports_refused_skills(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "skills"
+    old = target / SKILL_NAMES[0]
+    with monkeypatch.context() as context:
+        context.setattr("dryheave.skills.bundled_skill", lambda _name: b"Old instructions.\n")
+        manage_skills("install", target, (SKILL_NAMES[0], SKILL_NAMES[1]))
+    (target / SKILL_NAMES[1] / "SKILL.md").write_bytes(b"User-edited bytes")
+    refresh = refresh_skills(target)
+    assert refresh.changed == (SKILL_NAMES[0], *SKILL_NAMES[2:])
+    assert [conflict.name for conflict in refresh.conflicts] == [SKILL_NAMES[1]]
+    assert "user-edited" in refresh.conflicts[0].reason
+    assert refresh.error is None
+    assert (old / "SKILL.md").read_bytes() == bundled_skill(SKILL_NAMES[0])
+    assert (target / SKILL_NAMES[1] / "SKILL.md").read_bytes() == b"User-edited bytes"
+    assert target / SKILL_NAMES[1] not in refresh.owned_paths
+    assert refresh_skills(target).changed == ()
+
+
+def test_refresh_reports_a_target_it_cannot_use_without_writing(tmp_path):
+    target = tmp_path / "skills"
+    target.write_text("a file, not a folder")
+    refresh = refresh_skills(target)
+    assert refresh.error is not None
+    assert refresh.changed_paths == ()
+    assert refresh.owned_paths == ()
+    assert target.read_text() == "a file, not a folder"
+
+
+def test_refresh_writes_missing_and_outdated_skills_under_one_lock(tmp_path, monkeypatch):
+    target = tmp_path / "skills"
+    manage_skills("install", target, (SKILL_NAMES[1],))
+    with monkeypatch.context() as context:
+        context.setattr("dryheave.skills.bundled_skill", lambda _name: b"Old instructions.\n")
+        manage_skills("update", target, (SKILL_NAMES[1],))
+    calls = []
+    real = manage_skills
+
+    def recording(action, path, names=()):
+        calls.append((action, names))
+        return real(action, path, names)
+
+    monkeypatch.setattr("dryheave.skills.manage_skills", recording)
+    refresh_skills(target)
+    assert calls == [("update", SKILL_NAMES)]

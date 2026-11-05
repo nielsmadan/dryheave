@@ -339,7 +339,11 @@ def test_case_draft_and_freeze_use_the_cases_folder_and_commit_in_auto_mode(
     log = subprocess.run(
         ["git", "log", "--format=%s"], cwd=workspace, capture_output=True, text=True, check=False
     )
-    assert log.stdout.splitlines() == ["case: freeze mine", "case: draft mine"]
+    assert log.stdout.splitlines() == [
+        "case: freeze mine",
+        "case: draft mine",
+        "workspace: initialize",
+    ]
     assert frozen["alias"] == "mine"
     assert frozen["next"] == (
         "Calibrate before subject spend with case calibrate mine --judge MODEL[@EFFORT]."
