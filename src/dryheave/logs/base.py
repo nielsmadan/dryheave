@@ -9,6 +9,9 @@ from dryheave.filesystem import read_bytes
 from dryheave.models import AgentKind, Name, ObjectId, StrictModel, TokenUsage
 from dryheave.serialization import digest, parse_json
 
+HARNESS_EVENT = "<harness-event>{}</harness-event>"
+HARNESS_PREFIX, HARNESS_SUFFIX = HARNESS_EVENT.split("{}")
+
 
 class ImportLimits(StrictModel):
     max_bytes: int = Field(default=16 * 1024 * 1024, gt=0, le=64 * 1024 * 1024)
@@ -147,13 +150,19 @@ def discover(root: Path, limits: ImportLimits) -> tuple[Path, ...]:
     return tuple(sorted(found))
 
 
+def _task_boundary(event: LogEvent) -> bool:
+    text = event.text.strip()
+    harness = text.startswith(HARNESS_PREFIX) and text.endswith(HARNESS_SUFFIX)
+    return event.kind == "user" and bool(text) and not harness
+
+
 def candidates(session: Session) -> tuple[Candidate, ...]:
     result: list[Candidate] = []
     for index, event in enumerate(session.events):
-        if event.kind != "user" or not event.text.strip():
+        if not _task_boundary(event):
             continue
         following = session.events[index + 1 :]
-        end = next((item for item in following if item.kind == "user"), None)
+        end = next((item for item in following if _task_boundary(item)), None)
         relevant = following[: following.index(end)] if end else following
         signals = ["Nonempty user message starts a possible task boundary."]
         if any(item.kind == "tool_call" for item in relevant):

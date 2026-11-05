@@ -1,0 +1,288 @@
+{
+ "sessions": [
+  {
+   "id": "ses_fixture",
+   "parent_id": null,
+   "directory": "/fixture/repository",
+   "title": "Add a greeting command",
+   "version": "1.19.0",
+   "time_created": 1790848800000
+  },
+  {
+   "id": "ses_child",
+   "parent_id": "ses_fixture",
+   "directory": "/fixture/repository",
+   "title": "Review subtask",
+   "version": "1.19.0",
+   "time_created": 1790848860000
+  }
+ ],
+ "messages": [
+  {
+   "id": "msg_001",
+   "session_id": "ses_fixture",
+   "time_created": 1790848801000,
+   "data": {
+    "role": "user",
+    "time": {
+     "created": 1790848801000
+    },
+    "agent": "build",
+    "model": {
+     "providerID": "fixture-provider",
+     "modelID": "fixture-model"
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_001",
+     "data": {
+      "type": "text",
+      "text": "Add a greeting command.",
+      "time": {
+       "start": 1790848801000
+      }
+     }
+    },
+    {
+     "id": "prt_002",
+     "data": {
+      "type": "text",
+      "synthetic": true,
+      "text": "Called the Read tool with the following input: {\"filePath\":\"/fixture/repository/greet.py\"}"
+     }
+    },
+    {
+     "id": "prt_003",
+     "data": {
+      "type": "file",
+      "mime": "text/x-python",
+      "filename": "greet.py",
+      "url": "file:///fixture/repository/greet.py"
+     }
+    }
+   ]
+  },
+  {
+   "id": "msg_002",
+   "session_id": "ses_fixture",
+   "time_created": 1790848802000,
+   "data": {
+    "role": "assistant",
+    "parentID": "msg_001",
+    "time": {
+     "created": 1790848802000,
+     "completed": 1790848805000
+    },
+    "modelID": "fixture-model",
+    "providerID": "fixture-provider",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/fixture/repository",
+     "root": "/fixture/repository"
+    },
+    "cost": 0.01,
+    "tokens": {
+     "input": 12,
+     "output": 20,
+     "reasoning": 10,
+     "cache": {
+      "read": 100,
+      "write": 50
+     },
+     "total": 192
+    },
+    "finish": "tool-calls"
+   },
+   "parts": [
+    {
+     "id": "prt_004",
+     "data": {
+      "type": "step-start",
+      "snapshot": "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+     }
+    },
+    {
+     "id": "prt_005",
+     "data": {
+      "type": "reasoning",
+      "text": "Private reasoning that must not be replayed.",
+      "time": {
+       "start": 1790848802100,
+       "end": 1790848802200
+      }
+     }
+    },
+    {
+     "id": "prt_006",
+     "data": {
+      "type": "text",
+      "text": "Which punctuation should the greeting use?",
+      "time": {
+       "start": 1790848802300,
+       "end": 1790848802400
+      }
+     }
+    },
+    {
+     "id": "prt_007",
+     "data": {
+      "type": "tool",
+      "tool": "read",
+      "callID": "fixture-call-1",
+      "state": {
+       "status": "completed",
+       "input": {
+        "filePath": "/fixture/repository/greet.py"
+       },
+       "output": "print('Hello')\n",
+       "title": "greet.py",
+       "metadata": {},
+       "time": {
+        "start": 1790848802500,
+        "end": 1790848802600
+       }
+      }
+     }
+    },
+    {
+     "id": "prt_008",
+     "data": {
+      "type": "step-finish",
+      "reason": "tool-calls",
+      "snapshot": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      "cost": 0.01,
+      "tokens": {
+       "input": 12,
+       "output": 20,
+       "reasoning": 10,
+       "cache": {
+        "read": 100,
+        "write": 50
+       }
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "msg_003",
+   "session_id": "ses_fixture",
+   "time_created": 1790848806000,
+   "data": {
+    "role": "user",
+    "time": {
+     "created": 1790848806000
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_009",
+     "data": {
+      "type": "text",
+      "text": "Use a comma after Hello."
+     }
+    }
+   ]
+  },
+  {
+   "id": "msg_004",
+   "session_id": "ses_fixture",
+   "time_created": 1790848807000,
+   "data": {
+    "role": "assistant",
+    "parentID": "msg_003",
+    "time": {
+     "created": 1790848807000,
+     "completed": 1790848808000
+    },
+    "error": {
+     "name": "MessageAbortedError",
+     "data": {
+      "message": "The operation was aborted."
+     }
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_010",
+     "data": {
+      "type": "tool",
+      "tool": "edit",
+      "callID": "fixture-call-2",
+      "state": {
+       "status": "running",
+       "input": {
+        "filePath": "/fixture/repository/greet.py"
+       },
+       "time": {
+        "start": 1790848807500
+       }
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "msg_005",
+   "session_id": "ses_fixture",
+   "time_created": 1790848809000,
+   "data": {
+    "role": "user",
+    "time": {
+     "created": 1790848809000
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_011",
+     "data": {
+      "type": "compaction",
+      "auto": true
+     }
+    }
+   ]
+  },
+  {
+   "id": "msg_006",
+   "session_id": "ses_fixture",
+   "time_created": 1790848810000,
+   "data": {
+    "role": "user",
+    "time": {
+     "created": 1790848810000
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_012",
+     "data": {
+      "type": "text",
+      "text": "Change the command name to greet."
+     }
+    }
+   ]
+  },
+  {
+   "id": "msg_101",
+   "session_id": "ses_child",
+   "time_created": 1790848861000,
+   "data": {
+    "role": "user",
+    "time": {
+     "created": 1790848861000
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_101",
+     "data": {
+      "type": "text",
+      "text": "Review the greeting change."
+     }
+    }
+   ]
+  }
+ ]
+}

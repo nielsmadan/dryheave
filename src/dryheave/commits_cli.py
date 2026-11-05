@@ -15,7 +15,7 @@ from dryheave.commits import (
 )
 from dryheave.errors import InputError
 from dryheave.logs.base import ImportLimits
-from dryheave.logs.service import AGENT_CHOICES
+from dryheave.logs.service import AGENT_CHOICES, AGENT_OPTIONS
 from dryheave.models import AgentKind
 from dryheave.storage import ObjectStore
 
@@ -26,7 +26,7 @@ def _scan(args: argparse.Namespace) -> SessionScan | None:
             raise InputError("--agent selects a parser for --root; supply the log root as well.")
         return None
     if args.agent is None:
-        raise InputError("Scanning --root requires --agent codex, --agent claude or --agent droid.")
+        raise InputError(f"Scanning --root requires {AGENT_OPTIONS}.")
     return scan_sessions(
         args.root,
         AgentKind(args.agent),

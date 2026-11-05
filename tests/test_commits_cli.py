@@ -127,7 +127,10 @@ def test_survey_command_refuses_a_log_root_without_a_parser(tmp_path, capsys) ->
         ["collect", "survey", "--repo", str(git.root), "--root", str(logs)], tmp_path, capsys
     )
     assert code == 2
-    assert "requires --agent codex, --agent claude or --agent droid" in response["error"]["message"]
+    assert response["error"]["message"] == (
+        "Scanning --root requires --agent claude, --agent codex, --agent droid, "
+        "--agent opencode or --agent pi."
+    )
     code, response = run(
         ["collect", "survey", "--repo", str(git.root), "--agent", "codex"], tmp_path, capsys
     )

@@ -22,8 +22,12 @@ only the excerpts that survived.
    one task.
 2. If no selection exists, ask for an explicitly supplied directory of logs and
    find candidates with
-   `dryheave collect scan --agent codex --root DIRECTORY --json`, or
-   `--agent claude` for Claude logs. Never scan agent homes implicitly. Each
+   `dryheave collect scan --agent AGENT --root DIRECTORY --json`, where AGENT is
+   the agent that wrote the logs: `claude`, `codex`, `droid`, `pi` or `opencode`.
+   When asking which logs to use, offer all five. Never scan agent homes
+   implicitly: scan only a folder the user names. For OpenCode that folder holds
+   its `opencode.db`, and each session's `path` is a `DATABASE#SESSION_ID`
+   reference. Each
    scanned session reports `user_messages`: `user_events`, `genuine`,
    `harness_injected`, `unclassified`, `genuine_characters` and
    `median_genuine_characters`. Sessions come back richest first, by genuine
@@ -34,9 +38,9 @@ only the excerpts that survived.
    the candidates deliberately: short sessions and long ones, and sessions from
    several repositories rather than several from one.
 3. Pin the candidates you intend to examine in one selection:
-   `dryheave collect select NAME FILE FILE FILE --agent codex`, using
-   `--agent claude` for Claude logs and `--session ID` for sessions already
-   imported; files and IDs can be combined. A selection holds up to 24 sessions
+   `dryheave collect select NAME FILE FILE FILE --agent AGENT`, with the same
+   AGENT as the scan, and `--session ID` for sessions already imported; files and
+   IDs can be combined. A selection holds up to 24 sessions
    and its membership is immutable: a wider frame is a new selection, never an
    edit. This selection is the **examined** frame, not yet the chosen one.
    `dryheave collect selection NAME --json` lists each session with its recorded

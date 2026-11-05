@@ -1,0 +1,259 @@
+{
+ "sessions": [
+  {
+   "id": "ses_current",
+   "parent_id": null,
+   "directory": "/fixture/repository",
+   "title": "Rename the greeting",
+   "version": "2.2.5",
+   "time_created": 1793000000000
+  },
+  {
+   "id": "ses_current_child",
+   "parent_id": "ses_current",
+   "directory": "/fixture/repository",
+   "title": "Review subtask",
+   "version": "2.2.5",
+   "time_created": 1793000060000
+  }
+ ],
+ "legacy_sessions": [
+  {
+   "id": "ses_current",
+   "parent_id": null,
+   "directory": "/fixture/repository",
+   "title": "Stale legacy copy",
+   "version": "1.19.0",
+   "time_created": 1793000000000
+  }
+ ],
+ "messages": [
+  {
+   "id": "msg_c01",
+   "session_id": "ses_current",
+   "type": "agent-switched",
+   "seq": 1,
+   "time_created": 1793000001000,
+   "data": {
+    "time": {
+     "created": 1793000001000
+    },
+    "agent": "build",
+    "previous": "plan"
+   }
+  },
+  {
+   "id": "msg_c02",
+   "session_id": "ses_current",
+   "type": "user",
+   "seq": 2,
+   "time_created": 1793000002000,
+   "data": {
+    "text": "Rename the greeting to welcome.",
+    "time": {
+     "created": 1793000002000
+    }
+   }
+  },
+  {
+   "id": "msg_c03",
+   "session_id": "ses_current",
+   "type": "synthetic",
+   "seq": 3,
+   "time_created": 1793000003000,
+   "data": {
+    "text": "<system-reminder>\nYou are in build mode.\n</system-reminder>",
+    "description": "Loaded fixture/AGENTS.md",
+    "time": {
+     "created": 1793000003000
+    }
+   }
+  },
+  {
+   "id": "msg_c04",
+   "session_id": "ses_current",
+   "type": "assistant",
+   "seq": 4,
+   "time_created": 1793000004000,
+   "data": {
+    "agent": "build",
+    "model": {
+     "providerID": "fixture-provider",
+     "id": "fixture-model",
+     "variant": "high"
+    },
+    "content": [
+     {
+      "type": "reasoning",
+      "text": "Private reasoning that must not be replayed.",
+      "time": {
+       "created": 1793000004000
+      }
+     },
+     {
+      "type": "text",
+      "text": "Should the old name stay as an alias?"
+     },
+     {
+      "type": "tool",
+      "id": "call-1",
+      "name": "read",
+      "state": {
+       "status": "completed",
+       "input": {
+        "path": "greet.py"
+       },
+       "content": [
+        {
+         "type": "text",
+         "text": "print('Hello')\n"
+        }
+       ],
+       "metadata": {}
+      },
+      "time": {
+       "created": 1793000005000,
+       "completed": 1793000006000
+      }
+     }
+    ],
+    "cost": 0.01,
+    "tokens": {
+     "input": 12,
+     "output": 20,
+     "reasoning": 10,
+     "cache": {
+      "read": 100,
+      "write": 50
+     }
+    },
+    "time": {
+     "created": 1793000004000,
+     "completed": 1793000007000
+    },
+    "finish": "tool-calls"
+   }
+  },
+  {
+   "id": "msg_c05",
+   "session_id": "ses_current",
+   "type": "system",
+   "seq": 5,
+   "time_created": 1793000008000,
+   "data": {
+    "text": "The available tools have changed.",
+    "time": {
+     "created": 1793000008000
+    }
+   }
+  },
+  {
+   "id": "msg_c06",
+   "session_id": "ses_current",
+   "type": "user",
+   "seq": 6,
+   "time_created": 1793000009000,
+   "data": {
+    "text": "No alias.",
+    "time": {
+     "created": 1793000009000
+    }
+   }
+  },
+  {
+   "id": "msg_c07",
+   "session_id": "ses_current",
+   "type": "assistant",
+   "seq": 7,
+   "time_created": 1793000010000,
+   "data": {
+    "agent": "build",
+    "model": {
+     "providerID": "fixture-provider",
+     "id": "fixture-model"
+    },
+    "content": [
+     {
+      "type": "tool",
+      "id": "call-2",
+      "name": "edit",
+      "state": {
+       "status": "error",
+       "input": {
+        "path": "greet.py"
+       },
+       "error": {
+        "type": "tool.error",
+        "message": "File changed on disk."
+       }
+      },
+      "time": {
+       "created": 1793000010000,
+       "completed": 1793000011000
+      }
+     },
+     {
+      "type": "tool",
+      "id": "call-3",
+      "name": "bash",
+      "state": {
+       "status": "running",
+       "input": {
+        "command": "pytest"
+       }
+      },
+      "time": {
+       "created": 1793000012000
+      }
+     }
+    ],
+    "tokens": {
+     "input": 5,
+     "output": 7,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "error": {
+     "type": "aborted",
+     "message": "The turn was aborted."
+    },
+    "time": {
+     "created": 1793000010000,
+     "completed": 1793000013000
+    }
+   }
+  },
+  {
+   "id": "msg_c08",
+   "session_id": "ses_current",
+   "type": "idle",
+   "seq": 8,
+   "time_created": 1793000014000,
+   "data": {
+    "outcome": "failed",
+    "error": {
+     "type": "aborted",
+     "message": "The turn was aborted."
+    },
+    "time": {
+     "created": 1793000014000
+    }
+   }
+  },
+  {
+   "id": "msg_c11",
+   "session_id": "ses_current_child",
+   "type": "user",
+   "seq": 9,
+   "time_created": 1793000061000,
+   "data": {
+    "text": "Review the rename.",
+    "time": {
+     "created": 1793000061000
+    }
+   }
+  }
+ ]
+}

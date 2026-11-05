@@ -27,16 +27,25 @@ Each scanned session also reports the `cwd` and `baseline_commit` its log record
 the working directory Codex wrote into `session_meta`, and the `git.commit_hash` of the
 repository when the session started. Both are `null` when the log records neither.
 Neither is inferred or substituted. A Claude log records a branch label but no commit
-hash, and a Droid log records no Git metadata at all, so for both the `baseline_commit`
-is always `null`. That recorded baseline is the join key the commit survey below uses,
-so a Claude or Droid session can be selected by path but is never found by
-`collect commit`.
+hash, Droid and Pi logs record no Git metadata at all, and OpenCode records only its
+own snapshot hashes, so for all four the `baseline_commit` is always `null`. That
+recorded baseline is the join key the commit survey below uses, so such a session can
+be selected by path but is never found by `collect commit`.
 
 A voice built on one session describes that session. Select several, spanning
 different kinds of work, up to the 24 a selection holds. Selection membership is
 immutable, so widening one means creating a new selection with more files.
-`--agent codex`, `--agent claude` and `--agent droid` are accepted, for scanning and
-for selecting.
+`--agent claude`, `--agent codex`, `--agent droid`, `--agent pi` and `--agent opencode`
+are accepted, for scanning and for selecting. Pass `--root` a log directory you chose:
+for Pi, a folder of session `.jsonl` files (Pi writes them under
+`~/.pi/agent/sessions`). OpenCode keeps every session in one SQLite database,
+`opencode.db` in its data directory (`~/.local/share/opencode` by default); point
+`--root` at the folder holding it. Only that folder itself is searched, not its
+subfolders. The scan then reports each session as `DATABASE#SESSION_ID`, and that
+reference is what `collect select` and `collect import` take as the file. The database
+is opened without writing anything beside it, and only its session tables are queried.
+Quit OpenCode first: while it has changes not yet written into the database, the read
+is refused rather than missing them.
 
 ## Start from Git history
 
@@ -196,8 +205,9 @@ $dryheave-agent-profile Prepare Terra low and high profiles for the frozen case.
 For Claude Code, which finds the skills init installed in `.claude/skills`,
 invoke `/dryheave-voice-profile`, `/dryheave-generate-problem` and
 `/dryheave-agent-profile` with the same selection/request names. Use
-`collect select ... --agent claude` or `--agent droid` when the selected source logs
-are Claude or Droid logs; the operator's agent need not match the source-log agent.
+`collect select ... --agent claude`, `--agent droid`, `--agent pi` or
+`--agent opencode` to match the selected source logs; the operator's agent need not
+match the source-log agent.
 
 The operator reads bounded selected evidence, writes internal draft JSON, records
 its decisions, and runs public validation/freezing commands. You supply task
@@ -247,8 +257,8 @@ their imported membership permanently, even if source files or store aliases mov
 | `problem freeze REQUEST CANDIDATE --expect-revision N` | Recheck the validation reference and freeze the existing case model; a draft at `cases/NAME/case.json` also points alias `NAME` at the frozen case. |
 
 `--json` works on every command. Selection import also accepts existing
-`--max-bytes` and `--max-events` bounds, and `--agent claude` or `--agent droid` for
-Claude or Droid logs.
+`--max-bytes` and `--max-events` bounds, and `--agent claude`, `--agent droid`,
+`--agent pi` or `--agent opencode` for logs from those agents.
 Use one store consistently; workspace defaults apply, and an explicit `--store`
 still selects a different store. Selection IDs refer to sessions in that store.
 

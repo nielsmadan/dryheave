@@ -15,8 +15,8 @@ from dryheave.commits import session_baseline
 from dryheave.commits_cli import register_commit_survey
 from dryheave.errors import CancelledError, ConflictError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
-from dryheave.logs.base import ImportLimits, Session, candidates, discover
-from dryheave.logs.service import AGENT_CHOICES, import_session, parser_for
+from dryheave.logs.base import ImportLimits, Session, candidates
+from dryheave.logs.service import AGENT_CHOICES, discover_sources, import_session, parser_for
 from dryheave.mining import user_message_profile
 from dryheave.mining_cli import calibrate_next, register_mining, register_mining_collection
 from dryheave.models import AgentKind, Name, ObjectKind, StrictModel
@@ -45,9 +45,10 @@ def _limits(args: argparse.Namespace) -> ImportLimits:
 
 def _scan(args: argparse.Namespace, _store: ObjectStore) -> dict[str, JsonValue]:
     limits = _limits(args)
-    parser = parser_for(AgentKind(args.agent))
+    agent = AgentKind(args.agent)
+    parser = parser_for(agent)
     ranked: list[tuple[tuple[int, int, str], JsonValue]] = []
-    for path in discover(args.root, limits):
+    for path in discover_sources(agent, args.root, limits):
         session = parser(path, limits)
         profile = user_message_profile(session)
         baseline = session_baseline(path, session)

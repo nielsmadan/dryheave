@@ -255,6 +255,156 @@ def write_baseline_log(
     )
 
 
+OPENCODE_SCHEMA = """
+CREATE TABLE session (
+    id text PRIMARY KEY, project_id text NOT NULL, parent_id text, slug text NOT NULL,
+    directory text NOT NULL, title text NOT NULL, version text NOT NULL,
+    time_created integer NOT NULL, time_updated integer NOT NULL
+);
+CREATE TABLE message (
+    id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL,
+    time_updated integer NOT NULL, data text NOT NULL
+);
+CREATE TABLE part (
+    id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL,
+    time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL
+);
+CREATE TABLE account (
+    id text PRIMARY KEY, email text NOT NULL, access_token text NOT NULL
+);
+"""
+
+
+def write_opencode_database(path: Path, fixture: Path) -> Path:
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    recorded = json.loads(fixture.read_text())
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.executescript(OPENCODE_SCHEMA)
+        connection.execute(
+            "INSERT INTO account VALUES ('fixture-account', 'fixture@example.invalid', 'not-a-token')"
+        )
+        connection.executemany(
+            "INSERT INTO session VALUES (?, 'fixture-project', ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    item["id"],
+                    item["parent_id"],
+                    item["id"],
+                    item["directory"],
+                    item["title"],
+                    item["version"],
+                    item["time_created"],
+                    item["time_created"],
+                )
+                for item in recorded["sessions"]
+            ],
+        )
+        for message in recorded["messages"]:
+            created = message["time_created"]
+            connection.execute(
+                "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+                (
+                    message["id"],
+                    message["session_id"],
+                    created,
+                    created,
+                    json.dumps(message["data"]),
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        part["id"],
+                        message["id"],
+                        message["session_id"],
+                        created,
+                        created,
+                        json.dumps(part["data"]),
+                    )
+                    for part in message["parts"]
+                ],
+            )
+    return path
+
+
+OPENCODE_CURRENT_SCHEMA = (
+    OPENCODE_SCHEMA
+    + """
+CREATE TABLE session_v2 (
+    id text PRIMARY KEY, project_id text NOT NULL, parent_id text, slug text NOT NULL,
+    directory text NOT NULL, title text, version text NOT NULL,
+    time_created integer NOT NULL, time_updated integer NOT NULL
+);
+CREATE TABLE session_message (
+    id text PRIMARY KEY, session_id text NOT NULL, type text NOT NULL, seq integer NOT NULL,
+    time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL
+);
+CREATE TABLE session_part (
+    message_id text NOT NULL, session_id text NOT NULL, ordinal integer NOT NULL,
+    type text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL,
+    data text NOT NULL
+);
+"""
+)
+
+
+def write_opencode_current_database(path: Path, fixture: Path) -> Path:
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    recorded = json.loads(fixture.read_text())
+
+    def sessions(key: str) -> list[tuple[object, ...]]:
+        return [
+            (
+                item["id"],
+                item["parent_id"],
+                item["id"],
+                item["directory"],
+                item["title"],
+                item["version"],
+                item["time_created"],
+                item["time_created"],
+            )
+            for item in recorded[key]
+        ]
+
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.executescript(OPENCODE_CURRENT_SCHEMA)
+        connection.execute(
+            "INSERT INTO account VALUES ('fixture-account', 'fixture@example.invalid', 'not-a-token')"
+        )
+        connection.executemany(
+            "INSERT INTO session VALUES (?, 'fixture-project', ?, ?, ?, ?, ?, ?, ?)",
+            sessions("legacy_sessions"),
+        )
+        connection.executemany(
+            "INSERT INTO session_v2 VALUES (?, 'fixture-project', ?, ?, ?, ?, ?, ?, ?)",
+            sessions("sessions"),
+        )
+        connection.executemany(
+            "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    item["id"],
+                    item["session_id"],
+                    item["type"],
+                    item["seq"],
+                    item["time_created"],
+                    item["time_created"],
+                    json.dumps(item["data"]),
+                )
+                for item in recorded["messages"]
+            ],
+        )
+    return path
+
+
 def build_historical_repo(root: Path) -> tuple[Path, str, str, str]:
     from dryheave.repositories import Git, SnapshotLimits
 

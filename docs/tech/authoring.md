@@ -582,7 +582,8 @@ Snapshot `source_path` and `source_git_path` are curator-only audit provenance.
 baseline ancestry, including unreachable objects. `audit_coverage` is
 `complete_at_capture` or `partial`, with `audit_limit` and warnings. This inventory
 cannot cover commits created later. `FrozenCase.source_path_hash` copies SHA-256 of
-the imported transcript's absolute path string, so later observed tool paths can
+the imported transcript's absolute path string (for OpenCode, the database file's
+path, without the `#SESSION_ID` suffix), so later observed tool paths can
 be compared without requiring the original Session. Preserve matching-path evidence
 in later audit results; a hash is not an access-prevention mechanism.
 
@@ -596,8 +597,17 @@ access by an agent.
 
 `logs.service.import_session(store, path, AgentKind, limits)` freezes a `Session`.
 `logs.service.parser_for(AgentKind)` selects the adapter; `logs.codex.parse`,
-`logs.claude.parse` and `logs.droid.parse` return the same model without writing.
-`logs.base.discover` scans non-symlink JSONL files with depth/entry limits.
+`logs.claude.parse`, `logs.droid.parse`, `logs.pi.parse` and `logs.opencode.parse`
+return the same model without writing. `logs.service.discover_sources(AgentKind, root,
+limits)` lists a root's sources for `collect scan` and the commit survey: by default
+`logs.base.discover`, which scans non-symlink JSONL files with depth/entry limits, and
+for OpenCode `logs.opencode.discover`, which looks only directly inside the root for
+`opencode.db` and channel `opencode-NAME.db` files (OpenCode's data directory also
+holds large `snapshot/` trees) and lists each session in them. A database it cannot
+open is listed as the bare database path, so the commit survey records it as a skipped
+source with the read error instead of failing the scan.
+`AGENT_CHOICES` and the `AGENT_OPTIONS` phrase in error messages derive from the
+parser registry.
 `ImportLimits` defaults to 16 MiB, 20,000 source records, 10,000 scan entries and
 12 directory levels; CLI import/scan expose byte and event limits. A malformed
 record is skipped with a source-line warning; unterminated final records, missing
@@ -619,7 +629,58 @@ messages, marked `visibility: user_only` for hook and interface notices and
 filtered, and their text is carried in a `<harness-event>` wrapper so the shared
 `mining.classify_user_event` patterns report them as `harness_injected` rather than as
 the human speaking. A Droid log carries no Git metadata, so `recorded_baseline` is
-always `None` and every Droid session records a `baseline_unknown` warning.
+always `None` and every Droid session records a `baseline_unknown` warning. For every
+agent, `logs.base.candidates` starts a task candidate only at a user event that is not
+wholly a `<harness-event>`, so injected traffic stays inside the prompt it followed.
+
+Pi writes one version-3 JSONL file per session. Its `session` header supplies the
+session ID, log version, `cwd` and `parentSession` (the parent file, reported as
+`parent_session_id`); `session_info` supplies the title. Message entries map `user`
+text blocks to user events, `assistant` text and `toolCall` blocks to assistant and
+tool-call events, `toolResult` to tool results, and a user's `bashExecution` to a
+tool call and result tagged `initiator: user`. An assistant `stopReason` of
+`aborted`, `error` or `length` adds a lifecycle event. `model_change` and
+`thinking_level_change` become metadata events. Extension `custom_message` entries
+reach the model as user text, so they are user events in a `<harness-event>`
+wrapper. System prompt messages, thinking blocks, images and `custom` state are
+dropped. Entries form a tree through `parentId`; events follow file order, and an
+entry whose parent is not the previous entry records a `branched` warning, as
+compaction records `compacted`. Pi usage reports reasoning inside `output`, keyed by
+`responseId` or the entry ID. Pi records no Git metadata (`baseline_unknown`).
+
+OpenCode keeps sessions in a SQLite database (`opencode.db`, or
+`opencode-CHANNEL.db`), not JSONL. A source is the reference `DATABASE#SESSION_ID`
+(`logs.opencode.source_path` / `split_source`). The parser opens the file with
+SQLite's `mode=ro&immutable=1` URI, which creates no `-wal` or `-shm` file beside it.
+Because an immutable reader ignores the write-ahead log, a database whose `-wal` file
+is not empty (OpenCode is running or did not checkpoint) is refused with a request to
+quit OpenCode first. Two storage layouts are read, and only their session tables are
+queried, never the account or credential tables beside them. Current OpenCode keeps
+sessions in `session_v2` and one `session_message` row per message, read in `seq`
+order; it migrates older sessions there but leaves the legacy tables in place, so this
+layout wins whenever its tables exist. Older databases have only `session`, `message`
+and `part`, read in OpenCode's order (message creation time, then part ID). Each row
+is one numbered source line, and `max_events` and `max_bytes` bound the rows and their
+stored JSON size before anything is loaded; for the current layout the event bound
+counts each message plus two events per content item. The content hash covers the
+session row and those rows.
+
+In the current layout a `user` message is a user event, a `synthetic` message is a user
+event in the `<harness-event>` wrapper, and `system` and `agent-switched` messages are
+metadata. An `assistant` message's text items become assistant events, its tool items
+a tool call and, once completed or failed, a tool result (the error message when
+failed); its reasoning items are dropped, its `error` adds a lifecycle event, and its
+`tokens` become usage. An `idle` message is a lifecycle event with its outcome.
+
+In the legacy layout, text parts become user or assistant events; a user text part marked
+`synthetic` or `ignored` carries the `<harness-event>` wrapper. A tool part becomes a
+tool call and, once completed or failed, a tool result. File, agent and subtask
+parts are metadata, a compaction part is a lifecycle event plus a `compacted`
+warning, and a message `error` adds a lifecycle event after that message's parts.
+Reasoning, step and patch parts are dropped. OpenCode records `reasoning` apart from
+`output`, so usage adds the two. Step snapshot hashes belong to OpenCode's own
+snapshot repository, not the project, so no baseline is recorded
+(`baseline_unknown`); `session.parent_id` becomes `parent_session_id`.
 
 Codex dialogue deduplication indexes ordered candidates by native ID, text and
 turn. It consumes the earliest compatible event representation, including

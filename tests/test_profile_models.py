@@ -132,6 +132,12 @@ def test_recipe_names_a_live_codex_subject(agent, config_source, live_codex):
     assert recipe.live_codex is live_codex
 
 
+@pytest.mark.parametrize("agent", [AgentKind.DROID, AgentKind.PI, AgentKind.OPENCODE])
+def test_recipe_rejects_agents_that_only_supply_logs(agent):
+    with pytest.raises(ValidationError, match="only Claude and Codex subjects"):
+        NativeRecipe(agent=agent, executable="native")
+
+
 def test_runtime_file_reference_serializes_its_default_source_only_when_set():
     explicit = codex_auth_reference("OPAQUE", default_source=None)
     assert explicit.model_dump(mode="json") == {

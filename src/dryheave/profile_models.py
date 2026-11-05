@@ -133,6 +133,12 @@ class NativeRecipe(StrictModel):
         return value
 
     @model_validator(mode="after")
+    def subject_contract(self) -> Self:
+        if self.agent not in {AgentKind.CLAUDE, AgentKind.CODEX}:
+            raise ValueError("Native recipes run only Claude and Codex subjects")
+        return self
+
+    @model_validator(mode="after")
     def live_contract(self) -> Self:
         if self.config_source == "live":
             if self.claude_discovery is not None or self.codex_discovery is not None:

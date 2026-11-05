@@ -9,11 +9,10 @@ from dryheave.errors import DryheaveError, InputError, LimitError
 from dryheave.logs.base import (
     ImportLimits,
     Session,
-    discover,
     recorded_baseline,
     recorded_cwd,
 )
-from dryheave.logs.service import parser_for
+from dryheave.logs.service import discover_sources, parser_for
 from dryheave.models import AgentKind, StrictModel
 from dryheave.repositories import Git, SnapshotLimits
 
@@ -466,7 +465,7 @@ def scan_sessions(root: Path, agent: AgentKind, limits: ImportLimits | None = No
     parser = parser_for(agent)
     sessions: list[ScannedSession] = []
     skipped: list[SkippedSession] = []
-    for path in discover(root, limits):
+    for path in discover_sources(agent, root, limits):
         try:
             sessions.append(session_baseline(path, parser(path, limits)))
         except (DryheaveError, OSError, ValidationError) as error:

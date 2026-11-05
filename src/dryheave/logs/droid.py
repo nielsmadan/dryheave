@@ -3,6 +3,7 @@ from pathlib import Path
 from pydantic import JsonValue
 
 from dryheave.logs.base import (
+    HARNESS_EVENT,
     Diagnostic,
     ImportLimits,
     LogEvent,
@@ -16,7 +17,6 @@ from dryheave.logs.base import (
 from dryheave.models import AgentKind
 from dryheave.serialization import digest
 
-HARNESS_EVENT = "<harness-event>{}</harness-event>"
 MESSAGE_KEYS = frozenset(
     {
         "visibility",

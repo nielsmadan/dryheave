@@ -46,7 +46,7 @@ from dryheave.cases import CaseDraft, freeze_case, read_draft, validate_case
 from dryheave.errors import ConflictError, InputError
 from dryheave.filesystem import atomic_write, read_bytes
 from dryheave.logs.base import EvidenceExcerpt, ImportLimits, LogEvent, Session, recorded_cwd
-from dryheave.logs.service import import_session, verify_evidence
+from dryheave.logs.service import AGENT_OPTIONS, import_session, verify_evidence
 from dryheave.models import AgentKind, Name, ObjectKind, StrictModel
 from dryheave.personas import freeze_persona, load_frozen_persona
 from dryheave.repositories import load_repository
@@ -126,7 +126,7 @@ def select_logs(
     if not 1 <= len(paths) + len(sessions) <= MAX_SELECTED_SESSIONS:
         raise InputError("Explicitly select 1-24 files or imported sessions.")
     if paths and agent is None:
-        raise InputError("Selected files require --agent codex, --agent claude or --agent droid.")
+        raise InputError(f"Selected files require {AGENT_OPTIONS}.")
     with edit_catalog(root, expected_revision) as catalog:
         if name in catalog.selections:
             raise ConflictError("Selection membership is immutable; choose a new selection name.")

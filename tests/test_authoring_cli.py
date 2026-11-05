@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import write_baseline_log
+from conftest import write_baseline_log, write_opencode_database
 from dryheave.cli import main
 from dryheave.workspaces import initialize_workspace
 
@@ -267,6 +267,51 @@ def test_collect_accepts_droid_logs(tmp_path: Path, capsys) -> None:
     session = json.loads(capsys.readouterr().out)["data"]["session"]
     assert session["agent"] == "droid"
     assert session["source_version"] == "2"
+
+
+def test_collect_accepts_pi_logs(tmp_path: Path, capsys) -> None:
+    common = ["--store", str(tmp_path / "store"), "--json"]
+    root = tmp_path / "logs"
+    root.mkdir()
+    (root / "pi.jsonl").write_bytes((FIXTURES / "pi-recorded.jsonl").read_bytes())
+    assert main([*common, "collect", "scan", "--agent", "pi", "--root", str(root)]) == 0
+    scanned = json.loads(capsys.readouterr().out)["data"]["sessions"]
+    assert [(item["source_id"], item["cwd"], item["baseline_commit"]) for item in scanned] == [
+        ("fixture-session", "/fixture/repository", None)
+    ]
+    assert (
+        scanned[0]["user_messages"]["genuine"],
+        scanned[0]["user_messages"]["harness_injected"],
+    ) == (3, 2)
+    assert main([*common, "collect", "import", str(root / "pi.jsonl"), "--agent", "pi"]) == 0
+    identifier = json.loads(capsys.readouterr().out)["data"]["id"]
+    assert main(["collect", "show", identifier, *common]) == 0
+    session = json.loads(capsys.readouterr().out)["data"]["session"]
+    assert (session["agent"], session["source_version"]) == ("pi", "3")
+
+
+def test_collect_scans_and_imports_opencode_sessions(tmp_path: Path, capsys) -> None:
+    common = ["--store", str(tmp_path / "store"), "--json"]
+    root = tmp_path / "opencode"
+    root.mkdir()
+    database = write_opencode_database(root / "opencode.db", FIXTURES / "opencode-recorded.json")
+    assert main([*common, "collect", "scan", "--agent", "opencode", "--root", str(root)]) == 0
+    scanned = json.loads(capsys.readouterr().out)["data"]["sessions"]
+    assert [(item["path"], item["source_id"]) for item in scanned] == [
+        (f"{database}#ses_fixture", "ses_fixture"),
+        (f"{database}#ses_child", "ses_child"),
+    ]
+    assert (
+        scanned[0]["user_messages"]["genuine"],
+        scanned[0]["user_messages"]["harness_injected"],
+    ) == (3, 1)
+    assert main([*common, "collect", "import", scanned[0]["path"], "--agent", "opencode"]) == 0
+    identifier = json.loads(capsys.readouterr().out)["data"]["id"]
+    assert main(["collect", "show", identifier, *common]) == 0
+    session = json.loads(capsys.readouterr().out)["data"]["session"]
+    assert (session["agent"], session["source_id"]) == ("opencode", "ses_fixture")
+    assert main([*common, "collect", "import", str(database), "--agent", "opencode"]) == 2
+    assert "DATABASE#SESSION_ID" in json.loads(capsys.readouterr().err)["error"]["message"]
 
 
 def run(capsys, *arguments):

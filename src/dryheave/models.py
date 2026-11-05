@@ -76,6 +76,8 @@ class AgentKind(StrEnum):
     CLAUDE = "claude"
     CODEX = "codex"
     DROID = "droid"
+    PI = "pi"
+    OPENCODE = "opencode"
 
 
 Effort = Literal["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]

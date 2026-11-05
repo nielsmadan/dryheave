@@ -1,7 +1,7 @@
 # Dryheave
 
 Dryheave turns coding-agent sessions into reusable interactive benchmarks. Import
-Codex, Claude or Droid logs, curate a task and user stand-in, freeze its
+Codex, Claude, Droid, Pi or OpenCode logs, curate a task and user stand-in, freeze its
 historical Git repository and selected native configuration, then compare repeated
 runs with retained evidence. Subjects use their real terminal UI. Hidden checks
 and optional model judgments run after the subject stops; reports keep audit
@@ -73,7 +73,7 @@ refreshes the skills in both folders and adds missing `.gitignore` lines, then
 commits them as your `[git] commit` mode says.
 
 For selected-log mining, use `collect select NAME FILE --agent codex` (or
-`--agent claude`, `--agent droid`), then
+`--agent claude`, `--agent droid`, `--agent pi`, `--agent opencode`), then
 `problem request [DESCRIPTION] --selection NAME [--micro-bug]`. The packaged
 voice/problem/profile skills curate internal drafts and retain supported tasks,
 rejections and gaps. Follow [selected-log authoring](docs/user/selected-log-authoring.md)
